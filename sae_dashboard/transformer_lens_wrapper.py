@@ -1,4 +1,5 @@
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Sequence, Tuple
 
@@ -39,37 +40,93 @@ class TransformerLensWrapper(nn.Module):
 
     def validate_hook_points(self):
         """Checks that the hook points are valid and that the model has them"""
-        assert (
-            self.activation_config.primary_hook_point in self.model.hook_dict
-        ), f"Invalid hook point: {self.activation_config.primary_hook_point}"
+        assert self.activation_config.primary_hook_point in self.model.hook_dict, (
+            f"Invalid hook point: {self.activation_config.primary_hook_point}"
+        )
 
         for hook_point in self.activation_config.auxiliary_hook_points:
-            assert (
-                hook_point in self.model.hook_dict
-            ), f"Invalid hook point: {hook_point}"
+            assert hook_point in self.model.hook_dict, (
+                f"Invalid hook point: {hook_point}"
+            )
 
     def get_layer(self, hook_point: str):
         """Get the layer (so we can do the early stopping in our forward pass)"""
         layer_match = re.match(r"blocks\.(\d+)\.", hook_point)
-        assert (
-            layer_match
-        ), f"Error: expecting hook_point to be 'blocks.{{layer}}.{{...}}', but got {hook_point!r}"
+        assert layer_match, (
+            f"Error: expecting hook_point to be 'blocks.{{layer}}.{{...}}', but got {hook_point!r}"
+        )
         return int(layer_match.group(1))
 
-    def forward(  # type: ignore
+    @staticmethod
+    def _activation_shapes_match_tokens(
+        activation_dict: Dict[str, Tensor],
+        tokens: Int[Tensor, "batch seq"],
+    ) -> bool:
+        expected_shape = tuple(tokens.shape[:2])
+        return all(
+            activation.ndim < 2 or tuple(activation.shape[:2]) == expected_shape
+            for activation in activation_dict.values()
+        )
+
+    @staticmethod
+    def _concat_activation_dicts(
+        activation_dicts: list[Dict[str, Tensor]],
+    ) -> Dict[str, Tensor]:
+        if not activation_dicts:
+            return {}
+        return {
+            key: torch.cat(
+                [activation_dict[key] for activation_dict in activation_dicts], dim=0
+            )
+            for key in activation_dicts[0]
+        }
+
+    def _should_bypass_final_layer_logits(self, return_logits: bool) -> bool:
+        if return_logits:
+            return False
+        model_cfg = getattr(self.model, "cfg", None)
+        n_layers = getattr(model_cfg, "n_layers", None)
+        return isinstance(n_layers, int) and self.hook_layer == n_layers - 1
+
+    def _resolve_body_model(self) -> nn.Module | None:
+        original_model = getattr(self.model, "original_model", None)
+        if original_model is None:
+            return None
+        for attr_name in ("model", "transformer", "language_model", "base_model"):
+            body_model = getattr(original_model, attr_name, None)
+            if isinstance(body_model, nn.Module):
+                return body_model
+        return None
+
+    def _run_final_layer_without_logits(
         self,
         tokens: Int[Tensor, "batch seq"],
-        return_logits: bool = True,
+        hooks: list[tuple[str, Callable[[Tensor, HookPoint], None]]],
+    ) -> None:
+        body_model = self._resolve_body_model()
+        if body_model is None:
+            raise RuntimeError(
+                "Final-layer activation-only forward requires a Bridge body model to bypass lm_head."
+            )
+
+        hooks_context = getattr(self.model, "hooks", None)
+        context_manager = hooks_context(fwd_hooks=hooks) if callable(hooks_context) else nullcontext()
+        with context_manager:
+            body_model(input_ids=tokens)
+
+    def _run_with_hooks_once(
+        self,
+        tokens: Int[Tensor, "batch seq"],
+        return_logits: bool,
+        hooks: list[tuple[str, Callable[[Tensor, HookPoint], None]]],
     ) -> Dict[str, Tensor]:
-        """Executes a forward pass, collecting specific hook point activations and optionally logit outputs"""
-        activation_dict = {}
+        activation_dict: Dict[str, Tensor] = {}
+        return_type = "logits" if return_logits else None
 
         def build_act_dict(
-            hooks: Sequence[Tuple[str, Callable[[Tensor, HookPoint], None]]],
+            hooks_to_collect: Sequence[Tuple[str, Callable[[Tensor, HookPoint], None]]],
         ) -> None:
-            for hook_point, _ in hooks:
-                # The hook functions work by storing data in model's hook context, so we pop them back out
-
+            for hook_point, _ in hooks_to_collect:
                 activation: Tensor = self.model.hook_dict[hook_point].ctx.pop(
                     "activation"
                 )
@@ -77,6 +134,32 @@ class TransformerLensWrapper(nn.Module):
                     activation = activation.flatten(-2, -1)
                 activation_dict[hook_point] = activation
 
+        output = None
+        if self._should_bypass_final_layer_logits(return_logits):
+            self._run_final_layer_without_logits(tokens, hooks)
+        else:
+            output = self.model.run_with_hooks(
+                tokens,
+                return_type=return_type,
+                stop_at_layer=self.hook_layer + 1,
+                fwd_hooks=hooks,  # type: ignore[arg-type]
+            )
+
+        build_act_dict(hooks)
+
+        if return_logits:
+            activation_dict["output"] = output
+        else:
+            del output
+
+        return activation_dict
+
+    def forward(  # type: ignore
+        self,
+        tokens: Int[Tensor, "batch seq"],
+        return_logits: bool = True,
+    ) -> Dict[str, Tensor]:
+        """Executes a forward pass, collecting specific hook point activations and optionally logit outputs"""
         hooks: List[Tuple[str, Callable[[Tensor, HookPoint], None]]] = [
             (self.activation_config.primary_hook_point, self.hook_fn_store_act)
         ] + [
@@ -84,17 +167,34 @@ class TransformerLensWrapper(nn.Module):
             for point in self.activation_config.auxiliary_hook_points
         ]
 
-        output: Tensor = self.model.run_with_hooks(
-            tokens,
-            stop_at_layer=self.hook_layer + 1,
-            fwd_hooks=hooks,  # type: ignore
-        )
+        try:
+            model_device = next(self.model.parameters()).device
+        except StopIteration:
+            model_device = tokens.device
+        if tokens.device != model_device:
+            tokens = tokens.to(model_device)
 
-        build_act_dict(hooks)
+        activation_dict = self._run_with_hooks_once(tokens, return_logits, hooks)
+        if self._activation_shapes_match_tokens(activation_dict, tokens):
+            return activation_dict
 
-        if return_logits:
-            activation_dict["output"] = output
-        return activation_dict
+        if tokens.shape[0] <= 1:
+            observed_shapes = {
+                name: tuple(activation.shape)
+                for name, activation in activation_dict.items()
+            }
+            raise RuntimeError(
+                "TransformerBridge returned activation shapes that do not match the input tokens and "
+                "the minibatch cannot be split further. "
+                f"tokens_shape={tuple(tokens.shape)} observed_shapes={observed_shapes}"
+            )
+
+        split_size = max(1, tokens.shape[0] // 2)
+        repaired_chunks = [
+            self.forward(token_chunk, return_logits=return_logits)
+            for token_chunk in tokens.split(split_size)
+        ]
+        return self._concat_activation_dicts(repaired_chunks)
 
     def hook_fn_store_act(self, activation: torch.Tensor, hook: HookPoint):
         hook.ctx["activation"] = activation
@@ -105,7 +205,11 @@ class TransformerLensWrapper(nn.Module):
 
     @property
     def W_U(self):
-        return self.model.W_U
+        if hasattr(self.model, "W_U"):
+            return self.model.W_U
+        if hasattr(self.model, "unembed") and hasattr(self.model.unembed, "W_U"):
+            return self.model.unembed.W_U
+        raise AttributeError(f"{type(self.model).__name__} does not expose W_U")
 
     @property
     def W_out(self):
