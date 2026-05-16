@@ -1,7 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
+DEFAULT_PROMPT_BUCKET_CEILINGS = (64, 128, 192, 256)
+DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
+DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT = 4.0
+DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO = 8
 
 
 @dataclass
@@ -16,12 +20,27 @@ class NeuronpediaRunnerConfig:
     from_local_sae: bool = False
     sparsity_threshold: int = DEFAULT_SPARSITY_THRESHOLD
     huggingface_dataset_path: str = ""
+    huggingface_dataset_config_name: Optional[str] = None
+    huggingface_dataset_split: Optional[str] = None
+    huggingface_dataset_text_field: Optional[str] = None
+    pretokenized_dataset_path: Optional[str] = None
+    shared_tokens_file: Optional[str] = None
+    deduplicate_shared_prompt_tokens: bool = True
+    strict_shared_prompt_count: bool = False
+    prompt_bucket_schedule_file: Optional[str] = None
+    auto_prompt_bucket_schedule: bool = False
+    prompt_bucket_ceilings: tuple[int, ...] = field(default_factory=tuple)
+    prompt_bucket_scale_limit: float = DEFAULT_PROMPT_BUCKET_SCALE_LIMIT
+    prompt_primary_acts_scale_limit: float = DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT
+    prompt_batch_size_round_to: int = DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO
+    dataset_streaming: bool = True
 
     # ACTIVATION STORE PARAMETERS
     # token pars
     n_prompts_total: int = 24576
     n_tokens_in_prompt: int = 128
     n_prompts_in_forward_pass: int = 32
+    primary_acts_batch_size: Optional[int] = None
 
     # batching
     n_features_at_a_time: int = 128

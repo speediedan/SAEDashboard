@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -28,6 +29,15 @@ Arr = np.ndarray
 
 # Type alias for model wrapper types
 ModelWrapperType = Union[TransformerLensWrapper, HuggingFaceModelWrapper]
+
+
+@dataclass(frozen=True)
+class PromptTokenMinibatch:
+    prompt_indices: tuple[int, ...]
+    tokens: Int[Tensor, "batch seq"]
+    seq_length: int
+    primary_acts_batch_size: int | None = None
+    cache_key: str | None = None
 
 
 class FeatureDataGenerator:
@@ -61,18 +71,74 @@ class FeatureDataGenerator:
             self.dfa_calculator = None
 
     @torch.inference_mode()
-    def batch_tokens(
-        self, tokens: Int[Tensor, "batch seq"]
-    ) -> list[Int[Tensor, "batch seq"]]:
+    def batch_tokens(self, tokens: Int[Tensor, "batch seq"]) -> list[PromptTokenMinibatch]:
+        if self.cfg.prompt_minibatch_schedule:
+            token_minibatches: list[PromptTokenMinibatch] = []
+            for schedule_entry in self.cfg.prompt_minibatch_schedule:
+                prompt_indices = tuple(int(index) for index in schedule_entry.get("prompt_indices", []))
+                if not prompt_indices:
+                    continue
+                seq_length = int(schedule_entry.get("seq_length", tokens.shape[1]))
+                if seq_length <= 0 or seq_length > tokens.shape[1]:
+                    raise ValueError(
+                        f"Prompt minibatch seq_length {seq_length} is out of range for "
+                        f"tokens shape {tuple(tokens.shape)}"
+                    )
+                primary_acts_batch_size = schedule_entry.get(
+                    "primary_acts_batch_size", self.cfg.primary_acts_batch_size
+                )
+                if primary_acts_batch_size is not None:
+                    primary_acts_batch_size = int(primary_acts_batch_size)
+                prompt_index_tensor = torch.tensor(prompt_indices, dtype=torch.long)
+                trimmed_tokens = tokens.index_select(0, prompt_index_tensor)[:, :seq_length].contiguous()
+                token_minibatches.append(
+                    PromptTokenMinibatch(
+                        prompt_indices=prompt_indices,
+                        tokens=trimmed_tokens,
+                        seq_length=seq_length,
+                        primary_acts_batch_size=primary_acts_batch_size,
+                        cache_key=self._build_prompt_cache_key(
+                            prompt_indices=prompt_indices,
+                            seq_length=seq_length,
+                            primary_acts_batch_size=primary_acts_batch_size,
+                        ),
+                    )
+                )
+            return token_minibatches
+
         # Get tokens into minibatches, for the fwd pass
         token_minibatches = (
-            (tokens,)
-            if self.cfg.minibatch_size_tokens is None
-            else tokens.split(self.cfg.minibatch_size_tokens)
+            (tokens,) if self.cfg.minibatch_size_tokens is None else tokens.split(self.cfg.minibatch_size_tokens)
         )
-        token_minibatches = [tok.to(self.cfg.device) for tok in token_minibatches]
+        token_minibatches = list(token_minibatches)
 
-        return token_minibatches
+        prompt_minibatch_specs: list[PromptTokenMinibatch] = []
+        prompt_offset = 0
+        for token_minibatch in token_minibatches:
+            prompt_count = int(token_minibatch.shape[0])
+            prompt_minibatch_specs.append(
+                PromptTokenMinibatch(
+                    prompt_indices=tuple(range(prompt_offset, prompt_offset + prompt_count)),
+                    tokens=token_minibatch,
+                    seq_length=int(token_minibatch.shape[1]),
+                    primary_acts_batch_size=self.cfg.primary_acts_batch_size,
+                )
+            )
+            prompt_offset += prompt_count
+
+        return prompt_minibatch_specs
+
+    @staticmethod
+    def _build_prompt_cache_key(
+        *,
+        prompt_indices: tuple[int, ...],
+        seq_length: int,
+        primary_acts_batch_size: int | None,
+    ) -> str:
+        digest = hashlib.sha1()
+        digest.update(np.asarray(prompt_indices, dtype=np.int32).tobytes())
+        digest.update(f"{seq_length}:{primary_acts_batch_size}".encode("utf-8"))
+        return digest.hexdigest()[:16]
 
     @staticmethod
     def _activation_cache_manifest_path(cache_dir: Path) -> Path:
@@ -137,16 +203,61 @@ class FeatureDataGenerator:
         padded_tensor[:, :current_seq_len].copy_(sequence_tensor)
         return padded_tensor
 
+    @staticmethod
+    def _scatter_feature_act_chunk(
+        destination: Tensor,
+        chunk: Tensor,
+        *,
+        prompt_indices: tuple[int, ...],
+    ) -> None:
+        index_tensor = torch.tensor(prompt_indices, dtype=torch.long, device=destination.device)
+        destination.index_copy_(0, index_tensor, chunk)
+
+    def _forward_model_acts(
+        self,
+        minibatch_tokens: torch.Tensor,
+        *,
+        primary_acts_batch_size: int | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        if primary_acts_batch_size is None:
+            primary_acts_batch_size = self.cfg.primary_acts_batch_size
+        if (
+            primary_acts_batch_size is None
+            or primary_acts_batch_size <= 0
+            or minibatch_tokens.shape[0] <= primary_acts_batch_size
+        ):
+            activation_dict = self.model.forward(
+                minibatch_tokens.to("cpu"),
+                return_logits=False,  # type: ignore[arg-type]
+            )
+            return activation_dict
+
+        activation_dict: Dict[str, torch.Tensor] | None = None
+        offset = 0
+        for token_chunk in minibatch_tokens.split(primary_acts_batch_size):
+            chunk_activations = self.model.forward(token_chunk.to("cpu"), return_logits=False)  # type: ignore[arg-type]
+            if activation_dict is None:
+                activation_dict = {
+                    key: value.new_empty((minibatch_tokens.shape[0], *value.shape[1:]))
+                    for key, value in chunk_activations.items()
+                }
+            chunk_size = token_chunk.shape[0]
+            for key, value in chunk_activations.items():
+                activation_dict[key][offset : offset + chunk_size].copy_(value)
+            offset += chunk_size
+            del chunk_activations
+
+        assert activation_dict is not None
+        return activation_dict
+
     @torch.inference_mode()
     def get_feature_data(  # type: ignore
         self,
         feature_indices: list[int],
         progress: list[tqdm] | None = None,  # type: ignore
     ):  # type: ignore
-        # Create lists to store the feature activations & final values of the residual stream
-        all_feat_acts = []
         all_dfa_results = {feature_idx: {} for feature_idx in feature_indices}
-        total_prompts = 0
+        total_prompt_count = sum(int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches)
 
         # Create objects to store the data for computing rolling stats
         corrcoef_neurons = RollingCorrCoef()
@@ -164,31 +275,26 @@ class FeatureDataGenerator:
             feature_resid_dir = to_resid_direction(
                 feature_out_dir, self.model  # type: ignore
             )  # [feats d_model]
+        all_feat_acts_tensor: Tensor | None = None
 
         # ! Compute & concatenate together all feature activations & post-activation function values
         for i, minibatch in enumerate(self.token_minibatches):
-            minibatch.to(self.cfg.device)
             model_activation_dict = self.get_model_acts(i, minibatch)
             primary_acts = model_activation_dict[
                 self.model.activation_config.primary_hook_point  # type: ignore
-            ].to(
-                self.encoder.device
-            )  # make sure acts are on the correct device
+            ].to(self.encoder.device)
+            all_features_acts = None
 
             # For TopK, compute all activations first, then select features
-            if self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]:
+            if self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
+                self.encoder.activation_fn, TopK
+            ):
                 # Get all features' activations
                 all_features_acts = self.encoder.encode(primary_acts)
-                # Then select only the features we're interested in
-                feature_acts = all_features_acts[:, :, feature_indices].to(
-                    DTYPES[self.cfg.dtype]
-                )
+                feature_acts = all_features_acts[:, :, feature_indices].to(DTYPES[self.cfg.dtype])
             else:
-                # For other activation functions, use the masking context
                 with FeatureMaskingContext(self.encoder, feature_indices):
-                    feature_acts = self.encoder.encode(primary_acts).to(
-                        DTYPES[self.cfg.dtype]
-                    )
+                    feature_acts = self.encoder.encode(primary_acts).to(DTYPES[self.cfg.dtype])
 
             # Optionally filter out token positions whose hidden-state norm is
             # an extreme outlier relative to the median norm in this minibatch.
@@ -222,9 +328,26 @@ class FeatureDataGenerator:
                 corrcoef_encoder=corrcoef_encoder,
             )
 
-            # Add these to the lists (we'll eventually concat)
-            all_feat_acts.append(
-                self._pad_sequence_tensor(feature_acts, target_seq_len=self.full_sequence_length)
+            feature_acts_for_output = self._pad_sequence_tensor(
+                feature_acts,
+                target_seq_len=self.full_sequence_length,
+            )
+            feature_acts_cpu = feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
+
+            if all_feat_acts_tensor is None:
+                all_feat_acts_tensor = torch.empty(
+                    (
+                        total_prompt_count,
+                        self.full_sequence_length,
+                        feature_acts_cpu.shape[-1],
+                    ),
+                    dtype=feature_acts_cpu.dtype,
+                    device=feature_acts_cpu.device,
+                )
+            self._scatter_feature_act_chunk(
+                all_feat_acts_tensor,
+                feature_acts_cpu,
+                prompt_indices=minibatch.prompt_indices,
             )
 
             # Calculate DFA
@@ -238,29 +361,30 @@ class FeatureDataGenerator:
                 )
                 for feature_idx, feature_data in batch_dfa_results.items():
                     for prompt_idx in range(feature_data.shape[0]):
-                        global_prompt_idx = total_prompts + prompt_idx
+                        global_prompt_idx = minibatch.prompt_indices[prompt_idx]
                         all_dfa_results[feature_idx][global_prompt_idx] = {
-                            "dfaValues": feature_data[prompt_idx][
-                                "dfa_values"
-                            ].tolist(),
-                            "dfaTargetIndex": int(
-                                feature_data[prompt_idx]["dfa_target_index"]
-                            ),
-                            "dfaMaxValue": float(
-                                feature_data[prompt_idx]["dfa_max_value"]
-                            ),
+                            "dfaValues": feature_data[prompt_idx]["dfa_values"].tolist(),
+                            "dfaTargetIndex": int(feature_data[prompt_idx]["dfa_target_index"]),
+                            "dfaMaxValue": float(feature_data[prompt_idx]["dfa_max_value"]),
                         }
 
-                total_prompts += len(minibatch)
-
-            # Update the 1st progress bar (fwd passes & getting sequence data dominates the runtime of these computations)
+            # Update the 1st progress bar; fwd passes and sequence data dominate these computations.
             if progress is not None:
                 progress[0].update(1)
 
-        all_feat_acts = torch.cat(all_feat_acts, dim=0)
+            del feature_acts_for_output
+            del feature_acts_cpu
+            del feature_acts
+            del primary_acts
+            del model_activation_dict
+            if all_features_acts is not None:
+                del all_features_acts
+
+        if all_feat_acts_tensor is None:
+            all_feat_acts_tensor = torch.empty(0)
 
         return (
-            all_feat_acts,
+            all_feat_acts_tensor,
             torch.tensor([]),  # all_resid_post, no longer used
             feature_resid_dir,
             feature_out_dir,
@@ -273,15 +397,20 @@ class FeatureDataGenerator:
     def get_model_acts(
         self,
         minibatch_index: int,
-        minibatch_tokens: torch.Tensor,
+        minibatch: PromptTokenMinibatch,
         use_cache: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         A function that gets the model activations for a given minibatch of tokens.
         Uses np.memmap for efficient caching.
         """
+        minibatch_tokens = minibatch.tokens
+        cache_path: Path | None = None
         if self.cfg.cache_dir is not None:
-            cache_path = self.cfg.cache_dir / f"model_activations_{minibatch_index}.pt"
+            cache_name = f"model_activations_{minibatch_index}"
+            if minibatch.cache_key is not None:
+                cache_name += f"_{minibatch.cache_key}"
+            cache_path = self.cfg.cache_dir / f"{cache_name}.pt"
             if use_cache and cache_path.exists():
                 # Removed duplicate assignment. mmap=True enables memory-mapped file I/O which allows
                 # lazy loading of tensors without reading the entire file into memory upfront, making
@@ -292,15 +421,24 @@ class FeatureDataGenerator:
                     cache_path, map_location="cpu", weights_only=False, mmap=True
                 )
             else:
-                activation_dict = self.model.forward(
-                    minibatch_tokens.to("cpu"), return_logits=False  # type: ignore
+                activation_dict = self._forward_model_acts(
+                    minibatch_tokens,
+                    primary_acts_batch_size=minibatch.primary_acts_batch_size,
                 )
                 save_tensor_dict_torch(activation_dict, cache_path)
         else:
-            activation_dict = self.model.forward(
-                minibatch_tokens.to("cpu"), return_logits=False  # type: ignore
+            activation_dict = self._forward_model_acts(
+                minibatch_tokens,
+                primary_acts_batch_size=minibatch.primary_acts_batch_size,
             )
 
+        if not self.model._activation_shapes_match_tokens(activation_dict, minibatch_tokens):
+            activation_dict = self._forward_model_acts(
+                minibatch_tokens,
+                primary_acts_batch_size=minibatch.primary_acts_batch_size,
+            )
+            if cache_path is not None:
+                save_tensor_dict_torch(activation_dict, cache_path)
         return activation_dict
 
     @torch.inference_mode()
@@ -324,17 +462,18 @@ class FeatureDataGenerator:
                 The object storing the minimal data necessary to compute corrcoef between pairwise feature activations.
         """
         # Update the CorrCoef object between feature activation & neurons
+        feature_acts_by_feature = einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)")
         if corrcoef_neurons is not None:
             corrcoef_neurons.update(
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
+                feature_acts_by_feature,
                 einops.rearrange(model_acts, "batch seq d_in -> d_in (batch seq)"),
             )
 
         # Update the CorrCoef object between pairwise feature activations
         if corrcoef_encoder is not None:
             corrcoef_encoder.update(
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
+                feature_acts_by_feature,
+                feature_acts_by_feature,
             )
 
 
@@ -343,9 +482,7 @@ def save_tensor_dict_torch(tensor_dict: Dict[str, torch.Tensor], filename: Path)
 
 
 def load_tensor_dict_torch(filename: Path, device: str) -> Dict[str, torch.Tensor]:
-    return torch.load(
-        filename, map_location=torch.device(device)
-    )  # Directly load to GPU
+    return torch.load(filename, map_location=torch.device(device))  # Directly load to GPU
 
 
 class FeatureMaskingContext:
@@ -356,15 +493,14 @@ class FeatureMaskingContext:
 
     def __enter__(self):
         ## W_dec
-        self.original_weight["W_dec"] = getattr(self.sae, "W_dec").data.clone()
+        self.original_weight["W_dec"] = getattr(self.sae, "W_dec")
         # mask the weight
         masked_weight = self.sae.W_dec[self.feature_idxs]
         # set the weight
         setattr(self.sae, "W_dec", nn.Parameter(masked_weight))
 
         ## W_enc
-        # clone the weight.
-        self.original_weight["W_enc"] = getattr(self.sae, "W_enc").data.clone()
+        self.original_weight["W_enc"] = getattr(self.sae, "W_enc")
         # mask the weight
         masked_weight = self.sae.W_enc[:, self.feature_idxs]
         # set the weight
@@ -382,7 +518,7 @@ class FeatureMaskingContext:
             "skip_transcoder",
         ]:
             ## b_enc
-            self.original_weight["b_enc"] = getattr(self.sae, "b_enc").data.clone()
+            self.original_weight["b_enc"] = getattr(self.sae, "b_enc")
             # mask the weight
             masked_weight = self.sae.b_enc[self.feature_idxs]  # type: ignore
             # set the weight
@@ -394,16 +530,14 @@ class FeatureMaskingContext:
             "jumprelu_skip_transcoder",
         ]:
             ## b_enc
-            self.original_weight["b_enc"] = getattr(self.sae, "b_enc").data.clone()
+            self.original_weight["b_enc"] = getattr(self.sae, "b_enc")
             # mask the weight
             masked_weight = self.sae.b_enc[self.feature_idxs]  # type: ignore
             # set the weight
             setattr(self.sae, "b_enc", nn.Parameter(masked_weight))
 
             ## threshold
-            self.original_weight["threshold"] = getattr(
-                self.sae, "threshold"
-            ).data.clone()
+            self.original_weight["threshold"] = getattr(self.sae, "threshold")
             # mask the weight
             masked_weight = self.sae.threshold[self.feature_idxs]  # type: ignore
             # set the weight
@@ -411,21 +545,21 @@ class FeatureMaskingContext:
 
         elif architecture in ["gated", "gated_transcoder"]:
             ## b_gate
-            self.original_weight["b_gate"] = getattr(self.sae, "b_gate").data.clone()
+            self.original_weight["b_gate"] = getattr(self.sae, "b_gate")
             # mask the weight
             masked_weight = self.sae.b_gate[self.feature_idxs]  # type: ignore
             # set the weight
             setattr(self.sae, "b_gate", nn.Parameter(masked_weight))
 
             ## r_mag
-            self.original_weight["r_mag"] = getattr(self.sae, "r_mag").data.clone()
+            self.original_weight["r_mag"] = getattr(self.sae, "r_mag")
             # mask the weight
             masked_weight = self.sae.r_mag[self.feature_idxs]  # type: ignore
             # set the weight
             setattr(self.sae, "r_mag", nn.Parameter(masked_weight))
 
             ## b_mag
-            self.original_weight["b_mag"] = getattr(self.sae, "b_mag").data.clone()
+            self.original_weight["b_mag"] = getattr(self.sae, "b_mag")
             # mask the weight
             masked_weight = self.sae.b_mag[self.feature_idxs]  # type: ignore
             # set the weight
@@ -438,4 +572,4 @@ class FeatureMaskingContext:
     def __exit__(self, exc_type, exc_value, traceback):  # type: ignore
         # set everything back to normal
         for key, value in self.original_weight.items():
-            setattr(self.sae, key, nn.Parameter(value))
+            setattr(self.sae, key, value)

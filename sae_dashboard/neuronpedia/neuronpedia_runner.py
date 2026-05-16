@@ -3,14 +3,16 @@ import gc
 import importlib
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Any, Dict, Mapping, Set, Tuple, cast
 
 import numpy as np
 import torch
 import wandb
 import wandb.sdk
+from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
 from matplotlib import colors
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
 from tqdm import tqdm
@@ -35,7 +37,13 @@ from sae_dashboard.neuronpedia.neuronpedia_export import (
     export_neuronpedia_dashboards,
     resolve_creator_id,
 )
-from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
+from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
+    DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO,
+    DEFAULT_PROMPT_BUCKET_CEILINGS,
+    DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
+    DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
+    NeuronpediaRunnerConfig,
+)
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.utils_fns import has_duplicate_rows
@@ -178,7 +186,8 @@ class NeuronpediaRunner:
                 from sae_lens import SkipTranscoder  # type: ignore
             except ImportError as e:
                 raise ImportError(
-                    "SkipTranscoder class not found in sae_lens. Install a version of sae_lens that provides it or disable --use-skip-transcoder."
+                    "SkipTranscoder class not found in sae_lens. Install a version of sae_lens that provides it "
+                    "or disable --use-skip-transcoder."
                 ) from e
             LoaderClass = SkipTranscoder
             loader_kwargs = {}
@@ -202,7 +211,8 @@ class NeuronpediaRunner:
                 from sae_lens import Transcoder  # type: ignore
             except ImportError as e:
                 raise ImportError(
-                    "Transcoder class not found in sae_lens. Install a version of sae_lens that provides Transcoder or disable --use-transcoder."
+                    "Transcoder class not found in sae_lens. Install a version of sae_lens that provides "
+                    "Transcoder or disable --use-transcoder."
                 ) from e
             LoaderClass = Transcoder
 
@@ -229,38 +239,38 @@ class NeuronpediaRunner:
                 self._apply_sae_dtype_override()
         elif self.cfg.use_clt:
             # Dynamically import CLT components only when needed
-            try:
-                from clt.config.clt_config import CLTConfig  # type: ignore
-                from clt.models.clt import CrossLayerTranscoder  # type: ignore
-            except ImportError as e:
-                raise ImportError(
-                    "CLT components (CrossLayerTranscoder, CLTConfig) not found. "
-                    "Ensure the 'clt' package is installed and available."
-                ) from e
-
             if self.cfg.from_local_sae:
-                # Load CLT config from local path
-                try:
-                    clt_config_path = Path(self.cfg.sae_path) / "cfg.json"
-                    if not clt_config_path.is_file():
-                        raise FileNotFoundError(
-                            f"CLT config file not found at {clt_config_path}"
-                        )
-                    clt_cfg = CLTConfig.from_json(clt_config_path)  # type: ignore
-                except Exception as e:
+                clt_dir = Path(self.cfg.sae_path)
+                clt_config_path = clt_dir / "cfg.json"
+                if clt_config_path.is_file():
+                    try:
+                        from clt.config.clt_config import CLTConfig  # type: ignore
+                        from clt.models.clt import CrossLayerTranscoder  # type: ignore
+                    except ImportError as e:
+                        raise ImportError(
+                            "CLT components (CrossLayerTranscoder, CLTConfig) not found. "
+                            "Ensure the 'clt' package is installed and available."
+                        ) from e
+
+                    try:
+                        clt_cfg = CLTConfig.from_json(clt_config_path)  # type: ignore
+                    except Exception as e:
+                        raise ValueError(
+                            f"Failed to load CLT config from {clt_config_path}: {e}"  # type: ignore
+                        ) from e
+
+                    self.clt = CrossLayerTranscoder(
+                        config=clt_cfg,
+                        process_group=None,
+                        device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,  # type: ignore
+                    )
+                    self._load_clt_weights()
+                else:
                     raise ValueError(
-                        f"Failed to load CLT config from {clt_config_path}: {e}"  # type: ignore
-                    ) from e
-
-                # Create CLT instance
-                self.clt = CrossLayerTranscoder(
-                    config=clt_cfg,
-                    process_group=None,
-                    device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,  # type: ignore
-                )
-
-                # Load weights
-                self._load_clt_weights()
+                        "CLT local loading currently requires cfg.json in the CLT directory. "
+                        "The temporary GemmaScope2 params-layer loader was intentionally backed out from the "
+                        "streamlined dashboard Phase 1 PR stack."
+                    )
 
                 # Apply dtype override if specified
                 if self.cfg.clt_dtype:
@@ -319,41 +329,7 @@ class NeuronpediaRunner:
 
     def _load_clt_weights(self):
         """Load CLT weights from file."""
-        from pathlib import Path
-        from typing import List, Optional
-
-        # Determine which file to load
-        explicit_filename = (
-            self.cfg.clt_weights_filename if self.cfg.clt_weights_filename else ""
-        )
-
-        candidate_paths: List[Path] = []
-        if explicit_filename:
-            candidate_paths.append(Path(self.cfg.sae_path) / explicit_filename)
-
-        # If no explicit filename or the file doesn't exist, search common patterns
-        if not candidate_paths or not candidate_paths[0].is_file():
-            # Find any *.safetensors file in directory
-            candidate_paths.extend(
-                sorted(Path(self.cfg.sae_path).glob("*.safetensors"))
-            )
-            # Add common filenames
-            candidate_paths.append(Path(self.cfg.sae_path) / "model.safetensors")
-            candidate_paths.append(Path(self.cfg.sae_path) / "model.pt")
-            candidate_paths.append(Path(self.cfg.sae_path) / "model.bin")
-
-        # Pick the first existing path
-        weights_path: Optional[Path] = None
-        for cand in candidate_paths:
-            if cand.is_file():
-                weights_path = cand
-                break
-
-        if weights_path is None:
-            raise FileNotFoundError(
-                f"No CLT weights file found in {self.cfg.sae_path}. "
-                f"Expected one of: {', '.join(str(p) for p in candidate_paths)}"
-            )
+        weights_path = self._resolve_clt_weights_path()
 
         print(f"Loading CLT state dict from: {weights_path}")
 
@@ -363,8 +339,7 @@ class NeuronpediaRunner:
                 from safetensors.torch import load_file as safe_load_file
             except ImportError as e:
                 raise ImportError(
-                    "safetensors library is required to load .safetensors files. "
-                    "Install via `pip install safetensors`."
+                    "safetensors library is required to load .safetensors files. Install via `pip install safetensors`."
                 ) from e
             state_dict = safe_load_file(weights_path)
         else:
@@ -373,6 +348,38 @@ class NeuronpediaRunner:
         # Load the state dict
         self.clt.load_state_dict(state_dict)
         print("CLT state dict loaded successfully.")
+
+    def _resolve_clt_weights_path(self, prefer_filename: str | None = None) -> Path:
+        candidate_paths: list[Path] = []
+        if prefer_filename:
+            candidate_paths.append(Path(self.cfg.sae_path) / prefer_filename)
+        if self.cfg.clt_weights_filename:
+            candidate_paths.append(
+                Path(self.cfg.sae_path) / self.cfg.clt_weights_filename
+            )
+
+        # If no explicit filename or the file doesn't exist, search common patterns
+        candidate_paths.extend(sorted(Path(self.cfg.sae_path).glob("*.safetensors")))
+        candidate_paths.append(Path(self.cfg.sae_path) / "model.safetensors")
+        candidate_paths.append(Path(self.cfg.sae_path) / "model.pt")
+        candidate_paths.append(Path(self.cfg.sae_path) / "model.bin")
+
+        deduped_candidates: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in candidate_paths:
+            if candidate in seen:
+                continue
+            deduped_candidates.append(candidate)
+            seen.add(candidate)
+
+        for candidate in deduped_candidates:
+            if candidate.is_file():
+                return candidate
+
+        raise FileNotFoundError(
+            f"No CLT weights file found in {self.cfg.sae_path}. "
+            f"Expected one of: {', '.join(str(path) for path in deduped_candidates)}"
+        )
 
     def _apply_sae_dtype_override(self):
         """Apply dtype override to SAE."""
@@ -496,6 +503,66 @@ class NeuronpediaRunner:
                 )
 
         self.cfg.layer = self.layer
+
+    def _materialize_prompt_dataset(self) -> str | Dataset | IterableDataset:
+        if self.cfg.pretokenized_dataset_path:
+            dataset = load_from_disk(self.cfg.pretokenized_dataset_path)
+            if not isinstance(dataset, Dataset):
+                raise ValueError(
+                    "Pretokenized Neuronpedia datasets must be saved as a single HuggingFace Dataset."
+                )
+            if len(dataset) > self.cfg.n_prompts_total:
+                dataset = dataset.select(range(self.cfg.n_prompts_total))
+            print(
+                "NeuronpediaRunner: Loaded pretokenized prompt dataset "
+                f"rows={len(dataset)} path={self.cfg.pretokenized_dataset_path}"
+            )
+            return dataset
+
+        has_structured_dataset_config = any(
+            value is not None and value != ""
+            for value in (
+                self.cfg.huggingface_dataset_config_name,
+                self.cfg.huggingface_dataset_split,
+                self.cfg.huggingface_dataset_text_field,
+            )
+        )
+        if not has_structured_dataset_config:
+            return self.cfg.huggingface_dataset_path
+
+        dataset = load_dataset(
+            self.cfg.huggingface_dataset_path,
+            self.cfg.huggingface_dataset_config_name,
+            split=self.cfg.huggingface_dataset_split or "train",
+            streaming=self.cfg.dataset_streaming,
+        )
+
+        if self.cfg.huggingface_dataset_text_field:
+            text_field = self.cfg.huggingface_dataset_text_field
+
+            def select_text_field(example: dict[str, Any]) -> dict[str, str]:
+                return {"text": str(example[text_field])}
+
+            dataset = dataset.map(select_text_field)
+
+        if isinstance(dataset, Dataset):
+            if len(dataset) > self.cfg.n_prompts_total:
+                dataset = dataset.select(range(self.cfg.n_prompts_total))
+            print(
+                "NeuronpediaRunner: Materialized prompt dataset "
+                f"rows={len(dataset)} path={self.cfg.huggingface_dataset_path} "
+                f"config={self.cfg.huggingface_dataset_config_name} "
+                f"split={self.cfg.huggingface_dataset_split or 'train'}"
+            )
+        else:
+            print(
+                "NeuronpediaRunner: Materialized streaming prompt dataset "
+                f"path={self.cfg.huggingface_dataset_path} "
+                f"config={self.cfg.huggingface_dataset_config_name} "
+                f"split={self.cfg.huggingface_dataset_split or 'train'}"
+            )
+
+        return dataset
 
     def _initialize_model(self):
         """Initialize the transformer model."""
@@ -835,11 +902,15 @@ class NeuronpediaRunner:
         """Set up the activation store for data generation."""
         # set the context size to the number of tokens in the prompt
         self.sae.cfg.metadata.context_size = self.cfg.n_tokens_in_prompt  # type: ignore
+        dataset_source = self._materialize_prompt_dataset()
+        dataset_streaming = self.cfg.dataset_streaming
+        if not isinstance(dataset_source, str):
+            dataset_streaming = isinstance(dataset_source, IterableDataset)
         self.activations_store = ActivationsStore.from_sae(
             model=self.model,
             sae=self.sae,  # type: ignore
-            dataset=self.cfg.huggingface_dataset_path,
-            streaming=True,
+            dataset=dataset_source,
+            streaming=dataset_streaming,
             context_size=self.cfg.n_tokens_in_prompt,
             store_batch_size_prompts=8,  # these don't matter
             n_batches_in_buffer=16,  # these don't matter
@@ -858,6 +929,9 @@ class NeuronpediaRunner:
         if not os.path.exists(self.cfg.outputs_dir):
             os.makedirs(self.cfg.outputs_dir)
         self.cfg.outputs_dir = self.create_output_directory()
+        self._stage_shared_tokens_file(
+            require_effective_lengths=self._schedule_requires_effective_lengths()
+        )
 
     def create_output_directory(self) -> str:
         """
@@ -866,9 +940,11 @@ class NeuronpediaRunner:
         Returns:
             Path: The path to the created output directory.
         """
-        outputs_subdir = (
-            f"{self.model_id}_{self.cfg.sae_set}_{self.hook_name}_{self.sae.cfg.d_sae}"
-        )
+        if not self.model_id:
+            raise ValueError(
+                "model_id must be resolved before creating the output directory."
+            )
+        outputs_subdir = f"{self._sanitize_path_component(self.model_id)}_{self.cfg.sae_set}_{self.hook_name}_{self.sae.cfg.d_sae}"
         if self.np_sae_id_suffix is not None:
             outputs_subdir += f"_{self.np_sae_id_suffix}"
         outputs_dir = Path(self.cfg.outputs_dir).joinpath(outputs_subdir)
@@ -878,6 +954,556 @@ class NeuronpediaRunner:
             )
         outputs_dir.mkdir(parents=True, exist_ok=True)
         return str(outputs_dir)
+
+    def _resolved_neuronpedia_set_name(self) -> str:
+        set_name = self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        if self.np_sae_id_suffix is None:
+            return set_name
+        return f"{set_name}__{self.np_sae_id_suffix}"
+
+    @staticmethod
+    def _sanitize_path_component(value: str) -> str:
+        return value.replace("/", "_").replace("\\", "_")
+
+    def _tokens_file_path(self) -> Path:
+        return Path(self.cfg.outputs_dir) / f"tokens_{self.cfg.n_prompts_total}.pt"
+
+    @staticmethod
+    def _effective_lengths_file_path(tokens_file: Path) -> Path:
+        return tokens_file.with_suffix(".effective_lengths.pt")
+
+    @staticmethod
+    def _shared_prompt_metadata_file(tokens_file: Path) -> Path:
+        return tokens_file.with_suffix(".metadata.json")
+
+    def _shared_tokens_source_path(self) -> Path | None:
+        if self.cfg.shared_tokens_file:
+            return Path(self.cfg.shared_tokens_file)
+        if self.cfg.pretokenized_dataset_path:
+            default_path = (
+                Path(self.cfg.pretokenized_dataset_path)
+                / f"tokens_{self.cfg.n_prompts_total}.pt"
+            )
+            self.cfg.shared_tokens_file = str(default_path)
+            return default_path
+        return None
+
+    def _prepare_shared_tokens_from_pretokenized_dataset(
+        self, target_tokens_file: Path
+    ) -> Path:
+        if not self.cfg.pretokenized_dataset_path:
+            raise ValueError(
+                "A pretokenized dataset path is required to generate shared token sidecars automatically."
+            )
+
+        dataset = load_from_disk(self.cfg.pretokenized_dataset_path)
+        if not isinstance(dataset, Dataset):
+            raise ValueError(
+                "Pretokenized Neuronpedia datasets must be saved as a single HuggingFace Dataset."
+            )
+
+        if "input_ids" in dataset.column_names:
+            tokens_column = "input_ids"
+        elif "tokens" in dataset.column_names:
+            tokens_column = "tokens"
+        else:
+            raise ValueError(
+                f"Pretokenized dataset {self.cfg.pretokenized_dataset_path} must contain an input_ids or tokens column."
+            )
+
+        dataset_metadata_path = (
+            Path(self.cfg.pretokenized_dataset_path) / "sae_lens.json"
+        )
+        pad_token_id: int | None = None
+        if dataset_metadata_path.is_file():
+            dataset_metadata = json.loads(
+                dataset_metadata_path.read_text(encoding="utf-8")
+            )
+            pad_token_id_raw = dataset_metadata.get("pad_token_id")
+            if pad_token_id_raw is not None:
+                pad_token_id = int(pad_token_id_raw)
+        if pad_token_id is None:
+            model_tokenizer = getattr(getattr(self, "model", None), "tokenizer", None)
+            model_pad_token_id = getattr(model_tokenizer, "pad_token_id", None)
+            if model_pad_token_id is not None:
+                pad_token_id = int(model_pad_token_id)
+
+        dataset_rows = len(dataset)
+        unique_sequences: set[tuple[int, ...]] = set()
+        token_rows: list[torch.Tensor] = []
+        effective_lengths: list[int] = []
+        for row in dataset:
+            row_mapping = cast(Mapping[str, Any], row)
+            row_tokens = torch.as_tensor(row_mapping[tokens_column], dtype=torch.long)
+            if row_tokens.numel() < self.cfg.n_tokens_in_prompt:
+                raise ValueError(
+                    "Pretokenized row is shorter than n_tokens_in_prompt="
+                    f"{self.cfg.n_tokens_in_prompt}: {row_tokens.numel()}"
+                )
+            row_tokens = row_tokens[: self.cfg.n_tokens_in_prompt].cpu()
+            attention_mask_value = row_mapping.get("attention_mask")
+            if attention_mask_value is not None:
+                attention_mask = torch.as_tensor(attention_mask_value, dtype=torch.long)
+                effective_length = int(
+                    attention_mask[: self.cfg.n_tokens_in_prompt].sum().item()
+                )
+            elif pad_token_id is not None:
+                nonpad_indices = torch.nonzero(
+                    row_tokens != pad_token_id, as_tuple=False
+                )
+                effective_length = (
+                    int(nonpad_indices[-1].item()) + 1
+                    if nonpad_indices.numel() > 0
+                    else 0
+                )
+            else:
+                effective_length = int(row_tokens.numel())
+
+            row_key = tuple(row_tokens.tolist())
+            if (
+                row_key in unique_sequences
+                and self.cfg.deduplicate_shared_prompt_tokens
+            ):
+                continue
+            unique_sequences.add(row_key)
+            token_rows.append(row_tokens)
+            effective_lengths.append(effective_length)
+            if len(token_rows) >= self.cfg.n_prompts_total:
+                break
+
+        if not token_rows:
+            raise ValueError(
+                f"Pretokenized dataset {self.cfg.pretokenized_dataset_path} did not yield any prompt tokens."
+            )
+        if (
+            self.cfg.strict_shared_prompt_count
+            and len(token_rows) < self.cfg.n_prompts_total
+        ):
+            raise ValueError(
+                "Pretokenized dataset did not satisfy the requested prompt count: "
+                f"rows={len(token_rows)} requested_prompts={self.cfg.n_prompts_total} "
+                f"dataset_rows={dataset_rows} unique_rows={len(unique_sequences)} "
+                f"deduplicate={self.cfg.deduplicate_shared_prompt_tokens} "
+                f"path={self.cfg.pretokenized_dataset_path}"
+            )
+
+        target_tokens_file.parent.mkdir(parents=True, exist_ok=True)
+        token_tensor = torch.stack(token_rows, dim=0)
+        effective_length_tensor = torch.tensor(effective_lengths, dtype=torch.int32)
+        torch.save(token_tensor, target_tokens_file)
+        torch.save(
+            effective_length_tensor,
+            self._effective_lengths_file_path(target_tokens_file),
+        )
+        self._shared_prompt_metadata_file(target_tokens_file).write_text(
+            json.dumps(
+                {
+                    "requested_prompts": self.cfg.n_prompts_total,
+                    "tensor_shape": list(token_tensor.shape),
+                    "dataset_rows": dataset_rows,
+                    "unique_rows": len(unique_sequences),
+                    "tokens_per_prompt": self.cfg.n_tokens_in_prompt,
+                    "deduplicate": self.cfg.deduplicate_shared_prompt_tokens,
+                    "source_dataset_path": self.cfg.pretokenized_dataset_path,
+                    "effective_lengths_file": str(
+                        self._effective_lengths_file_path(target_tokens_file)
+                    ),
+                    "effective_length_min": min(effective_lengths),
+                    "effective_length_max": max(effective_lengths),
+                    "effective_length_mean": sum(effective_lengths)
+                    / len(effective_lengths),
+                    "pad_token_id": pad_token_id,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        print(
+            "NeuronpediaRunner: Prepared shared prompt tokens "
+            f"rows={len(token_rows)} dataset_rows={dataset_rows} unique_rows={len(unique_sequences)} "
+            f"requested_prompts={self.cfg.n_prompts_total} tokens_per_prompt={self.cfg.n_tokens_in_prompt} "
+            f"deduplicate={self.cfg.deduplicate_shared_prompt_tokens} path={target_tokens_file}"
+        )
+        return target_tokens_file
+
+    def _schedule_requires_effective_lengths(self) -> bool:
+        return self.cfg.auto_prompt_bucket_schedule or bool(
+            self.cfg.prompt_bucket_schedule_file
+        )
+
+    def _ensure_shared_tokens_source_file(
+        self, *, require_effective_lengths: bool = False
+    ) -> Path | None:
+        source = self._shared_tokens_source_path()
+        if source is None:
+            return None
+
+        effective_lengths_file = self._effective_lengths_file_path(source)
+        if source.is_file() and (
+            effective_lengths_file.is_file() or not require_effective_lengths
+        ):
+            return source
+
+        if self.cfg.pretokenized_dataset_path:
+            return self._prepare_shared_tokens_from_pretokenized_dataset(source)
+
+        candidate_paths = (
+            (source, effective_lengths_file) if require_effective_lengths else (source,)
+        )
+        missing_paths = [str(path) for path in candidate_paths if not path.is_file()]
+        raise FileNotFoundError(
+            "Shared prompt token sidecars do not exist: " + ", ".join(missing_paths)
+        )
+
+    @staticmethod
+    def _round_down_to_multiple(value: int, *, multiple: int) -> int:
+        if multiple <= 1 or value <= multiple:
+            return value
+        rounded_value = (value // multiple) * multiple
+        return rounded_value if rounded_value > 0 else value
+
+    @staticmethod
+    def _scale_batch_size(
+        base_value: int,
+        *,
+        scale: float,
+        scale_limit: float,
+        max_value: int,
+        round_to: int,
+    ) -> int:
+        scaled_value = max(base_value, int(base_value * min(scale, scale_limit)))
+        scaled_value = min(scaled_value, max_value)
+        return NeuronpediaRunner._round_down_to_multiple(
+            scaled_value, multiple=round_to
+        )
+
+    @staticmethod
+    def _prefer_exact_primary_acts_partition(
+        *,
+        n_prompts_in_forward_pass: int,
+        primary_acts_batch_size: int | None,
+        max_prompt_count: int,
+        max_prompt_reduction_fraction: float = 0.10,
+        max_primary_acts_reduction_fraction: float = 0.10,
+    ) -> tuple[int, int | None]:
+        capped_prompts = min(n_prompts_in_forward_pass, max_prompt_count)
+        if primary_acts_batch_size is None:
+            return capped_prompts, None
+
+        capped_acts = min(primary_acts_batch_size, capped_prompts)
+        if capped_acts <= 0 or capped_prompts % capped_acts == 0:
+            return capped_prompts, capped_acts
+
+        min_prompts = max(
+            1, int(np.ceil(capped_prompts * (1.0 - max_prompt_reduction_fraction)))
+        )
+        min_acts = max(
+            1, int(np.ceil(capped_acts * (1.0 - max_primary_acts_reduction_fraction)))
+        )
+
+        best_pair: tuple[int, int] | None = None
+        for acts in range(capped_acts, min_acts - 1, -1):
+            prompts = (capped_prompts // acts) * acts
+            if prompts < min_prompts or prompts <= 0:
+                continue
+
+            candidate = (prompts, acts)
+            if (
+                best_pair is None
+                or candidate[0] > best_pair[0]
+                or (candidate[0] == best_pair[0] and candidate[1] > best_pair[1])
+            ):
+                best_pair = candidate
+
+        if best_pair is not None:
+            return best_pair
+        return capped_prompts, capped_acts
+
+    def _normalized_prompt_bucket_ceilings(self) -> tuple[int, ...]:
+        bucket_ceilings = {
+            int(value)
+            for value in self.cfg.prompt_bucket_ceilings
+            if 0 < int(value) <= self.cfg.n_tokens_in_prompt
+        }
+        if not bucket_ceilings:
+            bucket_ceilings = {
+                value
+                for value in DEFAULT_PROMPT_BUCKET_CEILINGS
+                if 0 < value < self.cfg.n_tokens_in_prompt
+            }
+        bucket_ceilings.add(self.cfg.n_tokens_in_prompt)
+        return tuple(sorted(bucket_ceilings))
+
+    def _load_prompt_effective_lengths(self, tokens: torch.Tensor) -> list[int]:
+        effective_lengths_path = self._effective_lengths_file_path(
+            self._tokens_file_path()
+        )
+        if not effective_lengths_path.is_file():
+            self._stage_shared_tokens_file(require_effective_lengths=True)
+
+        if not effective_lengths_path.is_file():
+            raise FileNotFoundError(
+                f"Prompt bucket schedule requires staged effective lengths sidecar: {effective_lengths_path}"
+            )
+
+        effective_lengths_tensor = torch.load(
+            effective_lengths_path, map_location="cpu"
+        )
+        if not isinstance(effective_lengths_tensor, torch.Tensor):
+            raise TypeError(
+                f"Prompt bucket effective lengths sidecar must contain a tensor: {effective_lengths_path}"
+            )
+
+        effective_lengths = [
+            int(length) for length in effective_lengths_tensor.tolist()
+        ]
+        if len(effective_lengths) != tokens.shape[0]:
+            raise ValueError(
+                "Prompt bucket schedule effective-length count does not match tokens rows: "
+                f"lengths={len(effective_lengths)} tokens={tokens.shape[0]}"
+            )
+        return effective_lengths
+
+    def _auto_prompt_bucket_entries(
+        self, effective_lengths: list[int]
+    ) -> list[dict[str, Any]]:
+        if self.cfg.n_prompts_in_forward_pass <= 0:
+            raise ValueError(
+                "n_prompts_in_forward_pass must be positive when auto prompt bucketing is enabled."
+            )
+        if self.cfg.prompt_bucket_scale_limit <= 0:
+            raise ValueError(
+                "prompt_bucket_scale_limit must be positive when auto prompt bucketing is enabled."
+            )
+        if self.cfg.prompt_primary_acts_scale_limit <= 0:
+            raise ValueError(
+                "prompt_primary_acts_scale_limit must be positive when auto prompt bucketing is enabled."
+            )
+        if self.cfg.prompt_batch_size_round_to <= 0:
+            raise ValueError(
+                "prompt_batch_size_round_to must be positive when auto prompt bucketing is enabled."
+            )
+
+        bucket_entries: list[dict[str, Any]] = []
+        lower_exclusive = 0
+        for bucket_ceiling in self._normalized_prompt_bucket_ceilings():
+            bucket_prompt_count = sum(
+                1
+                for effective_length in effective_lengths
+                if lower_exclusive < effective_length <= bucket_ceiling
+            )
+            if bucket_prompt_count <= 0:
+                lower_exclusive = bucket_ceiling
+                continue
+
+            scale = self.cfg.n_tokens_in_prompt / bucket_ceiling
+            prompts_in_forward_pass = self._scale_batch_size(
+                self.cfg.n_prompts_in_forward_pass,
+                scale=scale,
+                scale_limit=self.cfg.prompt_bucket_scale_limit,
+                max_value=bucket_prompt_count,
+                round_to=self.cfg.prompt_batch_size_round_to,
+            )
+
+            primary_acts_batch_size = self.cfg.primary_acts_batch_size
+            if primary_acts_batch_size is not None:
+                primary_acts_batch_size = self._scale_batch_size(
+                    primary_acts_batch_size,
+                    scale=scale,
+                    scale_limit=self.cfg.prompt_primary_acts_scale_limit,
+                    max_value=prompts_in_forward_pass,
+                    round_to=self.cfg.prompt_batch_size_round_to,
+                )
+
+            prompts_in_forward_pass, primary_acts_batch_size = (
+                self._prefer_exact_primary_acts_partition(
+                    n_prompts_in_forward_pass=prompts_in_forward_pass,
+                    primary_acts_batch_size=primary_acts_batch_size,
+                    max_prompt_count=bucket_prompt_count,
+                )
+            )
+
+            bucket_entries.append(
+                {
+                    "bucket_ceiling": bucket_ceiling,
+                    "prompt_count": bucket_prompt_count,
+                    "selected_config": {
+                        "n_prompts_in_forward_pass": prompts_in_forward_pass,
+                        "primary_acts_batch_size": primary_acts_batch_size,
+                    },
+                }
+            )
+            lower_exclusive = bucket_ceiling
+
+        return bucket_entries
+
+    def _expand_prompt_bucket_schedule(
+        self,
+        *,
+        bucket_entries: list[dict[str, Any]],
+        effective_lengths: list[int],
+        tokens: torch.Tensor,
+        schedule_path: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        schedule: list[dict[str, Any]] = []
+        scheduled_prompt_indices: set[int] = set()
+        lower_exclusive = 0
+        for bucket_entry in sorted(
+            bucket_entries,
+            key=lambda entry: int(
+                entry.get("bucket_ceiling", entry.get("upper_inclusive", 0))
+            ),
+        ):
+            if not isinstance(bucket_entry, dict):
+                raise ValueError(
+                    f"Prompt bucket entry must be a mapping, got: {bucket_entry!r}"
+                )
+            bucket_ceiling = int(
+                bucket_entry.get(
+                    "bucket_ceiling", bucket_entry.get("upper_inclusive", 0)
+                )
+            )
+            if bucket_ceiling <= lower_exclusive:
+                raise ValueError(
+                    f"Prompt bucket ceilings must increase strictly; got {bucket_ceiling} after {lower_exclusive}."
+                )
+            selected_config = bucket_entry.get("selected_config")
+            if not isinstance(selected_config, dict):
+                if schedule_path is None:
+                    raise ValueError(
+                        f"Auto prompt bucket entry {bucket_ceiling} is missing selected_config data."
+                    )
+                raise ValueError(
+                    f"Prompt bucket entry {bucket_ceiling} is missing selected_config data in {schedule_path}"
+                )
+            bucket_prompt_count = int(bucket_entry.get("prompt_count", 0))
+            bucket_indices = [
+                index
+                for index, effective_length in enumerate(effective_lengths)
+                if lower_exclusive < effective_length <= bucket_ceiling
+            ]
+            if bucket_prompt_count != len(bucket_indices):
+                raise ValueError(
+                    "Prompt bucket schedule count does not match staged effective lengths for bucket "
+                    f"{bucket_ceiling}: expected={bucket_prompt_count} actual={len(bucket_indices)}"
+                )
+            prompts_in_forward_pass = int(
+                selected_config.get(
+                    "n_prompts_in_forward_pass", self.cfg.n_prompts_in_forward_pass
+                )
+            )
+            if prompts_in_forward_pass <= 0:
+                raise ValueError(
+                    f"Prompt bucket schedule n_prompts_in_forward_pass must be positive for bucket {bucket_ceiling}."
+                )
+            primary_acts_batch_size = selected_config.get(
+                "primary_acts_batch_size", self.cfg.primary_acts_batch_size
+            )
+            if primary_acts_batch_size is not None:
+                primary_acts_batch_size = int(primary_acts_batch_size)
+
+            for start_index in range(0, len(bucket_indices), prompts_in_forward_pass):
+                prompt_indices = bucket_indices[
+                    start_index : start_index + prompts_in_forward_pass
+                ]
+                if not prompt_indices:
+                    continue
+                schedule.append(
+                    {
+                        "prompt_indices": prompt_indices,
+                        "seq_length": bucket_ceiling,
+                        "primary_acts_batch_size": primary_acts_batch_size,
+                    }
+                )
+                scheduled_prompt_indices.update(prompt_indices)
+            lower_exclusive = bucket_ceiling
+
+        expected_prompt_indices = set(range(tokens.shape[0]))
+        if scheduled_prompt_indices != expected_prompt_indices:
+            missing = sorted(expected_prompt_indices - scheduled_prompt_indices)
+            extras = sorted(scheduled_prompt_indices - expected_prompt_indices)
+            raise ValueError(
+                "Prompt bucket schedule does not partition the staged token rows exactly: "
+                f"missing={missing[:10]} extras={extras[:10]}"
+            )
+
+        return schedule
+
+    @staticmethod
+    def _stage_shared_file(source: Path, target: Path) -> None:
+        if target.exists():
+            return
+        try:
+            target.symlink_to(source)
+        except OSError:
+            shutil.copy2(source, target)
+
+    def _stage_shared_tokens_file(
+        self, *, require_effective_lengths: bool = False
+    ) -> None:
+        source = self._ensure_shared_tokens_source_file(
+            require_effective_lengths=require_effective_lengths
+        )
+        if source is None:
+            return
+        if not source.is_file():
+            raise FileNotFoundError(f"Shared tokens file does not exist: {source}")
+
+        target = self._tokens_file_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._stage_shared_file(source, target)
+
+        source_base_name = (
+            source.name[: -len(source.suffix)] if source.suffix else source.name
+        )
+        target_base_name = (
+            target.name[: -len(target.suffix)] if target.suffix else target.name
+        )
+        for sidecar in sorted(source.parent.glob(f"{source_base_name}.*")):
+            if not sidecar.is_file() or sidecar == source:
+                continue
+            relative_suffix = sidecar.name[len(source_base_name) :]
+            sidecar_target = target.parent / f"{target_base_name}{relative_suffix}"
+            self._stage_shared_file(sidecar, sidecar_target)
+
+    def _load_prompt_bucket_schedule(
+        self, tokens: torch.Tensor
+    ) -> list[dict[str, Any]] | None:
+        if (
+            not self.cfg.prompt_bucket_schedule_file
+            and not self.cfg.auto_prompt_bucket_schedule
+        ):
+            return None
+        effective_lengths = self._load_prompt_effective_lengths(tokens)
+
+        if self.cfg.prompt_bucket_schedule_file:
+            schedule_path = Path(self.cfg.prompt_bucket_schedule_file)
+            if not schedule_path.is_file():
+                raise FileNotFoundError(
+                    f"Prompt bucket schedule file does not exist: {schedule_path}"
+                )
+
+            payload = json.loads(schedule_path.read_text(encoding="utf-8"))
+            bucket_entries = payload.get("buckets")
+            if not isinstance(bucket_entries, list):
+                raise ValueError(
+                    f"Prompt bucket schedule file is missing a 'buckets' list: {schedule_path}"
+                )
+
+            return self._expand_prompt_bucket_schedule(
+                bucket_entries=bucket_entries,
+                effective_lengths=effective_lengths,
+                tokens=tokens,
+                schedule_path=schedule_path,
+            )
+
+        bucket_entries = self._auto_prompt_bucket_entries(effective_lengths)
+        return self._expand_prompt_bucket_schedule(
+            bucket_entries=bucket_entries,
+            effective_lengths=effective_lengths,
+            tokens=tokens,
+        )
 
     def hash_tensor(self, tensor: torch.Tensor) -> Tuple[int, ...]:
         return tuple(tensor.cpu().numpy().flatten().tolist())
@@ -891,8 +1517,10 @@ class NeuronpediaRunner:
         unique_sequences: Set[Tuple[int, ...]] = set()
         pbar = tqdm(range(n_prompts // activations_store.store_batch_size_prompts))
 
-        for _ in pbar:
-            batch_tokens = activations_store.get_batch_tokens()
+        for batch_idx in pbar:
+            batch_tokens = activations_store.get_batch_tokens(
+                move_to_model_device=False
+            )
             if self.cfg.shuffle_tokens:
                 batch_tokens = batch_tokens[torch.randperm(batch_tokens.shape[0])]
 
@@ -910,6 +1538,8 @@ class NeuronpediaRunner:
         all_tokens = torch.cat(all_tokens_list, dim=0)[:n_prompts]
         if self.cfg.shuffle_tokens:
             all_tokens = all_tokens[torch.randperm(all_tokens.shape[0])]
+
+        all_tokens = all_tokens.cpu()
 
         return all_tokens
 
@@ -949,7 +1579,9 @@ class NeuronpediaRunner:
             tokens = tokens[:, :keep_length]
 
         if self.cfg.prefix_str:
-            prefix = torch.tensor(prefix_tokens).to(tokens.device)
+            prefix = torch.tensor(
+                prefix_tokens, dtype=tokens.dtype, device=tokens.device
+            )
             prefix_repeated = prefix.unsqueeze(0).repeat(tokens.shape[0], 1)
             # if sae.cfg.prepend_bos, then add that before the suffix
             if (
@@ -961,7 +1593,9 @@ class NeuronpediaRunner:
             tokens = torch.cat([prefix_repeated, tokens], dim=1)
 
         if self.cfg.suffix_str:
-            suffix = torch.tensor(suffix_tokens).to(tokens.device)
+            suffix = torch.tensor(
+                suffix_tokens, dtype=tokens.dtype, device=tokens.device
+            )
             suffix_repeated = suffix.unsqueeze(0).repeat(tokens.shape[0], 1)
             tokens = torch.cat([tokens, suffix_repeated], dim=1)
 
@@ -996,10 +1630,14 @@ class NeuronpediaRunner:
             f.write(skipped_indexes_json)
 
     def get_tokens(self):
-        tokens_file = f"{self.cfg.outputs_dir}/tokens_{self.cfg.n_prompts_total}.pt"
-        if os.path.isfile(tokens_file):
+        tokens_file = self._tokens_file_path()
+        if not tokens_file.is_file():
+            self._stage_shared_tokens_file(
+                require_effective_lengths=self._schedule_requires_effective_lengths()
+            )
+        if tokens_file.is_file():
             print("Tokens exist, loading them.")
-            tokens = torch.load(tokens_file)
+            tokens = torch.load(tokens_file, map_location="cpu").cpu()
         else:
             print("Tokens don't exist, making them.")
             tokens = self.generate_tokens(
@@ -1007,11 +1645,15 @@ class NeuronpediaRunner:
                 self.cfg.n_prompts_total,
             )
             torch.save(
-                tokens,
+                tokens.cpu(),
                 tokens_file,
             )
 
-        assert not has_duplicate_rows(tokens), "Duplicate rows in tokens"
+        if has_duplicate_rows(tokens):
+            print(
+                "NeuronpediaRunner: Loaded tokens contain duplicate rows; continuing because "
+                "pretokenized prompt datasets may preserve distinct examples with identical token contexts."
+            )
 
         return tokens
 
@@ -1049,9 +1691,8 @@ class NeuronpediaRunner:
         wandb_cfg["sae_cfg"] = self.sae.cfg.to_dict()
 
         current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        set_name = (
-            self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
-        )
+        set_name = self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        source_set_name = self._resolved_neuronpedia_set_name()
         if self.cfg.use_wandb:
             wandb.init(
                 project="sae-dashboard-generation",
@@ -1076,6 +1717,7 @@ class NeuronpediaRunner:
         self.record_skipped_features()
         tokens = self.get_tokens()
         tokens = self.add_prefix_suffix_to_tokens(tokens)
+        prompt_minibatch_schedule = self._load_prompt_bucket_schedule(tokens)
 
         del self.activations_store
 
@@ -1094,9 +1736,11 @@ class NeuronpediaRunner:
                     continue
 
                 output_file = f"{self.cfg.outputs_dir}/batch-{feature_batch_count}.json"
-                # if output_file exists, skip
-                if os.path.isfile(output_file):
-                    logline = f"\n++++++++++ Skipping Batch #{feature_batch_count} output. File exists: {output_file} ++++++++++\n"
+                if Path(output_file).is_file():
+                    logline = (
+                        f"\n++++++++++ Skipping Batch #{feature_batch_count} output. "
+                        f"File exists: {output_file} ++++++++++\n"
+                    )
                     print(logline)
                     continue
 
@@ -1126,13 +1770,14 @@ class NeuronpediaRunner:
                     features=features_to_process,
                     minibatch_size_features=self.cfg.n_features_at_a_time,
                     minibatch_size_tokens=self.cfg.n_prompts_in_forward_pass,
+                    primary_acts_batch_size=self.cfg.primary_acts_batch_size,
                     quantile_feature_batch_size=self.cfg.quantile_feature_batch_size,
                     verbose=True,
                     device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,
                     feature_centric_layout=layout,
                     perform_ablation_experiments=False,
                     dtype=self.cfg.sae_dtype,
-                    cache_dir=self.cached_activations_dir,
+                    prompt_minibatch_schedule=prompt_minibatch_schedule,
                     ignore_tokens={
                         tok_id
                         for tok_id in (
@@ -1267,10 +1912,99 @@ def main():
     parser.add_argument(
         "--np-sae-id-suffix",
         required=False,
-        help="Additional suffix on Neuronpedia for the SAE ID. Goes after the SAE Set like so: __[np-sae-id-suffix]. Used for additional l0s, training steps, etc.",
+        help=(
+            "Additional suffix on Neuronpedia for the SAE ID. Goes after the SAE Set like so: "
+            "__[np-sae-id-suffix]. Used for additional l0s, training steps, etc."
+        ),
     )
     parser.add_argument(
         "--dataset-path", required=True, help="HuggingFace dataset path"
+    )
+    parser.add_argument("--dataset-config-name", default=None)
+    parser.add_argument("--dataset-split", default=None)
+    parser.add_argument("--dataset-text-field", default=None)
+    parser.add_argument(
+        "--pretokenized-dataset-path",
+        default=None,
+        help="Path to a local HuggingFace dataset saved with an input_ids column.",
+    )
+    parser.add_argument(
+        "--shared-tokens-file",
+        default=None,
+        help=(
+            "Optional path to a shared precomputed tokens_*.pt file staged into each layer output directory. "
+            "If omitted and --pretokenized-dataset-path is provided, the runner will generate the tokens and "
+            "effective-length sidecars in the pretokenized dataset directory."
+        ),
+    )
+    parser.add_argument(
+        "--deduplicate-shared-prompt-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether runner-generated shared prompt sidecars deduplicate identical token rows before truncating to "
+            "n_prompts_total."
+        ),
+    )
+    parser.add_argument(
+        "--strict-shared-prompt-count",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Require runner-generated shared prompt sidecars to materialize exactly n_prompts_total rows, raising if "
+            "deduplication or dataset shortfall leaves fewer rows."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-bucket-schedule-file",
+        default=None,
+        help=(
+            "Optional path to a selected_bucket_configs.json artifact. When paired with --shared-tokens-file, "
+            "the runner trims model forwards per prompt-length bucket while preserving one packaging pass."
+        ),
+    )
+    parser.add_argument(
+        "--auto-prompt-bucket-schedule",
+        action="store_true",
+        help=(
+            "Derive the prompt-length schedule from the staged effective-length sidecar instead of requiring an "
+            "external selected_bucket_configs.json file. When paired with --pretokenized-dataset-path, the sidecar "
+            "can be generated automatically if it does not already exist."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-bucket-ceilings",
+        default=None,
+        help=(
+            "Optional comma-separated inclusive prompt-length ceilings for auto prompt bucketing. Defaults to "
+            "64,128,192,256 plus n_tokens_in_prompt."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-bucket-scale-limit",
+        type=float,
+        default=DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
+        help="Maximum multiplicative prompt-batch scale used when auto prompt bucketing shorter prompt ranges.",
+    )
+    parser.add_argument(
+        "--prompt-primary-acts-scale-limit",
+        type=float,
+        default=DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
+        help=(
+            "Maximum multiplicative primary-acts scale used when auto prompt bucketing shorter prompt ranges."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-batch-size-round-to",
+        type=int,
+        default=DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO,
+        help="Round auto prompt-bucket batch sizes down to this multiple.",
+    )
+    parser.add_argument(
+        "--dataset-streaming",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to stream the prompt dataset when loading it through datasets.load_dataset().",
     )
     parser.add_argument(
         "--sae_dtype", default="float32", help="Data type for sae computations"
@@ -1293,6 +2027,15 @@ def main():
         type=int,
         default=128,
         help="Number of prompts in forward pass",
+    )
+    parser.add_argument(
+        "--primary-acts-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional internal activation-capture chunk size. Keeps --n-prompts-in-forward-pass as the logical "
+            "dashboard batch while splitting model forwards into smaller chunks for low-memory GPUs."
+        ),
     )
     parser.add_argument(
         "--n-features-per-batch",
@@ -1369,7 +2112,10 @@ def main():
         "--clt-weights-filename",
         type=str,
         default="",
-        help="Filename of the CLT weights file (supports .safetensors / .pt). If omitted, script will search for a suitable file automatically.",
+        help=(
+            "Filename of the CLT weights file (supports .safetensors / .pt). If omitted, "
+            "script will search for a suitable file automatically."
+        ),
     )
     parser.add_argument(
         "--sae-loader",
@@ -1539,6 +2285,14 @@ def main():
 
     args = parser.parse_args()
 
+    prompt_bucket_ceilings: tuple[int, ...] = ()
+    if args.prompt_bucket_ceilings:
+        prompt_bucket_ceilings = tuple(
+            int(value.strip())
+            for value in str(args.prompt_bucket_ceilings).split(",")
+            if value.strip()
+        )
+
     cfg = NeuronpediaRunnerConfig(
         sae_set=args.sae_set,
         sae_path=args.sae_path,
@@ -1546,6 +2300,20 @@ def main():
         np_sae_id_suffix=args.np_sae_id_suffix,
         from_local_sae=args.from_local_sae,
         huggingface_dataset_path=args.dataset_path,
+        huggingface_dataset_config_name=args.dataset_config_name,
+        huggingface_dataset_split=args.dataset_split,
+        huggingface_dataset_text_field=args.dataset_text_field,
+        pretokenized_dataset_path=args.pretokenized_dataset_path,
+        shared_tokens_file=args.shared_tokens_file,
+        deduplicate_shared_prompt_tokens=args.deduplicate_shared_prompt_tokens,
+        strict_shared_prompt_count=args.strict_shared_prompt_count,
+        prompt_bucket_schedule_file=args.prompt_bucket_schedule_file,
+        auto_prompt_bucket_schedule=args.auto_prompt_bucket_schedule,
+        prompt_bucket_ceilings=prompt_bucket_ceilings,
+        prompt_bucket_scale_limit=args.prompt_bucket_scale_limit,
+        prompt_primary_acts_scale_limit=args.prompt_primary_acts_scale_limit,
+        prompt_batch_size_round_to=args.prompt_batch_size_round_to,
+        dataset_streaming=args.dataset_streaming,
         sae_dtype=args.sae_dtype,
         model_dtype=args.model_dtype,
         outputs_dir=args.output_dir,
@@ -1555,6 +2323,7 @@ def main():
         n_prompts_total=args.n_prompts,
         n_tokens_in_prompt=args.n_tokens_in_prompt,
         n_prompts_in_forward_pass=args.n_prompts_in_forward_pass,
+        primary_acts_batch_size=args.primary_acts_batch_size,
         n_features_at_a_time=args.n_features_per_batch,
         start_batch=args.start_batch,
         end_batch=args.end_batch,

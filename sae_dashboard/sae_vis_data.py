@@ -20,6 +20,10 @@ SAE_CONFIG_DICT = dict(
 if not then we use all of `tokens`",
     minibatch_size_tokens="The minibatch size we'll use to split up the full batch during forward passes, to avoid \
 OOMs.",
+    prompt_minibatch_schedule="Optional runner-resolved prompt schedule used to trim shorter prompt buckets during \
+activation capture while preserving the original full-width output layout.",
+    primary_acts_batch_size="Optional internal activation-capture chunk size used inside each token minibatch, to \
+reduce peak model-forward memory without changing the dashboard minibatch shape.",
     minibatch_size_features="The feature minibatch size we'll use to split up our features, to avoid OOM errors",
     seed="Random seed, for reproducibility (e.g. sampling quantiles)",
     verbose="Whether to print out progress messages and other info during the data gathering process",
@@ -36,6 +40,8 @@ class SaeVisConfig:
     features: Iterable[int]
     minibatch_size_features: int = 256
     minibatch_size_tokens: int = 64
+    prompt_minibatch_schedule: list[dict[str, Any]] | None = None
+    primary_acts_batch_size: int | None = None
     quantile_feature_batch_size: int = 64
     perform_ablation_experiments: bool = False
     device: str = "cpu"
@@ -105,6 +111,23 @@ class SaeVisConfig:
         self.prompt_centric_layout.help(
             title="SaeVisLayoutConfig: prompt-centric vis", key=False
         )
+
+
+@dataclass
+class SaeVisColumnarBatch:
+    feature_batch_index: int
+    feature_indices: list[int]
+    artifact_dir: Path
+    manifest_path: Path
+    row_counts: dict[str, int]
+
+
+@dataclass
+class SaeVisColumnarData:
+    cfg: SaeVisConfig
+    artifact_dir: Path
+    manifest_path: Path
+    batches: list[SaeVisColumnarBatch]
 
 
 @dataclass_json
