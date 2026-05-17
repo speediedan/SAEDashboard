@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_CEILINGS = (64, 128, 192, 256)
@@ -92,6 +92,20 @@ class NeuronpediaRunnerConfig:
     free_unused_model_layers: bool = False
 
     hf_model_path: Optional[str] = None
+    model_wrapper: str = "hooked"
+    bridge_enable_compatibility_mode: bool = True
+    bridge_compatibility_mode_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"no_processing": True}
+    )
+    log_resource_snapshots: bool = False
+    log_hook_aliases: bool = False
+    log_performance: bool = False
+    cleanup_each_minibatch: bool = False
+    converter_input_artifact_dir: Optional[str] = None
+    sequence_replay_artifact_dir: Optional[str] = None
+    torch_profile: bool = False
+    torch_profile_dir: Optional[str] = None
+    use_cached_activations: bool = True
 
     # If true, we load a Transcoder (inherits from SAE) instead of a standard SAE.
     use_transcoder: bool = False

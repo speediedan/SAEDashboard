@@ -1,7 +1,9 @@
+import gc
 import math
 import random
 import re
 from collections import defaultdict
+from pathlib import Path
 from typing import Iterable, List, Union
 
 import einops
@@ -32,6 +34,7 @@ from sae_dashboard.huggingface_model_wrapper import (
     HFActivationConfig,
     HuggingFaceModelWrapper,
 )
+from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import SaeVisConfig, SaeVisData
 from sae_dashboard.sequence_data_generator import SequenceDataGenerator
 from sae_dashboard.transformer_lens_wrapper import (
@@ -39,6 +42,36 @@ from sae_dashboard.transformer_lens_wrapper import (
     TransformerLensWrapper,
 )
 from sae_dashboard.utils_fns import FeatureStatistics
+
+
+def _resolve_unembed_matrix(model: HookedSAETransformer) -> Tensor:
+    if hasattr(model, "W_U"):
+        return model.W_U
+    if hasattr(model, "unembed") and hasattr(model.unembed, "W_U"):
+        return model.unembed.W_U
+    raise AttributeError(f"{type(model).__name__} does not expose W_U")
+
+
+def _build_ignore_tokens_mask(
+    cfg: SaeVisConfig,
+    tokens: Int[Tensor, "batch seq"],
+    target_device: torch.device | str,
+) -> Tensor:
+    ignore_tokens_mask = torch.ones_like(tokens, dtype=torch.bool)
+    if cfg.ignore_tokens:
+        ignore_tokens_mask &= ~torch.isin(
+            tokens,
+            torch.tensor(
+                list(cfg.ignore_tokens),
+                dtype=tokens.dtype,
+                device=tokens.device,
+            ),
+        )
+    if cfg.ignore_positions:
+        ignore_positions_mask = torch.ones_like(tokens, dtype=torch.bool)
+        ignore_positions_mask[:, cfg.ignore_positions] = False
+        ignore_tokens_mask &= ignore_positions_mask
+    return ignore_tokens_mask.to(target_device)
 
 
 class FeatureDataGeneratorFactory:
@@ -100,7 +133,10 @@ class FeatureDataGeneratorFactory:
             wrapped_model = TransformerLensWrapper(model, activation_config)  # type: ignore
 
         return FeatureDataGenerator(
-            cfg=cfg, model=wrapped_model, encoder=encoder, tokens=tokens  # type: ignore
+            cfg=cfg,
+            model=wrapped_model,
+            encoder=encoder,
+            tokens=tokens,  # type: ignore
         )
 
 
@@ -111,6 +147,43 @@ class SaeVisRunner:
         self.dtype = DTYPES[self.cfg.dtype]
         if self.cfg.cache_dir is not None:
             self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg.sequence_replay_artifact_dir is not None:
+            self.cfg.sequence_replay_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_sequence_replay_artifact(
+        self,
+        *,
+        feature_batch_index: int,
+        features: list[int],
+        tokens: Int[Tensor, "batch seq"],
+        selection_mask: Tensor,
+        valid_token_count: int,
+        all_feat_acts: Tensor,
+        logits: Tensor,
+        feature_resid_dir: Tensor,
+    ) -> Path | None:
+        if self.cfg.sequence_replay_artifact_dir is None:
+            return None
+
+        artifact_path = (
+            self.cfg.sequence_replay_artifact_dir
+            / f"feature-batch-{feature_batch_index:04d}.pt"
+        )
+        torch.save(
+            {
+                "feature_batch_index": feature_batch_index,
+                "feature_indices": list(features),
+                "token_shape": list(tokens.shape),
+                "valid_token_count": valid_token_count,
+                "tokens": tokens.detach().cpu(),
+                "selection_mask": selection_mask.detach().cpu(),
+                "feature_activations": all_feat_acts.detach().cpu(),
+                "feature_logits": logits.detach().cpu(),
+                "feature_resid_dir": feature_resid_dir.detach().cpu(),
+            },
+            artifact_path,
+        )
+        return artifact_path
 
     @torch.inference_mode()
     def run(
@@ -120,13 +193,8 @@ class SaeVisRunner:
         tokens: Int[Tensor, "batch seq"],
         tokenizer: AutoTokenizer = None,  # Required for HuggingFace models
     ) -> SaeVisData:
-        # Apply random seed
         self.set_seeds()
 
-        # add extra method to SAE which is not yet provided by SAE Lens.
-        # encoder = self.mock_feature_acts_subset_for_now(encoder)
-
-        # Skip fold_W_dec_norm for CLT wrappers as they don't support this method
         if "CLTLayerWrapper" in str(type(encoder)) or encoder.cfg.architecture() in [
             "temporal"
         ]:
@@ -134,20 +202,12 @@ class SaeVisRunner:
         else:
             encoder.fold_W_dec_norm()
 
-        # turn off reshaping mode since that's not useful if we're caching activations on disk
         if "CLTLayerWrapper" in str(type(encoder)):
             print("SaeVisRunner: Skipping hook_z_reshaping_mode check for CLT wrapper.")
         elif encoder.hook_z_reshaping_mode:
             encoder.turn_off_forward_pass_hook_z_reshaping()
 
-        # set precision on encoders and model
-        # encoder = encoder.to(DTYPES[self.cfg.dtype])
-        # # model = cast(HookedTransformer, model.to(DTYPES[self.cfg.dtype]))
-
-        # Create objects to store all the data we'll get from `_get_feature_data`
         sae_vis_data = SaeVisData(cfg=self.cfg)
-        # model.to(self.cfg.device)
-        # encoder = encoder.to(self.cfg.device)
         time_logs = defaultdict(float)
 
         features_list = self.handle_features(self.cfg.features, encoder)
@@ -155,178 +215,253 @@ class SaeVisRunner:
         progress = self.get_progress_bar(tokens, feature_batches, features_list)
 
         feature_data_generator = FeatureDataGeneratorFactory.create(
-            self.cfg, model, encoder, tokens, tokenizer=tokenizer
+            self.cfg,
+            model,
+            encoder,
+            tokens,
+            tokenizer=tokenizer,
         )
 
-        # Get W_U (unembedding matrix) from the appropriate source
-        if self.cfg.use_huggingface:
-            W_U = self._get_hf_unembed_matrix(model)
-        else:
-            W_U = model.W_U
-
+        unembed_matrix = (
+            self._get_hf_unembed_matrix(model)
+            if self.cfg.use_huggingface
+            else _resolve_unembed_matrix(model)
+        )
         sequence_data_generator = SequenceDataGenerator(
             cfg=self.cfg,
             tokens=tokens,
-            W_U=W_U,
+            W_U=unembed_matrix,
         )
 
-        all_consolidated_dfa_results = {
-            feature_idx: {} for feature_idx in self.cfg.features
-        }
-        # For each batch of features: get new data and update global data storage objects
-        # TODO: We should write out json files with the results as this runs rather than storing everything in memory
-        for features in feature_batches:
-            # model and sae activations calculations.
+        all_consolidated_dfa_results = {feature_idx: {} for feature_idx in features_list}
+        for feature_batch_index, features in enumerate(feature_batches):
+            with timed_stage(
+                self.cfg.log_performance,
+                "activation_and_encode_total",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                (
+                    all_feat_acts,
+                    _,
+                    feature_resid_dir,
+                    feature_out_dir,
+                    corrcoef_neurons,
+                    corrcoef_encoder,
+                    batch_dfa_results,
+                ) = feature_data_generator.get_feature_data(features, progress)
 
-            (
-                all_feat_acts,
-                _,  # all resid post. no longer used.
-                feature_resid_dir,
-                feature_out_dir,
-                corrcoef_neurons,
-                corrcoef_encoder,
-                batch_dfa_results,
-            ) = feature_data_generator.get_feature_data(features, progress)
+            with timed_stage(
+                self.cfg.log_performance,
+                "logits_projection",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                logits = einops.einsum(
+                    feature_resid_dir.to(
+                        device=unembed_matrix.device,
+                        dtype=unembed_matrix.dtype,
+                    ),
+                    unembed_matrix,
+                    "feats d_model, d_model d_vocab -> feats d_vocab",
+                ).to(self.device)
 
-            # Get the logits of all features (i.e. the directions this feature writes to the logit output)
-            logits = einops.einsum(
-                feature_resid_dir.to(device=W_U.device, dtype=W_U.dtype),
-                W_U,
-                "feats d_model, d_model d_vocab -> feats d_vocab",
-            ).to(self.device)
-
-            # ! Get stats (including quantiles, which will be useful for the prompt-centric visualisation)
-            feature_stats = FeatureStatistics.create(
-                data=einops.rearrange(all_feat_acts, "b s feats -> feats (b s)"),
-                batch_size=self.cfg.quantile_feature_batch_size,
+            ignore_tokens_mask = _build_ignore_tokens_mask(
+                self.cfg,
+                tokens,
+                all_feat_acts.device,
             )
+            flat_all_feat_acts = einops.rearrange(
+                all_feat_acts,
+                "batch seq feats -> feats (batch seq)",
+            )
+            flat_ignore_tokens_mask = einops.rearrange(
+                ignore_tokens_mask,
+                "batch seq -> (batch seq)",
+            )
+            valid_token_count = int(flat_ignore_tokens_mask.sum().item())
 
-            # ! Data setup code (defining the main objects we'll eventually return)
+            if self.cfg.log_performance:
+                log_perf_event(
+                    "packaging_shape_summary",
+                    batch=feature_batch_index,
+                    feature_count=len(features),
+                    token_shape=list(tokens.shape),
+                    valid_token_count=valid_token_count,
+                )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_statistics_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                feature_stats_input = flat_all_feat_acts[:, flat_ignore_tokens_mask]
+                if feature_stats_input.shape[-1] == 0:
+                    feature_stats_input = torch.zeros(
+                        (flat_all_feat_acts.shape[0], 1),
+                        dtype=flat_all_feat_acts.dtype,
+                        device=flat_all_feat_acts.device,
+                    )
+                feature_stats = FeatureStatistics.create(
+                    data=feature_stats_input,
+                    batch_size=self.cfg.quantile_feature_batch_size,
+                )
+
             feature_data_dict: dict[int, FeatureData] = {
                 feat: FeatureData() for feat in features
             }
-
-            # We're using `cfg.feature_centric_layout` to figure out what data we'll need to calculate during this function
             layout = self.cfg.feature_centric_layout
 
-            feature_tables_data = get_features_table_data(
-                feature_out_dir=feature_out_dir,
-                corrcoef_neurons=corrcoef_neurons,
-                corrcoef_encoder=corrcoef_encoder,
-                n_rows=layout.feature_tables_cfg.n_rows,  # type: ignore
-            )
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_table_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                feature_tables_data = get_features_table_data(
+                    feature_out_dir=feature_out_dir,
+                    corrcoef_neurons=corrcoef_neurons,
+                    corrcoef_encoder=corrcoef_encoder,
+                    n_rows=layout.feature_tables_cfg.n_rows,  # type: ignore
+                )
+                for row_index, feat in enumerate(features):
+                    feature_data_dict[feat].feature_tables_data = FeatureTablesData(
+                        **{name: values[row_index] for name, values in feature_tables_data.items()}  # type: ignore
+                    )
 
-            # Add all this data to the list of FeatureTablesData objects
             if batch_dfa_results:
-                # Accumulate DFA results across feature batches
                 for feature_idx, feature_data in batch_dfa_results.items():
                     all_consolidated_dfa_results[feature_idx].update(feature_data)
 
-            for i, (feat, logit_vector) in enumerate(zip(features, logits)):
-                feature_data_dict[feat].feature_tables_data = FeatureTablesData(
-                    **{k: v[i] for k, v in feature_tables_data.items()}  # type: ignore
-                )
-
-                # Get logits histogram data (no title)
-                feature_data_dict[feat].logits_histogram_data = (
-                    LogitsHistogramData.from_data(
-                        data=logit_vector.to(
-                            torch.float32
-                        ),  # need this otherwise fails on MPS
-                        n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
-                        tickmode="5 ticks",
-                        title=None,
-                    )
-                )
-
-                # Get data for feature activations histogram (including the title!)
-                feat_acts = all_feat_acts[..., i]
-
-                # Create a mask for tokens to ignore based on both ID and position
-                ignore_tokens_mask = torch.ones_like(tokens, dtype=torch.bool)
-                if self.cfg.ignore_tokens:
-                    valid_ignore_tokens = [
-                        t for t in self.cfg.ignore_tokens if t is not None
-                    ]
-                    if valid_ignore_tokens:
-                        ignore_tokens_mask &= ~torch.isin(
-                            tokens,
-                            torch.tensor(
-                                valid_ignore_tokens,
-                                dtype=tokens.dtype,
-                                device=tokens.device,
-                            ),
+            with timed_stage(
+                self.cfg.log_performance,
+                "logits_histogram_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                for row_index, (feat, logit_vector) in enumerate(zip(features, logits)):
+                    feature_data_dict[feat].logits_histogram_data = (
+                        LogitsHistogramData.from_data(
+                            data=logit_vector.to(torch.float32),
+                            n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
+                            tickmode="5 ticks",
+                            title=None,
                         )
-                if self.cfg.ignore_positions:
-                    ignore_positions_mask = torch.ones_like(tokens, dtype=torch.bool)
-                    ignore_positions_mask[:, self.cfg.ignore_positions] = False
-                    ignore_tokens_mask &= ignore_positions_mask
-
-                # Move the mask to the same device as feat_acts
-                ignore_tokens_mask = ignore_tokens_mask.to(feat_acts.device)
-
-                # set any masked positions to 0
-                masked_feat_acts = feat_acts * ignore_tokens_mask
-
-                # Apply the mask to feat_acts
-                nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
-                frac_nonzero = nonzero_feat_acts.numel() / masked_feat_acts.numel()
-
-                feature_data_dict[feat].acts_histogram_data = (
-                    ActsHistogramData.from_data(
-                        data=nonzero_feat_acts.to(
-                            torch.float32
-                        ),  # need this otherwise fails on MPS
-                        n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
-                        tickmode="5 ticks",
-                        title=f"ACTIVATIONS<br>DENSITY = {frac_nonzero:.3%}",
                     )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "activation_histogram_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                for row_index, feat in enumerate(features):
+                    feat_acts = all_feat_acts[..., row_index]
+                    masked_feat_acts = feat_acts * ignore_tokens_mask
+                    nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
+                    valid_feature_token_count = max(
+                        1,
+                        int(ignore_tokens_mask.sum().item()),
+                    )
+                    histogram_title = (
+                        "ACTIVATIONS<br>DENSITY = "
+                        f"{nonzero_feat_acts.numel() / valid_feature_token_count:.3%}"
+                    )
+                    if nonzero_feat_acts.numel() == 0:
+                        feature_data_dict[feat].acts_histogram_data = ActsHistogramData(
+                            title=histogram_title
+                        )
+                    else:
+                        feature_data_dict[feat].acts_histogram_data = (
+                            ActsHistogramData.from_data(
+                                data=nonzero_feat_acts.to(torch.float32),
+                                n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
+                                tickmode="5 ticks",
+                                title=histogram_title,
+                            )
+                        )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "logits_table_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                for feat, logit_vector in zip(features, logits):
+                    feature_data_dict[feat].logits_table_data = get_logits_table_data(
+                        logit_vector=logit_vector,
+                        n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
+                    )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "sequence_packaging",
+                device=self.device,
+                batch=feature_batch_index,
+                feature_count=len(features),
+            ):
+                for row_index, feat in enumerate(features):
+                    feature_data_dict[feat].sequence_data = (
+                        sequence_data_generator.get_sequences_data(
+                            feat_acts=all_feat_acts[..., row_index] * ignore_tokens_mask,
+                            feat_logits=logits[row_index],
+                            resid_post=torch.tensor([]),
+                            feature_resid_dir=feature_resid_dir[row_index],
+                        )
+                    )
+                    if self.cfg.use_dfa:
+                        feature_data_dict[feat].dfa_data = all_consolidated_dfa_results.get(
+                            feat,
+                            None,
+                        )
+                        feature_data_dict[feat].decoder_weights_data = (
+                            get_decoder_weights_distribution(encoder, model, feat)[0]
+                        )
+                    if progress is not None:
+                        progress[1].update(1)
+
+            artifact_path = self._write_sequence_replay_artifact(
+                feature_batch_index=feature_batch_index,
+                features=features,
+                tokens=tokens,
+                selection_mask=ignore_tokens_mask,
+                valid_token_count=valid_token_count,
+                all_feat_acts=all_feat_acts,
+                logits=logits,
+                feature_resid_dir=feature_resid_dir,
+            )
+            if artifact_path is not None and self.cfg.log_performance:
+                log_perf_event(
+                    "sequence_replay_artifact",
+                    batch=feature_batch_index,
+                    path=artifact_path,
+                    feature_count=len(features),
+                    valid_token_count=valid_token_count,
                 )
-
-                # Create a MiddlePlotsData object from this, and add it to the dict
-                feature_data_dict[feat].logits_table_data = get_logits_table_data(
-                    logit_vector=logit_vector,
-                    n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
-                )
-
-                # ! Calculate all data for the right-hand visualisations, i.e. the sequences
-
-                # Add this feature's sequence data to the list
-                feature_data_dict[feat].sequence_data = (
-                    sequence_data_generator.get_sequences_data(
-                        feat_acts=masked_feat_acts,
-                        feat_logits=logits[i],
-                        resid_post=torch.tensor([]),  # no longer used
-                        feature_resid_dir=feature_resid_dir[i],
-                    )
-                )
-                if self.cfg.use_dfa:
-                    feature_data_dict[feat].dfa_data = all_consolidated_dfa_results.get(
-                        feat, None
-                    )
-                    feature_data_dict[feat].decoder_weights_data = (
-                        get_decoder_weights_distribution(encoder, model, feat)[0]
-                    )
-
-                # Update the 2nd progress bar (fwd passes & getting sequence data dominates the runtime of these computations)
-                if progress is not None:
-                    progress[1].update(1)
-
-            # ! Return the output, as a dict of FeatureData items
             new_feature_data = SaeVisData(
                 cfg=self.cfg,
                 feature_data_dict=feature_data_dict,
                 feature_stats=feature_stats,
             )
-
             sae_vis_data.update(new_feature_data)
 
-        # Now exited, make sure the progress bar is at 100%
+            if self.cfg.cleanup_each_minibatch:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
         if progress is not None:
             for pbar in progress:
                 pbar.n = pbar.total
 
-        # If verbose, then print the output
         if self.cfg.verbose:
             total_time = sum(time_logs.values())
             table = Table("Task", "Time", "Pct %")
@@ -358,15 +493,15 @@ class SaeVisRunner:
         raise ValueError("Could not find unembedding matrix in HuggingFace model")
 
     def handle_features(
-        self, features: Iterable[int] | None, encoder_wrapper: SAE  # type: ignore
+        self,
+        features: Iterable[int] | None,
+        encoder_wrapper: SAE,  # type: ignore
     ) -> list[int]:
         if features is None:
             return list(range(encoder_wrapper.cfg.d_sae))
-        else:
-            return list(features)
+        return list(features)
 
     def get_feature_batches(self, features_list: list[int]) -> list[list[int]]:
-        # Break up the features into batches
         feature_batches = [
             x.tolist()
             for x in torch.tensor(features_list).split(self.cfg.minibatch_size_features)
@@ -379,17 +514,17 @@ class SaeVisRunner:
         feature_batches: list[list[int]],
         features_list: list[int],
     ):
-        # Calculate how many minibatches of tokens there will be (for the progress bar)
-        n_token_batches = (
-            1
-            if (self.cfg.minibatch_size_tokens is None)
-            else math.ceil(len(tokens) / self.cfg.minibatch_size_tokens)
-        )
+        if self.cfg.prompt_minibatch_schedule:
+            n_token_batches = len(self.cfg.prompt_minibatch_schedule)
+        else:
+            n_token_batches = (
+                1
+                if self.cfg.minibatch_size_tokens is None
+                else math.ceil(len(tokens) / self.cfg.minibatch_size_tokens)
+            )
 
-        # Get the denominator for each of the 2 progress bars
         totals = (n_token_batches * len(feature_batches), len(features_list))
 
-        # Optionally add two progress bars (one for the forward passes, one for getting the sequence data)
         if self.cfg.verbose:
             progress = [
                 tqdm(total=totals[0], desc="Forward passes to cache data for vis"),
@@ -421,7 +556,8 @@ def get_decoder_weights_distribution(
         )
         distribs.append(
             DecoderWeightsDistribution(
-                model.cfg.n_heads, [float(x) for x in decoder_weights_distribution]
+                model.cfg.n_heads,
+                [float(x) for x in decoder_weights_distribution],
             )
         )
 

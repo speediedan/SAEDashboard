@@ -1,5 +1,7 @@
+import gc
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Union
@@ -10,6 +12,7 @@ import torch
 from jaxtyping import Float, Int
 from sae_lens import SAE
 from sae_lens.config import DTYPE_MAP as DTYPES
+from sae_lens.saes.topk_sae import TopK
 from torch import Tensor, nn
 from tqdm.auto import tqdm
 
@@ -18,6 +21,7 @@ from sae_dashboard.huggingface_model_wrapper import (
     HuggingFaceModelWrapper,
     to_resid_direction_hf,
 )
+from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.transformer_lens_wrapper import (
     TransformerLensWrapper,
@@ -29,6 +33,34 @@ Arr = np.ndarray
 
 # Type alias for model wrapper types
 ModelWrapperType = Union[TransformerLensWrapper, HuggingFaceModelWrapper]
+
+
+@dataclass
+class ActivationCaptureStats:
+    model_forward_passes: int = 0
+    total_forward_wall_s: float = 0.0
+    peak_rss_gib: float | None = None
+    peak_cuda_allocated_gib: float | None = None
+    peak_cuda_reserved_gib: float | None = None
+
+    def update_peaks(
+        self,
+        *,
+        rss_gib: float | None,
+        cuda_allocated_gib: float | None,
+        cuda_reserved_gib: float | None,
+    ) -> None:
+        self.peak_rss_gib = _max_optional(self.peak_rss_gib, rss_gib)
+        self.peak_cuda_allocated_gib = _max_optional(self.peak_cuda_allocated_gib, cuda_allocated_gib)
+        self.peak_cuda_reserved_gib = _max_optional(self.peak_cuda_reserved_gib, cuda_reserved_gib)
+
+
+def _max_optional(current: float | None, candidate: float | None) -> float | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return max(current, candidate)
 
 
 @dataclass(frozen=True)
@@ -69,6 +101,48 @@ class FeatureDataGenerator:
             self.dfa_calculator = DFACalculator(model.model, encoder)  # type: ignore
         else:
             self.dfa_calculator = None
+
+    @staticmethod
+    def _current_rss_gib() -> float | None:
+        status_path = Path("/proc/self/status")
+        if not status_path.exists():
+            return None
+        for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1]) / (1024**2)
+        return None
+
+    @staticmethod
+    def _cuda_memory_snapshot(
+        device: str | torch.device | None,
+    ) -> tuple[float | None, float | None]:
+        if device is None or not torch.cuda.is_available():
+            return None, None
+        torch_device = torch.device(device)
+        if torch_device.type != "cuda":
+            return None, None
+        return (
+            torch.cuda.memory_allocated(torch_device) / (1024**3),
+            torch.cuda.memory_reserved(torch_device) / (1024**3),
+        )
+
+    def _update_resource_peaks(
+        self,
+        peak_rss_gib: float | None,
+        peak_cuda_allocated_gib: float | None,
+        peak_cuda_reserved_gib: float | None,
+    ) -> tuple[float | None, float | None, float | None]:
+        current_rss_gib = self._current_rss_gib()
+        current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
+            getattr(self.cfg, "device", None)
+        )
+        return (
+            _max_optional(peak_rss_gib, current_rss_gib),
+            _max_optional(peak_cuda_allocated_gib, current_cuda_allocated_gib),
+            _max_optional(peak_cuda_reserved_gib, current_cuda_reserved_gib),
+        )
 
     @torch.inference_mode()
     def batch_tokens(self, tokens: Int[Tensor, "batch seq"]) -> list[PromptTokenMinibatch]:
@@ -218,7 +292,18 @@ class FeatureDataGenerator:
         minibatch_tokens: torch.Tensor,
         *,
         primary_acts_batch_size: int | None = None,
+        stats: ActivationCaptureStats | None = None,
     ) -> Dict[str, torch.Tensor]:
+        capture_stats = stats if stats is not None else ActivationCaptureStats()
+        current_rss_gib = self._current_rss_gib()
+        current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
+            getattr(self.cfg, "device", None)
+        )
+        capture_stats.update_peaks(
+            rss_gib=current_rss_gib,
+            cuda_allocated_gib=current_cuda_allocated_gib,
+            cuda_reserved_gib=current_cuda_reserved_gib,
+        )
         if primary_acts_batch_size is None:
             primary_acts_batch_size = self.cfg.primary_acts_batch_size
         if (
@@ -226,16 +311,40 @@ class FeatureDataGenerator:
             or primary_acts_batch_size <= 0
             or minibatch_tokens.shape[0] <= primary_acts_batch_size
         ):
+            forward_start_time = time.perf_counter()
             activation_dict = self.model.forward(
                 minibatch_tokens.to("cpu"),
                 return_logits=False,  # type: ignore[arg-type]
+            )
+            capture_stats.model_forward_passes += 1
+            capture_stats.total_forward_wall_s += time.perf_counter() - forward_start_time
+            current_rss_gib = self._current_rss_gib()
+            current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
+                getattr(self.cfg, "device", None)
+            )
+            capture_stats.update_peaks(
+                rss_gib=current_rss_gib,
+                cuda_allocated_gib=current_cuda_allocated_gib,
+                cuda_reserved_gib=current_cuda_reserved_gib,
             )
             return activation_dict
 
         activation_dict: Dict[str, torch.Tensor] | None = None
         offset = 0
         for token_chunk in minibatch_tokens.split(primary_acts_batch_size):
+            forward_start_time = time.perf_counter()
             chunk_activations = self.model.forward(token_chunk.to("cpu"), return_logits=False)  # type: ignore[arg-type]
+            capture_stats.model_forward_passes += 1
+            capture_stats.total_forward_wall_s += time.perf_counter() - forward_start_time
+            current_rss_gib = self._current_rss_gib()
+            current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
+                getattr(self.cfg, "device", None)
+            )
+            capture_stats.update_peaks(
+                rss_gib=current_rss_gib,
+                cuda_allocated_gib=current_cuda_allocated_gib,
+                cuda_reserved_gib=current_cuda_reserved_gib,
+            )
             if activation_dict is None:
                 activation_dict = {
                     key: value.new_empty((minibatch_tokens.shape[0], *value.shape[1:]))
@@ -257,7 +366,15 @@ class FeatureDataGenerator:
         progress: list[tqdm] | None = None,  # type: ignore
     ):  # type: ignore
         all_dfa_results = {feature_idx: {} for feature_idx in feature_indices}
+        total_model_forward_passes = 0
+        total_forward_wall_s = 0.0
+        get_feature_data_start_time = time.perf_counter()
         total_prompt_count = sum(int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches)
+        peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
+            None,
+            None,
+            None,
+        )
 
         # Create objects to store the data for computing rolling stats
         corrcoef_neurons = RollingCorrCoef()
@@ -280,75 +397,127 @@ class FeatureDataGenerator:
         # ! Compute & concatenate together all feature activations & post-activation function values
         for i, minibatch in enumerate(self.token_minibatches):
             model_activation_dict = self.get_model_acts(i, minibatch)
-            primary_acts = model_activation_dict[
-                self.model.activation_config.primary_hook_point  # type: ignore
-            ].to(self.encoder.device)
+            capture_stats = getattr(self, "_last_activation_capture_stats", ActivationCaptureStats())
+            total_model_forward_passes += capture_stats.model_forward_passes
+            total_forward_wall_s += capture_stats.total_forward_wall_s
+            peak_rss_gib = _max_optional(peak_rss_gib, capture_stats.peak_rss_gib)
+            peak_cuda_allocated_gib = _max_optional(peak_cuda_allocated_gib, capture_stats.peak_cuda_allocated_gib)
+            peak_cuda_reserved_gib = _max_optional(peak_cuda_reserved_gib, capture_stats.peak_cuda_reserved_gib)
+            with timed_stage(
+                self.cfg.log_performance,
+                "primary_acts_device_transfer",
+                device=self.cfg.device,
+                minibatch_index=i,
+                token_shape=tuple(minibatch.tokens.shape),
+            ):
+                primary_acts = model_activation_dict[
+                    self.model.activation_config.primary_hook_point  # type: ignore
+                ].to(self.encoder.device)  # make sure acts are on the correct device
             all_features_acts = None
 
-            # For TopK, compute all activations first, then select features
-            if self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
-                self.encoder.activation_fn, TopK
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_encode",
+                device=self.cfg.device,
+                minibatch_index=i,
+                feature_count=len(feature_indices),
+                token_shape=tuple(minibatch.tokens.shape),
             ):
-                # Get all features' activations
-                all_features_acts = self.encoder.encode(primary_acts)
-                feature_acts = all_features_acts[:, :, feature_indices].to(DTYPES[self.cfg.dtype])
-            else:
-                with FeatureMaskingContext(self.encoder, feature_indices):
-                    feature_acts = self.encoder.encode(primary_acts).to(DTYPES[self.cfg.dtype])
+                # For TopK, compute all activations first, then select features
+                if self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
+                    self.encoder.activation_fn, TopK
+                ):
+                    # Get all features' activations
+                    all_features_acts = self.encoder.encode(primary_acts)
+                    feature_acts = all_features_acts[:, :, feature_indices].to(DTYPES[self.cfg.dtype])
+                else:
+                    with FeatureMaskingContext(self.encoder, feature_indices):
+                        feature_acts = self.encoder.encode(primary_acts).to(DTYPES[self.cfg.dtype])
 
-            # Optionally filter out token positions whose hidden-state norm is
-            # an extreme outlier relative to the median norm in this minibatch.
-            # Mirrors dictionary_learning's `remove_high_norm` handling for
-            # models (e.g. Qwen) with random high-norm activation sinks.
-            # Ref: https://github.com/saprmarks/dictionary_learning/blob/main/dictionary_learning/pytorch_buffer.py#L220
-            if self.cfg.ignore_high_activation_norm_multiple is not None:
-                norms_bs = primary_acts.norm(dim=-1)  # [batch, seq]
-                median_norm = norms_bs.median()
-                high_norm_mask = (
-                    norms_bs
-                    > median_norm * self.cfg.ignore_high_activation_norm_multiple
+                # Optionally filter out token positions whose hidden-state norm is
+                # an extreme outlier relative to the median norm in this minibatch.
+                if self.cfg.ignore_high_activation_norm_multiple is not None:
+                    norms_bs = primary_acts.norm(dim=-1)
+                    median_norm = norms_bs.median()
+                    high_norm_mask = norms_bs > median_norm * self.cfg.ignore_high_activation_norm_multiple
+                    if high_norm_mask.any():
+                        feature_acts = feature_acts.masked_fill(
+                            high_norm_mask.unsqueeze(-1).to(feature_acts.device), 0
+                        )
+                        primary_acts = primary_acts.masked_fill(
+                            high_norm_mask.unsqueeze(-1).to(primary_acts.device), 0
+                        )
+
+            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
+                peak_rss_gib,
+                peak_cuda_allocated_gib,
+                peak_cuda_reserved_gib,
+            )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "rolling_coefficient_update",
+                device=self.cfg.device,
+                minibatch_index=i,
+                feature_count=len(feature_indices),
+                token_shape=tuple(minibatch.tokens.shape),
+            ):
+                self.update_rolling_coefficients(
+                    model_acts=primary_acts,
+                    feature_acts=feature_acts,
+                    corrcoef_neurons=corrcoef_neurons,
+                    corrcoef_encoder=corrcoef_encoder,
                 )
-                if high_norm_mask.any():
-                    # Zero out feature activations at high-norm positions so
-                    # they are excluded from max activating examples,
-                    # histograms, and sequence-level stats.
-                    feature_acts = feature_acts.masked_fill(
-                        high_norm_mask.unsqueeze(-1).to(feature_acts.device), 0
-                    )
-                    # Also zero out model activations at these positions so
-                    # they don't skew the rolling correlation statistics.
-                    primary_acts = primary_acts.masked_fill(
-                        high_norm_mask.unsqueeze(-1).to(primary_acts.device), 0
-                    )
 
-            self.update_rolling_coefficients(
-                model_acts=primary_acts,
-                feature_acts=feature_acts,
-                corrcoef_neurons=corrcoef_neurons,
-                corrcoef_encoder=corrcoef_encoder,
-            )
-
-            feature_acts_for_output = self._pad_sequence_tensor(
-                feature_acts,
-                target_seq_len=self.full_sequence_length,
-            )
-            feature_acts_cpu = feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
-
-            if all_feat_acts_tensor is None:
-                all_feat_acts_tensor = torch.empty(
-                    (
-                        total_prompt_count,
-                        self.full_sequence_length,
-                        feature_acts_cpu.shape[-1],
-                    ),
-                    dtype=feature_acts_cpu.dtype,
-                    device=feature_acts_cpu.device,
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_acts_pad_and_cpu_transfer",
+                device=self.cfg.device,
+                minibatch_index=i,
+                feature_count=len(feature_indices),
+                token_shape=tuple(minibatch.tokens.shape),
+                full_sequence_length=self.full_sequence_length,
+            ):
+                feature_acts_for_output = self._pad_sequence_tensor(
+                    feature_acts,
+                    target_seq_len=self.full_sequence_length,
                 )
-            self._scatter_feature_act_chunk(
-                all_feat_acts_tensor,
-                feature_acts_cpu,
-                prompt_indices=minibatch.prompt_indices,
+
+                # Persist prompt-wide feature activations on CPU so each minibatch does
+                # not stay resident on GPU until the final concat. Downcast to bfloat16
+                # on host so larger feature batches fit without walking back the GPU fix.
+                feature_acts_cpu = feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16, non_blocking=True)
+
+            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
+                peak_rss_gib,
+                peak_cuda_allocated_gib,
+                peak_cuda_reserved_gib,
             )
+
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_acts_full_prompt_scatter",
+                device=str(feature_acts_cpu.device),
+                minibatch_index=i,
+                feature_count=len(feature_indices),
+                token_shape=tuple(minibatch.tokens.shape),
+                prompt_count=len(minibatch.prompt_indices),
+            ):
+                if all_feat_acts_tensor is None:
+                    all_feat_acts_tensor = torch.empty(
+                        (
+                            total_prompt_count,
+                            self.full_sequence_length,
+                            feature_acts_cpu.shape[-1],
+                        ),
+                        dtype=feature_acts_cpu.dtype,
+                        device=feature_acts_cpu.device,
+                    )
+                self._scatter_feature_act_chunk(
+                    all_feat_acts_tensor,
+                    feature_acts_cpu,
+                    prompt_indices=minibatch.prompt_indices,
+                )
 
             # Calculate DFA
             if self.cfg.use_dfa and self.dfa_calculator:
@@ -372,16 +541,60 @@ class FeatureDataGenerator:
             if progress is not None:
                 progress[0].update(1)
 
-            del feature_acts_for_output
-            del feature_acts_cpu
-            del feature_acts
-            del primary_acts
-            del model_activation_dict
-            if all_features_acts is not None:
-                del all_features_acts
+            with timed_stage(
+                self.cfg.log_performance,
+                "feature_data_minibatch_cleanup",
+                device=self.cfg.device,
+                minibatch_index=i,
+                token_shape=tuple(minibatch.tokens.shape),
+                cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
+            ):
+                del feature_acts_for_output
+                del feature_acts_cpu
+                del feature_acts
+                del primary_acts
+                del model_activation_dict
+                if all_features_acts is not None:
+                    del all_features_acts
+                if self.cfg.cleanup_each_minibatch:
+                    gc.collect()
+                    if torch.cuda.is_available() and self.cfg.device.startswith("cuda"):
+                        torch.cuda.empty_cache()
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "feature_data_final_cleanup",
+            device=self.cfg.device,
+            feature_count=len(feature_indices),
+        ):
+            gc.collect()
+            if torch.cuda.is_available() and self.cfg.device.startswith("cuda"):
+                torch.cuda.empty_cache()
 
         if all_feat_acts_tensor is None:
             all_feat_acts_tensor = torch.empty(0)
+
+        if self.cfg.log_performance:
+            summary_fields: dict[str, Any] = {
+                "device": self.cfg.device,
+                "feature_count": len(feature_indices),
+                "prompt_count": total_prompt_count,
+                "token_minibatch_count": len(self.token_minibatches),
+                "model_forward_passes": total_model_forward_passes,
+                "total_forward_wall_s": total_forward_wall_s,
+                "get_feature_data_wall_s": time.perf_counter() - get_feature_data_start_time,
+                "primary_acts_batch_size": self.cfg.primary_acts_batch_size,
+                "cleanup_each_minibatch": self.cfg.cleanup_each_minibatch,
+            }
+            if total_model_forward_passes > 0:
+                summary_fields["avg_forward_wall_s"] = total_forward_wall_s / total_model_forward_passes
+            if peak_rss_gib is not None:
+                summary_fields["peak_rss_gib"] = peak_rss_gib
+            if peak_cuda_allocated_gib is not None:
+                summary_fields["peak_cuda_allocated_gib"] = peak_cuda_allocated_gib
+            if peak_cuda_reserved_gib is not None:
+                summary_fields["peak_cuda_reserved_gib"] = peak_cuda_reserved_gib
+            log_perf_event("get_feature_data_summary", **summary_fields)
 
         return (
             all_feat_acts_tensor,
@@ -392,6 +605,34 @@ class FeatureDataGenerator:
             corrcoef_encoder,
             all_dfa_results,
         )
+
+    @staticmethod
+    def _concat_feature_act_chunks(feature_act_chunks: list[Tensor]) -> Tensor:
+        if not feature_act_chunks:
+            return torch.empty(0)
+
+        first_chunk = feature_act_chunks[0]
+        concat_shape = (
+            sum(chunk.shape[0] for chunk in feature_act_chunks),
+            *first_chunk.shape[1:],
+        )
+        concatenated = torch.empty(
+            concat_shape,
+            dtype=first_chunk.dtype,
+            device=first_chunk.device,
+        )
+
+        offset = 0
+        for index, chunk in enumerate(feature_act_chunks):
+            next_offset = offset + chunk.shape[0]
+            concatenated[offset:next_offset].copy_(chunk)
+            offset = next_offset
+            feature_act_chunks[index] = chunk.new_empty((0,))
+
+        feature_act_chunks.clear()
+        gc.collect()
+
+        return concatenated
 
     @torch.inference_mode()
     def get_model_acts(
@@ -404,6 +645,7 @@ class FeatureDataGenerator:
         A function that gets the model activations for a given minibatch of tokens.
         Uses np.memmap for efficient caching.
         """
+        capture_stats = ActivationCaptureStats()
         minibatch_tokens = minibatch.tokens
         cache_path: Path | None = None
         if self.cfg.cache_dir is not None:
@@ -412,33 +654,67 @@ class FeatureDataGenerator:
                 cache_name += f"_{minibatch.cache_key}"
             cache_path = self.cfg.cache_dir / f"{cache_name}.pt"
             if use_cache and cache_path.exists():
-                # Removed duplicate assignment. mmap=True enables memory-mapped file I/O which allows
-                # lazy loading of tensors without reading the entire file into memory upfront, making
-                # it faster for large cached activation files. weights_only=False allows loading the
-                # full pickled objects which can be faster than the restricted loader when dealing with
-                # complex tensor dictionaries (though less secure for untrusted files).
-                activation_dict = torch.load(
-                    cache_path, map_location="cpu", weights_only=False, mmap=True
-                )
+                with timed_stage(
+                    self.cfg.log_performance,
+                    "activation_cache_load",
+                    device=self.cfg.device,
+                    minibatch_index=minibatch_index,
+                    token_shape=tuple(minibatch_tokens.shape),
+                ):
+                    activation_dict = torch.load(
+                        cache_path,
+                        map_location="cpu",
+                        weights_only=False,
+                        mmap=True,
+                    )
             else:
+                with timed_stage(
+                    self.cfg.log_performance,
+                    "activation_capture",
+                    device=self.cfg.device,
+                    minibatch_index=minibatch_index,
+                    token_shape=tuple(minibatch_tokens.shape),
+                    primary_acts_batch_size=minibatch.primary_acts_batch_size,
+                ):
+                    activation_dict = self._forward_model_acts(
+                        minibatch_tokens,
+                        primary_acts_batch_size=minibatch.primary_acts_batch_size,
+                        stats=capture_stats,
+                    )
+                save_tensor_dict_torch(activation_dict, cache_path)
+        else:
+            with timed_stage(
+                self.cfg.log_performance,
+                "activation_capture",
+                device=self.cfg.device,
+                minibatch_index=minibatch_index,
+                token_shape=tuple(minibatch_tokens.shape),
+                primary_acts_batch_size=minibatch.primary_acts_batch_size,
+            ):
                 activation_dict = self._forward_model_acts(
                     minibatch_tokens,
                     primary_acts_batch_size=minibatch.primary_acts_batch_size,
+                    stats=capture_stats,
                 )
-                save_tensor_dict_torch(activation_dict, cache_path)
-        else:
-            activation_dict = self._forward_model_acts(
-                minibatch_tokens,
-                primary_acts_batch_size=minibatch.primary_acts_batch_size,
-            )
 
         if not self.model._activation_shapes_match_tokens(activation_dict, minibatch_tokens):
-            activation_dict = self._forward_model_acts(
-                minibatch_tokens,
+            with timed_stage(
+                self.cfg.log_performance,
+                "activation_capture_shape_refresh",
+                device=self.cfg.device,
+                minibatch_index=minibatch_index,
+                token_shape=tuple(minibatch_tokens.shape),
                 primary_acts_batch_size=minibatch.primary_acts_batch_size,
-            )
+            ):
+                activation_dict = self._forward_model_acts(
+                    minibatch_tokens,
+                    primary_acts_batch_size=minibatch.primary_acts_batch_size,
+                    stats=capture_stats,
+                )
             if cache_path is not None:
                 save_tensor_dict_torch(activation_dict, cache_path)
+
+        self._last_activation_capture_stats = capture_stats
         return activation_dict
 
     @torch.inference_mode()

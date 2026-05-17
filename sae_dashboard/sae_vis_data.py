@@ -27,6 +27,11 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     minibatch_size_features="The feature minibatch size we'll use to split up our features, to avoid OOM errors",
     seed="Random seed, for reproducibility (e.g. sampling quantiles)",
     verbose="Whether to print out progress messages and other info during the data gathering process",
+    log_performance="Whether to emit per-stage performance timings for dashboard generation",
+    cleanup_each_minibatch="Whether to run gc.collect() and torch.cuda.empty_cache() after each activation minibatch. This can reduce peak memory in constrained runs but is disabled by default because it slows benchmark generation.",
+    sequence_replay_artifact_dir="Optional directory where per-feature-batch sequence replay bundles are written for offline get_indices_dict(...) replay.",
+    torch_profile="Whether the Neuronpedia runner should wrap this run in torch.profiler",
+    torch_profile_dir="Optional directory for torch profiler traces",
 )
 
 OUT_OF_RANGE_TOKEN = "<|outofrange|>"
@@ -73,6 +78,11 @@ class SaeVisConfig:
     # Misc
     seed: int | None = 0
     verbose: bool = False
+    log_performance: bool = False
+    cleanup_each_minibatch: bool = False
+    sequence_replay_artifact_dir: Path | None = None
+    torch_profile: bool = False
+    torch_profile_dir: Path | None = None
     cache_dir: Path | None = None  # Path to cache the data
 
     def to_dict(self) -> dict[str, Any]:

@@ -1,9 +1,11 @@
 import argparse
+import ctypes
 import gc
 import importlib
 import json
 import os
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Mapping, Set, Tuple, cast
@@ -44,6 +46,14 @@ from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
     NeuronpediaRunnerConfig,
 )
+from sae_dashboard.perf_logging import (
+    cpu_snapshot,
+    elapsed_timer,
+    io_delta,
+    log_perf_event,
+    process_io_snapshot,
+    timed_stage,
+)
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.utils_fns import has_duplicate_rows
@@ -59,6 +69,7 @@ BG_COLOR_MAP = colors.LinearSegmentedColormap.from_list(
 
 
 DEFAULT_FALLBACK_DEVICE = "cpu"
+DEFAULT_BRIDGE_COMPATIBILITY_KWARGS = {"no_processing": True}
 
 # TODO: add more anomalies here
 HTML_ANOMALIES = {
@@ -73,6 +84,12 @@ HTML_ANOMALIES = {
     "Ċ": "\n",
     "ĉ": "\t",
 }
+
+_LIBC: ctypes.CDLL | None = None
+try:
+    _LIBC = ctypes.CDLL("libc.so.6")
+except OSError:
+    pass
 
 
 def get_sae_loader(loader_name: str):
@@ -164,6 +181,21 @@ class NeuronpediaRunner:
             self.cfg.activation_store_device = self.cfg.activation_store_device or "cpu"
 
         return device_count
+
+    def _release_unused_host_memory(self) -> None:
+        try:
+            pyarrow = importlib.import_module("pyarrow")
+        except ImportError:
+            pyarrow = None
+
+        if pyarrow is not None:
+            release_unused = getattr(pyarrow.default_memory_pool(), "release_unused", None)
+            if callable(release_unused):
+                release_unused()
+
+        malloc_trim = getattr(_LIBC, "malloc_trim", None) if _LIBC is not None else None
+        if callable(malloc_trim):
+            malloc_trim(0)
 
     def _load_sae_or_transcoder(self):
         """Load SAE, Transcoder, SkipTranscoder, or CLT based on configuration."""
@@ -504,6 +536,127 @@ class NeuronpediaRunner:
 
         self.cfg.layer = self.layer
 
+    @staticmethod
+    def _resolve_torch_dtype(dtype_name: str) -> torch.dtype:
+        try:
+            return getattr(torch, dtype_name)
+        except AttributeError as exc:
+            raise ValueError(f"Unsupported torch dtype: {dtype_name}") from exc
+
+    @staticmethod
+    def _current_rss_bytes() -> int | None:
+        status_path = Path("/proc/self/status")
+        if not status_path.exists():
+            return None
+        for line in status_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1]) * 1024
+        return None
+
+    def _log_resource_snapshot(self, stage: str) -> None:
+        if not self.cfg.log_resource_snapshots:
+            return
+        rss_bytes = self._current_rss_bytes()
+        rss_gib = f"{rss_bytes / (1024**3):.2f}" if rss_bytes is not None else "unknown"
+        cuda_allocated_gib = "n/a"
+        cuda_reserved_gib = "n/a"
+        cuda_max_allocated_gib = "n/a"
+        if torch.cuda.is_available():
+            device = torch.device(self.cfg.model_device or "cuda")
+            cuda_allocated_gib = (
+                f"{torch.cuda.memory_allocated(device) / (1024**3):.2f}"
+            )
+            cuda_reserved_gib = f"{torch.cuda.memory_reserved(device) / (1024**3):.2f}"
+            cuda_max_allocated_gib = (
+                f"{torch.cuda.max_memory_allocated(device) / (1024**3):.2f}"
+            )
+        print(
+            "[runner_resource] "
+            f"stage={stage} "
+            f"wrapper={self.cfg.model_wrapper} "
+            f"rss_gib={rss_gib} "
+            f"cuda_allocated_gib={cuda_allocated_gib} "
+            f"cuda_reserved_gib={cuda_reserved_gib} "
+            f"cuda_max_allocated_gib={cuda_max_allocated_gib}"
+        )
+
+    def _log_batch_boundary_snapshot(
+        self, stage: str, feature_batch_count: int, io_snapshot: dict[str, int]
+    ) -> None:
+        if not self.cfg.log_performance:
+            return
+        log_perf_event(
+            "batch_boundary",
+            stage=stage,
+            batch=feature_batch_count,
+            cpu=cpu_snapshot(),
+            io=io_snapshot,
+        )
+
+    def _run_feature_batch_with_optional_profile(
+        self,
+        feature_vis_config_gpt: SaeVisConfig,
+        tokens: torch.Tensor,
+        feature_batch_count: int,
+    ):
+        run_kwargs: dict[str, Any] = {
+            "encoder": self.sae,  # type: ignore
+            "model": self.model,
+            "tokens": tokens,
+        }
+        if self.cfg.use_huggingface:
+            run_kwargs["tokenizer"] = self.tokenizer
+
+        if not self.cfg.torch_profile:
+            return SaeVisRunner(feature_vis_config_gpt).run(**run_kwargs)
+
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        profile_dir = Path(
+            self.cfg.torch_profile_dir or Path(self.cfg.outputs_dir) / "torch_profiles"
+        )
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = profile_dir / f"batch-{feature_batch_count}.trace.json"
+        with torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        ) as profiler:
+            feature_data = SaeVisRunner(feature_vis_config_gpt).run(**run_kwargs)
+        profiler.export_chrome_trace(str(trace_path))
+        log_perf_event(
+            "torch_profile_trace", batch=feature_batch_count, path=trace_path
+        )
+        return feature_data
+
+    def _log_hook_alias_summary(self) -> None:
+        if not self.cfg.log_hook_aliases:
+            return
+        hook_dict_keys = list(getattr(self.model, "hook_dict", {}).keys())
+        hook_aliases = getattr(self.model, "hook_aliases", {})
+        print(
+            "[runner_hook_summary] "
+            f"wrapper={self.cfg.model_wrapper} "
+            f"hook_count={len(hook_dict_keys)} "
+            f"alias_count={len(hook_aliases)}"
+        )
+        for hook_name in [
+            self.hook_name,
+            getattr(self.sae.cfg.metadata, "hook_name_out", None),
+        ]:
+            if hook_name is None:
+                continue
+            print(
+                f"[runner_hook_summary] requested_hook={hook_name} present_in_hook_dict={hook_name in hook_dict_keys}"
+            )
+        print(f"[runner_hook_summary] sample_hooks={hook_dict_keys[:12]}")
+
     def _materialize_prompt_dataset(self) -> str | Dataset | IterableDataset:
         if self.cfg.pretokenized_dataset_path:
             dataset = load_from_disk(self.cfg.pretokenized_dataset_path)
@@ -566,41 +719,64 @@ class NeuronpediaRunner:
 
     def _initialize_model(self):
         """Initialize the transformer model."""
-        # Get hook_name first - it's always in metadata for both SAEs and Transcoders
+        self._log_resource_snapshot("pre_model_init")
         if hasattr(self.sae.cfg.metadata, "hook_name"):
             self.hook_name = self.sae.cfg.metadata.hook_name  # type: ignore
         else:
             self.hook_name = self.sae.cfg.metadata["hook_name"]  # type: ignore
 
-        if self.cfg.use_huggingface:
-            # Use HuggingFace Transformers directly instead of TransformerLens
+        if self.cfg.model_wrapper == "bridge":
+            from sae_lens.analysis.compat import has_transformer_bridge
+            from sae_lens.analysis.sae_transformer_bridge import SAETransformerBridge
+
+            if not has_transformer_bridge():
+                raise ImportError(
+                    "SAETransformerBridge requires transformer-lens v3+ support in sae_lens."
+                )
+
+            if self.cfg.model_n_devices not in (None, 1):
+                print(
+                    "NeuronpediaRunner: model_n_devices is not currently supported by "
+                    "SAETransformerBridge.boot_transformers(); using a single-device bridge load."
+                )
+
+            bridge_model_name = self.cfg.hf_model_path or self.model_id
+            self.model = SAETransformerBridge.boot_transformers(
+                bridge_model_name,  # type: ignore[arg-type]
+                device=self.cfg.model_device,
+                dtype=self._resolve_torch_dtype(self.cfg.model_dtype),
+            )
+            if self.cfg.bridge_enable_compatibility_mode:
+                compatibility_kwargs = dict(DEFAULT_BRIDGE_COMPATIBILITY_KWARGS)
+                compatibility_kwargs.update(self.cfg.bridge_compatibility_mode_kwargs)
+                print(
+                    "NeuronpediaRunner: Enabling TransformerBridge compatibility mode "
+                    f"with kwargs={compatibility_kwargs}"
+                )
+                self.model.enable_compatibility_mode(**compatibility_kwargs)
+            self.tokenizer = getattr(self.model, "tokenizer", None)
+        elif self.cfg.use_huggingface:
             print(f"Loading HuggingFace model: {self.model_id}")
 
-            # Determine model path - use custom HF path if provided, otherwise convert model_id
             if self.cfg.hf_model_path:
                 model_path = self.cfg.hf_model_path
             else:
-                # Convert TransformerLens model name to HuggingFace model name
                 model_path = convert_model_name_tl_to_hf(self.model_id)
                 if model_path != self.model_id:
                     print(f"Converted model name: {self.model_id} -> {model_path}")
 
-            # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             if self.tokenizer.pad_token_id is None:
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-            # Determine dtype
             dtype_map = {
                 "float32": torch.float32,
                 "float16": torch.float16,
                 "bfloat16": torch.bfloat16,
             }
             torch_dtype = dtype_map.get(self.cfg.model_dtype, torch.float32)
-
-            # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch_dtype,
@@ -614,14 +790,9 @@ class NeuronpediaRunner:
                 self.model = self.model.to("cpu")
 
             self.model.eval()
-
-            # Add to_tokens method to HuggingFace model for compatibility with sae_lens
             self._add_to_tokens_method()
-
             print(f"HuggingFace model loaded on device: {self.cfg.model_device}")
         else:
-            # Use TransformerLens (original behavior)
-            # If custom HF model path is provided, load it first
             hf_model = None
             if self.cfg.hf_model_path:
                 print(f"Loading custom HF model from: {self.cfg.hf_model_path}")
@@ -629,49 +800,31 @@ class NeuronpediaRunner:
                     self.cfg.hf_model_path,
                 )
 
-            # Determine dtype
-            dtype_map = {
-                "float32": torch.float32,
-                "float16": torch.float16,
-                "bfloat16": torch.bfloat16,
-            }
-            torch_dtype = dtype_map.get(self.cfg.model_dtype, torch.float32)
-
-            self.model = HookedSAETransformer.from_pretrained_no_processing(
+            self.model = HookedSAETransformer.from_pretrained(
                 model_name=self.model_id,  # type: ignore
                 device=self.cfg.model_device,
                 n_devices=self.cfg.model_n_devices or 1,
-                hf_model=hf_model,  # Pass the custom model if provided
+                hf_model=hf_model,
                 **self.sae_from_pretrained_kwargs,
-                dtype=torch_dtype,
+                dtype=self.cfg.model_dtype,
             )
-
-            # Store tokenizer reference for TransformerLens models
             self.tokenizer = self.model.tokenizer  # type: ignore
+        if (
+            self.cfg.use_transcoder
+            or self.cfg.use_skip_transcoder
+            or self.cfg.use_clt
+            or "hook_mlp_in" in self.hook_name  # type: ignore
+        ) and hasattr(self.model, "set_use_hook_mlp_in"):
+            self.model.set_use_hook_mlp_in(True)
 
-            # Ensure MLP-in hooks are computed if needed (important for most Transcoders)
-            if (
-                self.cfg.use_transcoder
-                or self.cfg.use_skip_transcoder
-                or self.cfg.use_clt
-                or "hook_mlp_in" in self.hook_name  # type: ignore
-            ) and hasattr(self.model, "set_use_hook_mlp_in"):
-                # TransformerLens models 1.12+ support this flag
-                self.model.set_use_hook_mlp_in(True)
-
-        # Trim unused decoder blocks above the SAE's hook layer to free VRAM.
-        # Runs on both the TransformerLens and HuggingFace paths; the helper
-        # detects the layer container appropriately for each.
-        if self.cfg.free_unused_model_layers:
+        if self.cfg.free_unused_model_layers and self.cfg.model_wrapper != "bridge":
             self._free_unused_model_layers()
 
-    def _add_to_tokens_method(self):
-        """
-        Add a to_tokens method to the HuggingFace model for compatibility with sae_lens.
+        self._log_hook_alias_summary()
+        self._log_resource_snapshot("post_model_init")
 
-        TransformerLens models have a to_tokens method that sae_lens expects.
-        This adds an equivalent method to HuggingFace models.
-        """
+    def _add_to_tokens_method(self):
+        """Add a ``to_tokens`` method to HuggingFace models for sae_lens compatibility."""
         tokenizer = self.tokenizer
         model = self.model
 
@@ -682,52 +835,26 @@ class NeuronpediaRunner:
             move_to_device=True,
             truncate=True,
         ):
-            """
-            Convert text to tokens, mimicking TransformerLens behavior.
-
-            TransformerLens explicitly prepends BOS token when prepend_bos=True.
-            HuggingFace tokenizers don't always do this (e.g., GPT-2 doesn't auto-prepend BOS).
-            We need to manually prepend the BOS token to match TransformerLens behavior.
-
-            Args:
-                text: String or list of strings to tokenize
-                prepend_bos: Whether to prepend BOS token
-                padding_side: Which side to pad on
-                move_to_device: Whether to move tokens to model device
-                truncate: Whether to truncate to max length
-            """
             if isinstance(text, str):
                 text = [text]
 
-            # Set padding side
             original_padding_side = tokenizer.padding_side
             tokenizer.padding_side = padding_side
-
-            # Tokenize WITHOUT adding special tokens - we'll handle BOS manually
-            # This matches TransformerLens behavior more closely
             encoded = tokenizer(
                 text,
                 return_tensors="pt",
                 padding=True,
                 truncation=truncate,
-                add_special_tokens=False,  # Don't auto-add, we handle BOS manually
+                add_special_tokens=False,
             )
-
-            # Restore padding side
             tokenizer.padding_side = original_padding_side
 
             tokens = encoded["input_ids"]
-
-            # Manually prepend BOS token if requested (matching TransformerLens behavior)
             if prepend_bos:
-                # Get BOS token ID - use eos_token_id for GPT-2 style models
-                # that use the same token for BOS and EOS
                 bos_token_id = tokenizer.bos_token_id
                 if bos_token_id is None:
                     bos_token_id = tokenizer.eos_token_id
-
                 if bos_token_id is not None:
-                    # Create BOS column and prepend
                     bos_column = torch.full(
                         (tokens.shape[0], 1),
                         bos_token_id,
@@ -742,30 +869,15 @@ class NeuronpediaRunner:
 
             return tokens
 
-        # Monkey-patch the method onto the model
         import types
 
         self.model.to_tokens = types.MethodType(
             lambda self, *args, **kwargs: to_tokens(*args, **kwargs), self.model
         )
-
-        # Also add tokenizer reference to model for compatibility
         self.model.tokenizer = tokenizer
 
     def _get_layer_container(self):
-        """Return the ``nn.ModuleList`` holding transformer decoder blocks.
-
-        - TransformerLens: every supported architecture exposes its decoder
-          blocks as ``model.blocks`` (an ``nn.ModuleList``).
-        - HuggingFace: the path varies by architecture (e.g. ``model.layers``
-          for Llama/Mistral/Gemma/Qwen2/Qwen3, ``transformer.h`` for GPT-2,
-          ``gpt_neox.layers`` for Pythia, ``language_model.layers`` for
-          PaliGemma/Gemma 3 multimodal). We reuse ``hook_utils`` to find
-          layer 0's full path, then strip the trailing index to get the
-          parent container.
-
-        Returns ``None`` if no ``ModuleList`` of decoder blocks can be found.
-        """
+        """Return the ``nn.ModuleList`` holding transformer decoder blocks."""
         import torch.nn as nn
 
         if not self.cfg.use_huggingface:
@@ -794,25 +906,7 @@ class NeuronpediaRunner:
         return container if isinstance(container, nn.ModuleList) else None
 
     def _free_unused_model_layers(self):
-        """Replace transformer blocks above the SAE's hook layer with
-        ``nn.Identity()`` to free VRAM.
-
-        The forward pass used for dashboard generation already stops at
-        ``hook_layer + 1`` for both TransformerLens (see
-        ``TransformerLensWrapper.forward``) and HuggingFace (see
-        ``HuggingFaceModelWrapper._register_stop_hook``), so later blocks
-        are never executed. The embedding, final norm, and
-        ``unembed``/``lm_head``/``W_U`` modules are left untouched;
-        ``W_U`` is still needed for feature-to-logit direction calculations
-        in ``SaeVisRunner``.
-
-        Works for both TransformerLens models (where blocks live at
-        ``model.blocks``) and HuggingFace ``AutoModelForCausalLM`` models
-        (where the container path varies by architecture). The container
-        is detected via ``_get_layer_container``.
-        """
-        import gc
-
+        """Replace unused transformer blocks above the SAE hook layer with ``nn.Identity()``."""
         import torch.nn as nn
 
         if self.layer is None:
@@ -822,33 +916,17 @@ class NeuronpediaRunner:
         blocks = self._get_layer_container()
         if blocks is None:
             print(
-                "free_unused_model_layers: could not locate the transformer "
-                "block container on this model; skipping."
+                "free_unused_model_layers: could not locate the transformer block container on this model; skipping."
             )
             return
 
-        # Guard: hook points that force `to_resid_direction` to read the
-        # stacked `model.W_out` / `model.W_O` properties (see
-        # ``transformer_lens_wrapper.to_resid_direction``). Those properties
-        # do ``torch.stack([block.mlp.W_out for block in self.blocks])`` /
-        # ``torch.stack([block.attn.W_O ...])``, which raises ``AttributeError``
-        # on any ``nn.Identity()``-replaced block. Trimming is therefore unsafe
-        # for MLP-neuron (``hook_pre`` / ``hook_post``) and per-head attention
-        # (``hook_z``) SAEs until we snapshot the needed per-layer slices up
-        # front. TODO(vram-snapshot): pre-extract
-        # ``blocks[hook_layer].mlp.W_out`` and ``blocks[hook_layer].attn.W_O``
-        # before trimming and have the wrapper prefer those cached tensors, so
-        # this guard can be lifted for all hook types.
         hook_name = getattr(self, "hook_name", "") or ""
         unsafe_markers = ("hook_pre", "hook_post", "hook_z")
-        matched_marker = next((m for m in unsafe_markers if m in hook_name), None)
+        matched_marker = next((marker for marker in unsafe_markers if marker in hook_name), None)
         if matched_marker is not None:
             print(
-                f"free_unused_model_layers: skipping trim — hook point "
-                f"'{hook_name}' contains '{matched_marker}', which would cause "
-                f"`to_resid_direction` to read `model.W_out`/`model.W_O` "
-                f"(stacked over all blocks) and fail on Identity-replaced "
-                f"layers."
+                f"free_unused_model_layers: skipping trim — hook point '{hook_name}' contains '{matched_marker}', "
+                "which would cause `to_resid_direction` to read stacked weights from replaced layers."
             )
             return
 
@@ -856,17 +934,13 @@ class NeuronpediaRunner:
         first_unused = self.layer + 1
         if first_unused >= n_total:
             print(
-                f"free_unused_model_layers: SAE hook layer is {self.layer} of "
-                f"{n_total}; nothing above the hook layer to free."
+                f"free_unused_model_layers: SAE hook layer is {self.layer} of {n_total}; nothing above the hook layer to free."
             )
             return
 
         freed = 0
         for i in range(first_unused, n_total):
             if not isinstance(blocks[i], nn.Identity):
-                # Drop the parameter tensors first so they can be reclaimed
-                # even if something still holds a reference to the block (see
-                # the `mod_dict`/`hook_dict` note below).
                 for p in list(blocks[i].parameters()):
                     p.data = torch.empty(0, device=p.device, dtype=p.dtype)
                 for b in list(blocks[i].buffers()):
@@ -874,18 +948,6 @@ class NeuronpediaRunner:
                 blocks[i] = nn.Identity()
                 freed += 1
 
-        # CRITICAL (TransformerLens only): ``HookedRootModule.setup()`` builds
-        # ``self.mod_dict`` and ``self.hook_dict`` from ``named_modules()`` at
-        # construction time, and these dicts hold *strong* references to every
-        # block and sub-module (attn, mlp, HookPoints, ...). Simply swapping
-        # ``blocks[i]`` in ``_modules`` doesn't update those dicts, so the old
-        # blocks (and their Parameters) stay alive and no VRAM is reclaimed.
-        # Re-running ``setup()`` rebuilds the dicts against the current module
-        # tree, dropping those stale references.
-        #
-        # HuggingFace models do not maintain a parallel module dict — replacing
-        # ``layers[i]`` in the ``ModuleList`` already updates the underlying
-        # ``_modules`` storage, so no equivalent step is needed.
         if not self.cfg.use_huggingface and hasattr(self.model, "setup"):
             self.model.setup()
 
@@ -894,8 +956,8 @@ class NeuronpediaRunner:
             torch.cuda.empty_cache()
 
         print(
-            f"free_unused_model_layers: freed {freed} transformer block(s) "
-            f"above hook layer {self.layer} (model had {n_total} total)."
+            f"free_unused_model_layers: freed {freed} transformer block(s) above hook layer {self.layer} "
+            f"(model had {n_total} total)."
         )
 
     def _setup_activation_store(self):
@@ -920,6 +982,7 @@ class NeuronpediaRunner:
         self.cached_activations_dir = Path(
             f"./cached_activations/{self.model_id}_{self.cfg.sae_set}_{self.hook_name}_{self.sae.cfg.d_sae}width_{self.cfg.n_prompts_total}prompts"
         )
+        self._log_resource_snapshot("post_activation_store_setup")
 
     def _setup_output_directory(self):
         """Set up the output directory for results."""
@@ -1467,6 +1530,30 @@ class NeuronpediaRunner:
             sidecar_target = target.parent / f"{target_base_name}{relative_suffix}"
             self._stage_shared_file(sidecar, sidecar_target)
 
+    def _write_converter_input_artifact(
+        self, feature_data: Any, batch_num: int
+    ) -> Path | None:
+        if not self.cfg.converter_input_artifact_dir:
+            return None
+
+        artifact_dir = Path(self.cfg.converter_input_artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / f"converter_input_batch_{batch_num}.pt"
+        torch.save(
+            {
+                "feature_data_dict": feature_data.feature_data_dict,
+                "runner_cfg": self.cfg,
+                "vocab_dict": self.vocab_dict,
+                "model_d_vocab": int(self.model.cfg.d_vocab),
+                "model_id": self.model_id,
+                "layer": self.layer,
+                "hook_name": self.hook_name,
+                "batch_num": batch_num,
+            },
+            artifact_path,
+        )
+        return artifact_path
+
     def _load_prompt_bucket_schedule(
         self, tokens: torch.Tensor
     ) -> list[dict[str, Any]] | None:
@@ -1505,6 +1592,32 @@ class NeuronpediaRunner:
             tokens=tokens,
         )
 
+    def _log_token_snapshot(
+        self,
+        stage: str,
+        tokens: torch.Tensor | None = None,
+    ) -> None:
+        if not self.cfg.log_resource_snapshots:
+            return
+
+        token_shape = tuple(tokens.shape) if tokens is not None else None
+        token_device = str(tokens.device) if tokens is not None else "n/a"
+        token_dtype = str(tokens.dtype) if tokens is not None else "n/a"
+        token_bytes_mib = (
+            f"{tokens.numel() * tokens.element_size() / (1024**2):.2f}"
+            if tokens is not None
+            else "0.00"
+        )
+        print(
+            "[runner_token_snapshot] "
+            f"stage={stage} "
+            f"token_shape={token_shape} "
+            f"token_device={token_device} "
+            f"token_dtype={token_dtype} "
+            f"token_bytes_mib={token_bytes_mib}"
+        )
+        self._log_resource_snapshot(stage)
+
     def hash_tensor(self, tensor: torch.Tensor) -> Tuple[int, ...]:
         return tuple(tensor.cpu().numpy().flatten().tolist())
 
@@ -1517,12 +1630,20 @@ class NeuronpediaRunner:
         unique_sequences: Set[Tuple[int, ...]] = set()
         pbar = tqdm(range(n_prompts // activations_store.store_batch_size_prompts))
 
+        self._log_token_snapshot("before_generate_tokens")
+
         for batch_idx in pbar:
             batch_tokens = activations_store.get_batch_tokens(
                 move_to_model_device=False
             )
+            if batch_idx == 0:
+                self._log_token_snapshot("after_get_batch_tokens_0", batch_tokens)
             if self.cfg.shuffle_tokens:
                 batch_tokens = batch_tokens[torch.randperm(batch_tokens.shape[0])]
+                if batch_idx == 0:
+                    self._log_token_snapshot(
+                        "after_shuffle_batch_tokens_0", batch_tokens
+                    )
 
             # Check for duplicates and only add unique sequences
             for seq in batch_tokens:
@@ -1540,10 +1661,12 @@ class NeuronpediaRunner:
             all_tokens = all_tokens[torch.randperm(all_tokens.shape[0])]
 
         all_tokens = all_tokens.cpu()
+        self._log_token_snapshot("after_generate_tokens", all_tokens)
 
         return all_tokens
 
     def add_prefix_suffix_to_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        self._log_token_snapshot("before_add_prefix_suffix", tokens)
         original_length = tokens.shape[1]
         bos_tokens = tokens[:, 0]  # might not be if sae.cfg.prepend_bos is False
 
@@ -1601,6 +1724,7 @@ class NeuronpediaRunner:
 
         # assert length hasn't changed
         assert tokens.shape[1] == original_length
+        self._log_token_snapshot("after_add_prefix_suffix", tokens)
         return tokens
 
     def get_feature_batches(self):
@@ -1631,6 +1755,7 @@ class NeuronpediaRunner:
 
     def get_tokens(self):
         tokens_file = self._tokens_file_path()
+        self._log_token_snapshot("before_get_tokens")
         if not tokens_file.is_file():
             self._stage_shared_tokens_file(
                 require_effective_lengths=self._schedule_requires_effective_lengths()
@@ -1638,6 +1763,7 @@ class NeuronpediaRunner:
         if tokens_file.is_file():
             print("Tokens exist, loading them.")
             tokens = torch.load(tokens_file, map_location="cpu").cpu()
+            self._log_token_snapshot("loaded_tokens_from_cache", tokens)
         else:
             print("Tokens don't exist, making them.")
             tokens = self.generate_tokens(
@@ -1648,6 +1774,7 @@ class NeuronpediaRunner:
                 tokens.cpu(),
                 tokens_file,
             )
+            self._log_token_snapshot("saved_generated_tokens", tokens)
 
         if has_duplicate_rows(tokens):
             print(
@@ -1692,7 +1819,6 @@ class NeuronpediaRunner:
 
         current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         set_name = self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
-        source_set_name = self._resolved_neuronpedia_set_name()
         if self.cfg.use_wandb:
             wandb.init(
                 project="sae-dashboard-generation",
@@ -1718,6 +1844,7 @@ class NeuronpediaRunner:
         tokens = self.get_tokens()
         tokens = self.add_prefix_suffix_to_tokens(tokens)
         prompt_minibatch_schedule = self._load_prompt_bucket_schedule(tokens)
+        self._log_token_snapshot("tokens_ready_for_batches", tokens)
 
         del self.activations_store
 
@@ -1745,6 +1872,7 @@ class NeuronpediaRunner:
                     continue
 
                 print(f"========== Running Batch #{feature_batch_count} ==========")
+                self._log_resource_snapshot(f"pre_batch_{feature_batch_count}")
 
                 layout = SaeVisLayoutConfig(
                     columns=[
@@ -1773,11 +1901,22 @@ class NeuronpediaRunner:
                     primary_acts_batch_size=self.cfg.primary_acts_batch_size,
                     quantile_feature_batch_size=self.cfg.quantile_feature_batch_size,
                     verbose=True,
+                    log_performance=self.cfg.log_performance,
+                    cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
+                    torch_profile=self.cfg.torch_profile,
+                    torch_profile_dir=Path(self.cfg.torch_profile_dir)
+                    if self.cfg.torch_profile_dir
+                    else None,
                     device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,
                     feature_centric_layout=layout,
                     perform_ablation_experiments=False,
                     dtype=self.cfg.sae_dtype,
                     prompt_minibatch_schedule=prompt_minibatch_schedule,
+                    cache_dir=(
+                        self.cached_activations_dir
+                        if self.cfg.use_cached_activations
+                        else None
+                    ),
                     ignore_tokens={
                         tok_id
                         for tok_id in (
@@ -1791,26 +1930,84 @@ class NeuronpediaRunner:
                     ignore_high_activation_norm_multiple=self.cfg.ignore_high_activation_norm_multiple,
                     use_dfa=self.cfg.use_dfa,
                     use_huggingface=self.cfg.use_huggingface,
+                    sequence_replay_artifact_dir=(
+                        Path(self.cfg.sequence_replay_artifact_dir)
+                        if self.cfg.sequence_replay_artifact_dir
+                        else None
+                    ),
                 )
 
-                feature_data = SaeVisRunner(feature_vis_config_gpt).run(
-                    encoder=self.sae,  # type: ignore
-                    model=self.model,
-                    tokens=tokens,
-                    tokenizer=self.tokenizer if self.cfg.use_huggingface else None,
+                self._log_token_snapshot(
+                    f"before_feature_run_{feature_batch_count}", tokens
+                )
+                batch_start_time = time.perf_counter()
+                batch_start_io = process_io_snapshot()
+                self._log_batch_boundary_snapshot(
+                    "pre_batch", feature_batch_count, batch_start_io
+                )
+                feature_data = self._run_feature_batch_with_optional_profile(
+                    feature_vis_config_gpt,
+                    tokens,
+                    feature_batch_count,
+                )
+                self._log_resource_snapshot(f"after_feature_run_{feature_batch_count}")
+
+                converter_input_artifact = self._write_converter_input_artifact(
+                    feature_data,
+                    feature_batch_count,
                 )
 
                 self.cfg.model_id = self.model_id
                 self.cfg.layer = self.layer
-                json_object = NeuronpediaConverter.convert_to_np_json(
-                    self.model, feature_data, self.cfg, self.vocab_dict
-                )
-                with open(
-                    output_file,
-                    "w",
-                ) as f:
-                    f.write(json_object)
+                with timed_stage(
+                    self.cfg.log_performance,
+                    "neuronpedia_conversion_and_json_serialization",
+                    batch=feature_batch_count,
+                    feature_count=len(features_to_process),
+                ):
+                    json_object = NeuronpediaConverter.convert_to_np_json(
+                        self.model, feature_data, self.cfg, self.vocab_dict
+                    )
+                write_start_io = process_io_snapshot()
+                with elapsed_timer() as write_timing:
+                    with open(
+                        output_file,
+                        "w",
+                    ) as f:
+                        f.write(json_object)
+                write_end_io = process_io_snapshot()
+                if self.cfg.log_performance:
+                    output_bytes = len(json_object.encode("utf-8"))
+                    write_wall_s = max(write_timing.get("wall_s", 0.0), 1e-9)
+                    log_perf_event(
+                        "disk_write",
+                        batch=feature_batch_count,
+                        path=output_file,
+                        output_bytes=output_bytes,
+                        wall_s=write_wall_s,
+                        output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
+                        process_io_delta=io_delta(write_start_io, write_end_io),
+                    )
+                    if converter_input_artifact is not None:
+                        log_perf_event(
+                            "converter_input_artifact",
+                            batch=feature_batch_count,
+                            path=str(converter_input_artifact),
+                            size_bytes=converter_input_artifact.stat().st_size,
+                        )
                 print(f"Output written to {output_file}")
+                batch_end_io = process_io_snapshot()
+                if self.cfg.log_performance:
+                    log_perf_event(
+                        "batch_total",
+                        batch=feature_batch_count,
+                        wall_s=time.perf_counter() - batch_start_time,
+                        process_io_delta=io_delta(batch_start_io, batch_end_io),
+                    )
+                self._log_batch_boundary_snapshot(
+                    "post_batch", feature_batch_count, batch_end_io
+                )
+                self._log_resource_snapshot(f"post_batch_{feature_batch_count}")
 
                 logline = f"\n========== Completed Batch #{feature_batch_count} output: {output_file} ==========\n"
                 if self.cfg.use_wandb:
@@ -1823,6 +2020,8 @@ class NeuronpediaRunner:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                self._release_unused_host_memory()
+                self._log_resource_snapshot(f"post_batch_cleanup_{feature_batch_count}")
         if self.cfg.use_wandb:
             wandb.sdk.finish()
 
@@ -1905,6 +2104,14 @@ class NeuronpediaRunner:
 
 
 def main():
+    def parse_json_dict_arg(raw_value: str | None, flag_name: str) -> dict[str, Any]:
+        if not raw_value:
+            return {}
+        parsed = json.loads(raw_value)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{flag_name} must decode to a JSON object.")
+        return parsed
+
     parser = argparse.ArgumentParser(description="Run Neuronpedia feature generation")
     parser.add_argument("--sae-set", required=True, help="SAE set name")
     parser.add_argument("--sae-path", required=True, help="Path to SAE")
@@ -2060,6 +2267,80 @@ def main():
         type=str,
         default=None,
         help="Optional: Path to custom HuggingFace model to use instead of default weights",
+    )
+    parser.add_argument(
+        "--model-wrapper",
+        choices=("hooked", "bridge"),
+        default="hooked",
+        help="Model wrapper to use for dashboard generation.",
+    )
+    parser.add_argument(
+        "--bridge-enable-compatibility-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable TransformerBridge compatibility mode so legacy hook aliases remain available.",
+    )
+    parser.add_argument(
+        "--bridge-compatibility-mode-kwargs-json",
+        type=str,
+        default=None,
+        help="JSON object of kwargs passed to TransformerBridge.enable_compatibility_mode().",
+    )
+    parser.add_argument(
+        "--log-resource-snapshots",
+        action="store_true",
+        help="Emit simple RSS and CUDA memory snapshots at key runner stages.",
+    )
+    parser.add_argument(
+        "--log-hook-aliases",
+        action="store_true",
+        help="Emit hook alias summary information to debug HookedTransformer versus TransformerBridge migration.",
+    )
+    parser.add_argument(
+        "--log-performance",
+        action="store_true",
+        help="Emit per-batch and per-stage wall-clock, CPU, CUDA, and process I/O timing diagnostics.",
+    )
+    parser.add_argument(
+        "--converter-input-artifact-dir",
+        default=None,
+        help=(
+            "Optional directory where per-batch converter-input snapshots are written for "
+            "offline full-converter timing."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-replay-artifact-dir",
+        default=None,
+        help=(
+            "Optional directory where per-batch sequence replay bundles are written for "
+            "offline get_indices_dict(...) replay."
+        ),
+    )
+    parser.add_argument(
+        "--cleanup-each-minibatch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run gc.collect() and torch.cuda.empty_cache() after each activation minibatch. "
+            "Disabled by default because it slows benchmark generation."
+        ),
+    )
+    parser.add_argument(
+        "--torch-profile",
+        action="store_true",
+        help="Capture a torch.profiler Chrome trace for each generated batch.",
+    )
+    parser.add_argument(
+        "--torch-profile-dir",
+        default=None,
+        help="Optional directory for torch.profiler trace files. Defaults to an output-local torch_profiles directory.",
+    )
+    parser.add_argument(
+        "--use-cached-activations",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse cached model activations across batches and reruns when available.",
     )
     parser.add_argument(
         "--prefix-str",
@@ -2329,6 +2610,22 @@ def main():
         end_batch=args.end_batch,
         use_wandb=args.use_wandb,
         hf_model_path=args.hf_model_path,
+        model_wrapper=args.model_wrapper,
+        bridge_enable_compatibility_mode=args.bridge_enable_compatibility_mode,
+        bridge_compatibility_mode_kwargs=parse_json_dict_arg(
+            args.bridge_compatibility_mode_kwargs_json,
+            "--bridge-compatibility-mode-kwargs-json",
+        )
+        or dict(DEFAULT_BRIDGE_COMPATIBILITY_KWARGS),
+        log_resource_snapshots=args.log_resource_snapshots,
+        log_hook_aliases=args.log_hook_aliases,
+        log_performance=args.log_performance,
+        cleanup_each_minibatch=args.cleanup_each_minibatch,
+        converter_input_artifact_dir=args.converter_input_artifact_dir,
+        sequence_replay_artifact_dir=args.sequence_replay_artifact_dir,
+        torch_profile=args.torch_profile,
+        torch_profile_dir=args.torch_profile_dir,
+        use_cached_activations=args.use_cached_activations,
         use_transcoder=args.use_transcoder,
         use_skip_transcoder=args.use_skip_transcoder,
         use_clt=args.use_clt,

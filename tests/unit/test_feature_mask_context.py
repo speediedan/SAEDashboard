@@ -111,3 +111,5 @@ def test_get_model_acts_uses_primary_acts_batch_size():
 
     assert generator.model.forward_batch_sizes == [2, 2, 1]
     assert activation_dict["hook"].shape == (5, 3, 1)
+    assert generator._last_activation_capture_stats.model_forward_passes == 3
+    assert generator._last_activation_capture_stats.total_forward_wall_s >= 0.0

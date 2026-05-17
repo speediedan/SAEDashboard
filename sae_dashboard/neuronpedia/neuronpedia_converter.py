@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -19,21 +20,44 @@ from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
 from sae_dashboard.sae_vis_data import SaeVisData
 from sae_dashboard.vector_vis_data import VectorVisData
 
+try:
+    import msgspec  # type: ignore[import-untyped]
+except ImportError:
+    msgspec = None  # type: ignore[assignment]
+
+
+def _serialize_special_value(value: Any) -> Any:
+    if isinstance(value, NeuronpediaDashboardBatch):
+        return value.to_dict()
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.bool_):
+        return bool(value)
+    raise TypeError(f"Unsupported value for serialization: {type(value)!r}")
+
+
+def _msgspec_json_enc_hook(value: Any) -> Any:
+    return _serialize_special_value(value)
+
+
+_MSGSPEC_JSON_ENCODER = (
+    msgspec.json.Encoder(enc_hook=_msgspec_json_enc_hook) if msgspec is not None else None
+)
+
 # Type alias for model types
 ModelType = Union[HookedTransformer, PreTrainedModel]
 
 
 class NpEncoder(json.JSONEncoder):
     def default(self, o: Any):
-        if isinstance(o, NeuronpediaDashboardBatch):
-            return o.to_dict()
-        if isinstance(o, np.integer):
-            return int(o)
-        if isinstance(o, np.floating):
-            return float(o)
-        if isinstance(o, np.ndarray):
-            return o.tolist()
-        return super(NpEncoder, self).default(o)
+        try:
+            return _serialize_special_value(o)
+        except TypeError:
+            return super(NpEncoder, self).default(o)
 
 
 class FeatureProcessor:
@@ -97,6 +121,7 @@ class NeuronpediaConverter:
         np_cfg: Union[NeuronpediaRunnerConfig, NeuronpediaVectorRunnerConfig],
         vocab_dict: Dict[int, str],
         original_vectors: Optional[torch.Tensor] = None,
+        deterministic_json: bool = False,
     ) -> str:
         """
         Convert SaeVisData to Neuronpedia JSON format.
@@ -121,8 +146,56 @@ class NeuronpediaConverter:
             vocab_dict,
             original_vectors,
         )
-        batch_data = NeuronpediaConverter._create_batch_data(np_cfg, features_outputs)
-        return json.dumps(batch_data, cls=NpEncoder)
+        batch_data = NeuronpediaConverter._create_batch_data(np_cfg, features_outputs).to_dict()
+        return NeuronpediaConverter.encode_batch_payload(
+            batch_data,
+            deterministic_json=deterministic_json,
+        )
+
+    @staticmethod
+    def encode_batch_payload(
+        batch_data: dict[str, Any],
+        *,
+        deterministic_json: bool = False,
+    ) -> str:
+        """Serialize a ready Neuronpedia batch payload.
+
+        This keeps the final encoder choice reusable for preserved golden-batch parity
+        checks and serializer-only timing measurements without reconstructing the full
+        `SaeVisData` input graph.
+        """
+
+        if not deterministic_json and _MSGSPEC_JSON_ENCODER is not None:
+            return _MSGSPEC_JSON_ENCODER.encode(batch_data).decode("utf-8")
+        return json.dumps(batch_data, cls=NpEncoder, separators=(",", ":"))
+
+    @staticmethod
+    def convert_preserved_snapshot_to_np_json(
+        snapshot: dict[str, Any],
+        *,
+        deterministic_json: bool = False,
+    ) -> str:
+        """Replay full converter timing from a preserved runner snapshot.
+
+        The preserved snapshot stores the converter inputs at the runner boundary so
+        `convert_to_np_json(...)` can be timed offline against a fixed live batch
+        without re-running feature generation.
+        """
+
+        model_d_vocab = int(snapshot["model_d_vocab"])
+        model_stub = SimpleNamespace(cfg=SimpleNamespace(d_vocab=model_d_vocab))
+        feature_data_dict = snapshot.get("feature_data_dict")
+        if feature_data_dict is None:
+            feature_data = snapshot["feature_data"]
+            feature_data_dict = feature_data.feature_data_dict
+        vis_data_stub = SimpleNamespace(feature_data_dict=feature_data_dict)
+        return NeuronpediaConverter.convert_to_np_json(
+            model=model_stub,
+            vis_data=vis_data_stub,
+            np_cfg=snapshot["runner_cfg"],
+            vocab_dict=snapshot["vocab_dict"],
+            deterministic_json=deterministic_json,
+        )
 
     @staticmethod
     def _process_features(
@@ -304,7 +377,7 @@ class NeuronpediaConverter:
     @staticmethod
     def _parse_sequence_group_title(title: str) -> tuple[float, float, float]:
         """Parse the sequence group title to extract bin information."""
-        bin_min, bin_max, bin_contains = 0, 0, 0
+        bin_min, bin_max, bin_contains = 0.0, 0.0, 0.0
         if "TOP ACTIVATIONS" in title:
             bin_min, bin_max, bin_contains = -1, 99, -1
             try:
@@ -322,6 +395,27 @@ class NeuronpediaConverter:
             except ValueError:
                 print(f"Error parsing interval: {title}")
         return bin_min, bin_max, bin_contains
+
+    @staticmethod
+    def _trim_trailing_pad_tokens(
+        token_ids: list[int],
+        values: list[float],
+        dfa_values: Optional[list[float]],
+        pad_token_id: Optional[int],
+    ) -> tuple[list[int], list[float], Optional[list[float]]]:
+        """Trim trailing pad-token suffixes from exported activation payloads."""
+        if pad_token_id is None or not token_ids:
+            return token_ids, values, dfa_values
+
+        trimmed_len = len(token_ids)
+        while trimmed_len > 0 and token_ids[trimmed_len - 1] == pad_token_id:
+            trimmed_len -= 1
+
+        if trimmed_len == len(token_ids):
+            return token_ids, values, dfa_values
+
+        trimmed_dfa_values = dfa_values[:trimmed_len] if dfa_values is not None else None
+        return token_ids[:trimmed_len], values[:trimmed_len], trimmed_dfa_values
 
     @staticmethod
     def _create_activation(
@@ -362,16 +456,25 @@ class NeuronpediaConverter:
                 activation.dfa_maxValue = 0
                 activation.dfa_targetIndex = -1
 
-        activation.tokens = [
-            FeatureProcessor.to_str_tokens_safe(model, vocab_dict, token_id)
-            for token_id in sequence.token_ids
-        ]
-        activation.values = FeatureProcessor.round_list(sequence.feat_acts)
+        token_ids = list(sequence.token_ids)
+        activation_values = FeatureProcessor.round_list(sequence.feat_acts)
         if activation_thresholds is not None:
             threshold = activation_thresholds[feature_index]
-            activation.values = [
-                v if v >= threshold else 0.0 for v in activation.values
-            ]
+            activation_values = [v if v >= threshold else 0.0 for v in activation_values]
+
+        pad_token_id = getattr(getattr(model, "tokenizer", None), "pad_token_id", None)
+        token_ids, activation_values, activation.dfa_values = NeuronpediaConverter._trim_trailing_pad_tokens(
+            token_ids,
+            activation_values,
+            activation.dfa_values,
+            pad_token_id,
+        )
+
+        activation.tokens = [
+            FeatureProcessor.to_str_tokens_safe(model, vocab_dict, token_id)
+            for token_id in token_ids
+        ]
+        activation.values = activation_values
 
         activation.qualifying_token_index = sequence.qualifying_token_index - 1
 

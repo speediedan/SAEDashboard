@@ -588,6 +588,90 @@ def test_generate_tokens_requests_cpu_batches() -> None:
     assert tokens.tolist() == [[1, 2, 3], [4, 5, 6]]
 
 
+def test_write_converter_input_artifact(tmp_path: Path) -> None:
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    artifact_dir = tmp_path / "converter_inputs"
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir="test_outputs",
+        converter_input_artifact_dir=str(artifact_dir),
+    )
+    runner.vocab_dict = {1: "token1"}
+    runner.model = SimpleNamespace(cfg=SimpleNamespace(d_vocab=50257))
+    runner.model_id = "gpt2-small"
+    runner.layer = 5
+    runner.hook_name = "blocks.5.hook_resid_pre"
+
+    feature_data = SimpleNamespace(feature_data_dict={1: {"feature_index": 1}})
+
+    artifact_path = runner._write_converter_input_artifact(feature_data, batch_num=3)
+
+    assert artifact_path == artifact_dir / "converter_input_batch_3.pt"
+    assert artifact_path.is_file()
+    snapshot = torch.load(artifact_path, weights_only=False)
+    assert snapshot["feature_data_dict"] == feature_data.feature_data_dict
+    assert snapshot["runner_cfg"].converter_input_artifact_dir == str(artifact_dir)
+    assert snapshot["vocab_dict"] == {1: "token1"}
+    assert snapshot["model_d_vocab"] == 50257
+    assert snapshot["batch_num"] == 3
+
+
+def test_run_feature_batch_with_optional_profile_writes_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    perf_events: list[dict[str, object]] = []
+
+    class _FakeSaeVisRunner:
+        def __init__(self, cfg) -> None:
+            self.cfg = cfg
+
+        def run(self, encoder, model, tokens):
+            assert encoder is runner.sae
+            assert model is runner.model
+            assert tokens.shape == (1, 2)
+            return {"result": "profiled"}
+
+    def _record(event: str, /, **fields: object) -> None:
+        perf_events.append({"event": event, **fields})
+
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.neuronpedia_runner.SaeVisRunner",
+        _FakeSaeVisRunner,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.neuronpedia_runner.log_perf_event",
+        _record,
+    )
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    trace_dir = tmp_path / "torch_profiles"
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir=str(tmp_path),
+        torch_profile=True,
+        torch_profile_dir=str(trace_dir),
+    )
+    runner.sae = SimpleNamespace()
+    runner.model = SimpleNamespace()
+
+    result = runner._run_feature_batch_with_optional_profile(
+        feature_vis_config_gpt=SimpleNamespace(),
+        tokens=torch.ones(1, 2, dtype=torch.long),
+        feature_batch_count=4,
+    )
+
+    assert result == {"result": "profiled"}
+    trace_event = next(
+        event for event in perf_events if event.get("event") == "torch_profile_trace"
+    )
+    trace_path = Path(str(trace_event["path"]))
+    assert trace_path == trace_dir / "batch-4.trace.json"
+    assert trace_path.is_file()
+
+
 # def test_add_prefix_suffix_to_tokens(neuronpedia_runner: NeuronpediaRunner) -> None:
 #     # modify the config to add a prefix / suffix
 #     neuronpedia_runner.cfg.prefix_tokens = [101, 102, 103]  # Example prefix tokens
