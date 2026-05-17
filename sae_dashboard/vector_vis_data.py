@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from dataclasses_json import dataclass_json
 from rich import print as rprint
@@ -48,9 +48,7 @@ class VectorVisConfig:
     feature_centric_layout: SaeVisLayoutConfig = field(
         default_factory=SaeVisLayoutConfig.default_feature_centric_layout
     )
-    prompt_centric_layout: SaeVisLayoutConfig = field(
-        default_factory=SaeVisLayoutConfig.default_prompt_centric_layout
-    )
+    prompt_centric_layout: SaeVisLayoutConfig = field(default_factory=SaeVisLayoutConfig.default_prompt_centric_layout)
 
     # Additional computations
     use_dfa: bool = False
@@ -58,6 +56,7 @@ class VectorVisConfig:
     # Misc
     seed: int | None = 0
     verbose: bool = False
+    correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
     cache_dir: Path | None = None  # Path to cache the data
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,20 +68,14 @@ class VectorVisConfig:
         Performs the `help` method for both of the layout objects, as well as for the non-layout-based configs.
         """
         # Create table for all the non-layout-based params
-        table = Table(
-            "Param", "Value (default)", "Description", title=title, show_lines=True
-        )
+        table = Table("Param", "Value (default)", "Description", title=title, show_lines=True)
 
         # Populate table (middle row is formatted based on whether value has changed from default)
         for param, desc in VECTOR_CONFIG_DICT.items():
             value = getattr(self, param)
             value_default = getattr(self.__class__, param, "no default")
             if value != value_default:
-                value_default_repr = (
-                    "no default"
-                    if value_default == "no default"
-                    else repr(value_default)
-                )
+                value_default_repr = "no default" if value_default == "no default" else repr(value_default)
                 value_str = f"[b dark_orange]{value!r}[/]\n({value_default_repr})"
             else:
                 value_str = f"[b #00aa00]{value!r}[/]"
@@ -90,12 +83,8 @@ class VectorVisConfig:
 
         # Print table, and print the help trees for the layout objects
         rprint(table)
-        self.feature_centric_layout.help(
-            title="SaeVisLayoutConfig: feature-centric vis", key=False
-        )
-        self.prompt_centric_layout.help(
-            title="SaeVisLayoutConfig: prompt-centric vis", key=False
-        )
+        self.feature_centric_layout.help(title="SaeVisLayoutConfig: feature-centric vis", key=False)
+        self.prompt_centric_layout.help(title="SaeVisLayoutConfig: prompt-centric vis", key=False)
 
 
 @dataclass_json
@@ -112,15 +101,11 @@ class _VectorVisData:
     @classmethod
     def from_dict(
         cls, data: dict[str, Any]
-    ) -> (
-        "_VectorVisData"
-    ): ...  # just for type hinting; the method comes from 'dataclass_json'
+    ) -> "_VectorVisData": ...  # just for type hinting; the method comes from 'dataclass_json'
 
     def to_dict(
         self,
-    ) -> dict[
-        str, Any
-    ]: ...  # just for type hinting; the method comes from 'dataclass_json'
+    ) -> dict[str, Any]: ...  # just for type hinting; the method comes from 'dataclass_json'
 
 
 @dataclass

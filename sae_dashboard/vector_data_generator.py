@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from sae_dashboard.neuronpedia.vector_set import VectorSet
 from sae_dashboard.transformer_lens_wrapper import TransformerLensWrapper
-from sae_dashboard.utils_fns import RollingCorrCoef
+from sae_dashboard.utils_fns import RollingCorrCoef, resolve_correlation_accumulation_device
 
 # from sae_dashboard.dfa_calculator import DFACalculator
 from sae_dashboard.vector_vis_data import VectorVisConfig
@@ -37,19 +37,15 @@ class VectorDataGenerator:
         # )
 
         if cfg.use_dfa:
-            assert (
-                "hook_z" in encoder.cfg.hook_name
-            ), f"DFAs are only supported for hook_z, but got {encoder.cfg.hook_name}"
+            assert "hook_z" in encoder.cfg.hook_name, (
+                f"DFAs are only supported for hook_z, but got {encoder.cfg.hook_name}"
+            )
 
     @torch.inference_mode()
-    def batch_tokens(
-        self, tokens: Int[Tensor, "batch seq"]
-    ) -> list[Int[Tensor, "batch seq"]]:
+    def batch_tokens(self, tokens: Int[Tensor, "batch seq"]) -> list[Int[Tensor, "batch seq"]]:
         # Get tokens into minibatches, for the fwd pass
         token_minibatches = (
-            (tokens,)
-            if self.cfg.minibatch_size_tokens is None
-            else tokens.split(self.cfg.minibatch_size_tokens)
+            (tokens,) if self.cfg.minibatch_size_tokens is None else tokens.split(self.cfg.minibatch_size_tokens)
         )
         token_minibatches = [tok.to(self.cfg.device) for tok in token_minibatches]
 
@@ -67,8 +63,16 @@ class VectorDataGenerator:
         # total_prompts = 0
 
         # Create objects to store the data for computing rolling stats
-        corrcoef_neurons = RollingCorrCoef()
-        corrcoef_encoder = RollingCorrCoef(indices=feature_indices, with_self=True)
+        correlation_device = resolve_correlation_accumulation_device(
+            self.cfg.device,
+            self.cfg.correlation_accumulation_device,
+        )
+        corrcoef_neurons = RollingCorrCoef(device=correlation_device)
+        corrcoef_encoder = RollingCorrCoef(
+            indices=feature_indices,
+            with_self=True,
+            device=correlation_device,
+        )
 
         # Get the selected vectors
         print(f"feature_indices: {feature_indices}")
@@ -82,9 +86,9 @@ class VectorDataGenerator:
         for i, minibatch in enumerate(self.token_minibatches):
             minibatch = minibatch.to(self.cfg.device)
             model_activation_dict = self.get_model_acts(i, minibatch)
-            primary_acts = model_activation_dict[
-                self.model.activation_config.primary_hook_point
-            ].to(self.encoder.cfg.device)
+            primary_acts = model_activation_dict[self.model.activation_config.primary_hook_point].to(
+                self.encoder.cfg.device
+            )
 
             # Simple dot product between activations and selected vectors
             feature_acts = torch.einsum("...d,nd->...n", primary_acts, feature_vectors)
@@ -146,19 +150,21 @@ class VectorDataGenerator:
         A function that gets the model activations for a given minibatch of tokens.
         Uses np.memmap for efficient caching.
         """
+        cache_path: Path | None = None
         if self.cfg.cache_dir is not None:
             cache_path = self.cfg.cache_dir / f"model_activations_{minibatch_index}.pt"
             if use_cache and cache_path.exists():
                 activation_dict = load_tensor_dict_torch(cache_path, self.cfg.device)
             else:
-                activation_dict = self.model.forward(
-                    minibatch_tokens.to("cpu"), return_logits=False
-                )
+                activation_dict = self.model.forward(minibatch_tokens.to("cpu"), return_logits=False)
                 save_tensor_dict_torch(activation_dict, cache_path)
         else:
-            activation_dict = self.model.forward(
-                minibatch_tokens.to("cpu"), return_logits=False
-            )
+            activation_dict = self.model.forward(minibatch_tokens.to("cpu"), return_logits=False)
+
+        if not self.model._activation_shapes_match_tokens(activation_dict, minibatch_tokens):
+            activation_dict = self.model.forward(minibatch_tokens.to("cpu"), return_logits=False)
+            if cache_path is not None:
+                save_tensor_dict_torch(activation_dict, cache_path)
 
         return activation_dict
 
@@ -182,18 +188,20 @@ class VectorDataGenerator:
             corrcoef_encoder: Optional[RollingCorrCoef]
                 The object storing the minimal data necessary to compute corrcoef between pairwise feature activations.
         """
+        feature_acts_by_feature = einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)")
+
         # Update the CorrCoef object between feature activation & neurons
         if corrcoef_neurons is not None:
             corrcoef_neurons.update(
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
+                feature_acts_by_feature,
                 einops.rearrange(model_acts, "batch seq d_in -> d_in (batch seq)"),
             )
 
         # Update the CorrCoef object between pairwise feature activations
         if corrcoef_encoder is not None:
             corrcoef_encoder.update(
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
-                einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)"),
+                feature_acts_by_feature,
+                feature_acts_by_feature,
             )
 
 
@@ -202,6 +210,4 @@ def save_tensor_dict_torch(tensor_dict: Dict[str, torch.Tensor], filename: Path)
 
 
 def load_tensor_dict_torch(filename: Path, device: str) -> Dict[str, torch.Tensor]:
-    return torch.load(
-        filename, map_location=torch.device(device)
-    )  # Directly load to GPU
+    return torch.load(filename, map_location=torch.device(device))  # Directly load to GPU

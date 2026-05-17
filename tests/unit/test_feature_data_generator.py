@@ -3,6 +3,18 @@ import torch
 
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
 from sae_dashboard.sae_vis_data import SaeVisConfig
+from sae_dashboard.utils_fns import resolve_correlation_accumulation_device
+
+
+def test_resolve_correlation_accumulation_device_cpu_policy() -> None:
+    assert resolve_correlation_accumulation_device("cuda", "cpu") == torch.device("cpu")
+
+
+def test_resolve_correlation_accumulation_device_rejects_unavailable_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(ValueError, match="requires CUDA"):
+        resolve_correlation_accumulation_device("cpu", "cuda")
 
 
 def test_batch_tokens_uses_prompt_minibatch_schedule() -> None:

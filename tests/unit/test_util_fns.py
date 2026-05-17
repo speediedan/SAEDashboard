@@ -4,8 +4,11 @@ import torch
 
 from sae_dashboard.utils_fns import (
     FeatureStatistics,
+    HistogramData,
     RollingCorrCoef,
     TopK,
+    build_activation_histogram_titles,
+    build_activation_histogram_titles_from_densities,
     sample_unique_indices,
 )
 
@@ -125,9 +128,9 @@ def test_feature_statistics_batched_vs_unbatched(
     )  # Process 10 features at a time
 
     # Compare max values
-    assert np.allclose(
-        unbatched_stats.max, batched_stats.max, atol=1e-3
-    ), "Max values do not match"
+    assert np.allclose(unbatched_stats.max, batched_stats.max, atol=1e-3), (
+        "Max values do not match"
+    )
 
     # Compare fraction of non-zero values
     assert np.allclose(
@@ -135,23 +138,23 @@ def test_feature_statistics_batched_vs_unbatched(
     ), "Fraction of non-zero values do not match"
 
     # Compare quantiles
-    assert (
-        unbatched_stats.quantiles == batched_stats.quantiles
-    ), "Quantiles do not match"
+    assert unbatched_stats.quantiles == batched_stats.quantiles, (
+        "Quantiles do not match"
+    )
 
     # Compare quantile data
-    assert len(unbatched_stats.quantile_data) == len(
-        batched_stats.quantile_data
-    ), "Quantile data lengths do not match"
+    assert len(unbatched_stats.quantile_data) == len(batched_stats.quantile_data), (
+        "Quantile data lengths do not match"
+    )
     for unbatched_qd, batched_qd in zip(
         unbatched_stats.quantile_data, batched_stats.quantile_data
     ):
-        assert len(unbatched_qd) == len(
-            batched_qd
-        ), "Quantile data sub-lengths do not match"
-        assert np.allclose(
-            unbatched_qd, batched_qd, atol=1e-3
-        ), "Quantile data values do not match"
+        assert len(unbatched_qd) == len(batched_qd), (
+            "Quantile data sub-lengths do not match"
+        )
+        assert np.allclose(unbatched_qd, batched_qd, atol=1e-3), (
+            "Quantile data values do not match"
+        )
 
     # Compare ranges_and_precisions
     assert (
@@ -177,38 +180,42 @@ def test_feature_statistics_batched_vs_unbatched_uneven_sizes(
     batched_stats = FeatureStatistics.create(data, batch_size=batch_size)
 
     # Compare max values
-    assert np.allclose(
-        unbatched_stats.max, batched_stats.max, atol=1e-3
-    ), f"Max values do not match for n_features={n_features}, batch_size={batch_size}"
+    assert np.allclose(unbatched_stats.max, batched_stats.max, atol=1e-3), (
+        f"Max values do not match for n_features={n_features}, batch_size={batch_size}"
+    )
 
     # Compare fraction of non-zero values
     assert np.allclose(
         unbatched_stats.frac_nonzero, batched_stats.frac_nonzero, atol=1e-3
-    ), f"Fraction of non-zero values do not match for n_features={n_features}, batch_size={batch_size}"
+    ), (
+        f"Fraction of non-zero values do not match for n_features={n_features}, batch_size={batch_size}"
+    )
 
     # Compare quantiles
-    assert (
-        unbatched_stats.quantiles == batched_stats.quantiles
-    ), f"Quantiles do not match for n_features={n_features}, batch_size={batch_size}"
+    assert unbatched_stats.quantiles == batched_stats.quantiles, (
+        f"Quantiles do not match for n_features={n_features}, batch_size={batch_size}"
+    )
 
     # Compare quantile data
-    assert len(unbatched_stats.quantile_data) == len(
-        batched_stats.quantile_data
-    ), f"Quantile data lengths do not match for n_features={n_features}, batch_size={batch_size}"
+    assert len(unbatched_stats.quantile_data) == len(batched_stats.quantile_data), (
+        f"Quantile data lengths do not match for n_features={n_features}, batch_size={batch_size}"
+    )
     for unbatched_qd, batched_qd in zip(
         unbatched_stats.quantile_data, batched_stats.quantile_data
     ):
-        assert len(unbatched_qd) == len(
-            batched_qd
-        ), f"Quantile data sub-lengths do not match for n_features={n_features}, batch_size={batch_size}"
-        assert np.allclose(
-            unbatched_qd, batched_qd, atol=1e-3
-        ), f"Quantile data values do not match for n_features={n_features}, batch_size={batch_size}"
+        assert len(unbatched_qd) == len(batched_qd), (
+            f"Quantile data sub-lengths do not match for n_features={n_features}, batch_size={batch_size}"
+        )
+        assert np.allclose(unbatched_qd, batched_qd, atol=1e-3), (
+            f"Quantile data values do not match for n_features={n_features}, batch_size={batch_size}"
+        )
 
     # Compare ranges_and_precisions
     assert (
         unbatched_stats.ranges_and_precisions == batched_stats.ranges_and_precisions
-    ), f"Ranges and precisions do not match for n_features={n_features}, batch_size={batch_size}"
+    ), (
+        f"Ranges and precisions do not match for n_features={n_features}, batch_size={batch_size}"
+    )
 
 
 def test_feature_statistics_create(precision_data: tuple[torch.Tensor, torch.dtype]):
@@ -231,6 +238,438 @@ def test_feature_statistics_create(precision_data: tuple[torch.Tensor, torch.dty
     # Test quantile data
     assert len(feature_stats.quantile_data) == 3  # One for each row in the input data
     assert all(len(qd) > 0 for qd in feature_stats.quantile_data)
+
+
+def test_feature_statistics_sparse_quantiles_approximate_dense_path():
+    feature_offsets = torch.arange(6, dtype=torch.float32).unsqueeze(1) * 0.2
+    positive_tail = (
+        torch.linspace(0.1, 3.0, 80, dtype=torch.float32).unsqueeze(0) + feature_offsets
+    )
+    zero_prefix = torch.zeros(6, 920, dtype=torch.float32)
+    sparse_activations = torch.cat([zero_prefix, positive_tail], dim=1)
+
+    dense_stats = FeatureStatistics.create(sparse_activations)
+    sparse_stats = FeatureStatistics.create(
+        sparse_activations,
+        batch_size=2,
+        use_sparse_quantiles=True,
+    )
+
+    assert np.allclose(dense_stats.max, sparse_stats.max, atol=1e-6)
+    assert np.allclose(dense_stats.frac_nonzero, sparse_stats.frac_nonzero, atol=1e-6)
+    assert sparse_stats.quantiles == dense_stats.quantiles
+
+    max_errors = []
+    mean_errors = []
+    for dense_quantiles, sparse_quantiles in zip(
+        dense_stats.quantile_data, sparse_stats.quantile_data
+    ):
+        shared_tail_length = min(len(dense_quantiles), len(sparse_quantiles))
+        assert shared_tail_length > 0
+        dense_tail = torch.tensor(dense_quantiles[-shared_tail_length:])
+        sparse_tail = torch.tensor(sparse_quantiles[-shared_tail_length:])
+        absolute_error = (dense_tail - sparse_tail).abs()
+        max_errors.append(float(absolute_error.max()))
+        mean_errors.append(float(absolute_error.mean()))
+
+    assert max(max_errors) < 0.05
+    assert float(np.mean(mean_errors)) < 0.006
+
+
+def test_feature_statistics_valid_mask_excludes_padding_from_density_and_quantiles():
+    data = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    valid_mask = torch.tensor([True, False, False, False])
+
+    masked_stats = FeatureStatistics.create(
+        data,
+        use_sparse_quantiles=True,
+        valid_mask=valid_mask,
+    )
+
+    assert masked_stats.max == [1.0]
+    assert masked_stats.frac_nonzero == [1.0]
+    assert masked_stats.quantile_data[0]
+    assert all(value == 1.0 for value in masked_stats.quantile_data[0])
+
+
+def test_feature_statistics_arrow_table_round_trips():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [1.0, 0.0, 0.5, 0.0],
+            [0.0, 2.0, 0.0, 3.0],
+        ],
+        dtype=torch.float32,
+    )
+    valid_mask = torch.tensor([True, True, False, True])
+
+    eager_stats = FeatureStatistics.create(
+        data,
+        use_sparse_quantiles=True,
+        valid_mask=valid_mask,
+    )
+    arrow_table = FeatureStatistics.create_arrow_table(
+        data,
+        use_sparse_quantiles=True,
+        valid_mask=valid_mask,
+    )
+    round_trip_stats = FeatureStatistics.from_arrow_table(arrow_table)
+
+    assert round_trip_stats.max == eager_stats.max
+    assert round_trip_stats.frac_nonzero == eager_stats.frac_nonzero
+    assert round_trip_stats.quantiles == eager_stats.quantiles
+    assert round_trip_stats.quantile_data == eager_stats.quantile_data
+
+
+def test_feature_statistics_arrow_table_exposes_positive_density_for_titles():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [1.0, -2.0, 0.0, 3.0],
+            [-1.0, 0.0, 0.0, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+    valid_mask = torch.tensor([True, True, False, True])
+
+    arrow_table = FeatureStatistics.create_arrow_table(
+        data,
+        valid_mask=valid_mask,
+        include_quantiles=False,
+    )
+
+    assert arrow_table.column("positive_count").to_pylist() == [2, 1]
+    assert arrow_table.column("positive_density").to_pylist() == pytest.approx(
+        [2 / 3, 1 / 3]
+    )
+    assert arrow_table.column("frac_nonzero").to_pylist() == pytest.approx([1.0, 2 / 3])
+    assert build_activation_histogram_titles_from_densities(
+        arrow_table.column("positive_density").to_pylist()
+    ) == build_activation_histogram_titles(data, valid_mask=valid_mask)
+
+
+def test_feature_statistics_scalar_arrow_table_matches_mask_shapes():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [1.0, -2.0, 0.0, 3.0, 5.0],
+            [-1.0, 0.0, 4.0, 0.0, -6.0],
+        ],
+        dtype=torch.float32,
+    )
+    valid_mask = torch.tensor([True, True, False, True, False])
+    expanded_mask = valid_mask.unsqueeze(0).expand_as(data)
+
+    table_with_1d_mask = FeatureStatistics.create_arrow_table(
+        data,
+        valid_mask=valid_mask,
+        include_quantiles=False,
+    )
+    table_with_2d_mask = FeatureStatistics.create_arrow_table(
+        data,
+        valid_mask=expanded_mask,
+        include_quantiles=False,
+    )
+
+    assert table_with_1d_mask.to_pydict() == table_with_2d_mask.to_pydict()
+
+    all_valid_mask = torch.ones(data.shape[-1], dtype=torch.bool)
+    table_without_mask = FeatureStatistics.create_arrow_table(
+        data,
+        include_quantiles=False,
+    )
+    table_with_all_valid_mask = FeatureStatistics.create_arrow_table(
+        data,
+        valid_mask=all_valid_mask,
+        include_quantiles=False,
+    )
+
+    assert table_with_all_valid_mask.to_pydict() == table_without_mask.to_pydict()
+
+    all_invalid_mask = torch.zeros(data.shape[-1], dtype=torch.bool)
+    table_with_all_invalid_mask = FeatureStatistics.create_arrow_table(
+        data,
+        valid_mask=all_invalid_mask,
+        include_quantiles=False,
+    )
+
+    assert table_with_all_invalid_mask.column("max").to_pylist() == [0.0, 0.0]
+    assert table_with_all_invalid_mask.column("frac_nonzero").to_pylist() == [
+        0.0,
+        0.0,
+    ]
+    assert table_with_all_invalid_mask.column("positive_density").to_pylist() == [
+        0.0,
+        0.0,
+    ]
+    assert table_with_all_invalid_mask.column("positive_count").to_pylist() == [0, 0]
+    assert table_with_all_invalid_mask.column("nonzero_count").to_pylist() == [0, 0]
+    assert table_with_all_invalid_mask.column("valid_count").to_pylist() == [0, 0]
+
+
+def test_activation_histogram_titles_use_valid_token_count():
+    data = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    valid_mask = torch.tensor([True, False, False, False])
+
+    titles = build_activation_histogram_titles(data, valid_mask=valid_mask)
+
+    assert titles == ["ACTIVATIONS<br>DENSITY = 100.000%"]
+
+
+def test_histogram_data_from_data_batch_matches_scalar_path():
+    base = torch.linspace(-3, 3, 97)
+    data = torch.stack(
+        [
+            base,
+            base * 0.5 + 1.0,
+            torch.sin(base) * 2.0,
+            torch.ones_like(base),
+        ]
+    )
+
+    scalar_histograms = [
+        HistogramData.from_data(row, n_bins=40, tickmode="5 ticks", title=None)
+        for row in data
+    ]
+    batch_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=40,
+        tickmode="5 ticks",
+        title=None,
+        row_batch_size=2,
+    )
+
+    assert len(batch_histograms) == len(scalar_histograms)
+    for scalar_histogram, batch_histogram in zip(scalar_histograms, batch_histograms):
+        assert batch_histogram.bar_heights == scalar_histogram.bar_heights
+        assert batch_histogram.bar_values == scalar_histogram.bar_values
+        assert batch_histogram.tick_vals == scalar_histogram.tick_vals
+        assert batch_histogram.title == scalar_histogram.title
+
+
+def test_histogram_data_from_data_batch_positive_only_matches_scalar_path():
+    data = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 3.0, -1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [4.0, 4.0, 0.0, -2.0, 0.0],
+        ]
+    )
+    titles = ["first", "empty", "constant"]
+
+    scalar_histograms = [
+        HistogramData.from_data(row[row > 0], n_bins=4, tickmode="5 ticks", title=title)
+        for row, title in zip(data, titles)
+    ]
+    batch_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+        row_batch_size=2,
+        positive_only=True,
+        titles=titles,
+    )
+
+    assert len(batch_histograms) == len(scalar_histograms)
+    for scalar_histogram, batch_histogram in zip(scalar_histograms, batch_histograms):
+        assert batch_histogram.bar_heights == scalar_histogram.bar_heights
+        assert batch_histogram.bar_values == scalar_histogram.bar_values
+        assert batch_histogram.tick_vals == scalar_histogram.tick_vals
+        assert batch_histogram.title == scalar_histogram.title
+
+
+def test_histogram_data_from_data_batch_positive_only_sparse_matches_scalar_path():
+    data = torch.tensor(
+        [
+            [0.0, 0.1, 0.0, 2.5, -3.0, 0.0, 0.7],
+            [0.0, 0.0, 0.0, 0.0, -2.0, -1.0, 0.0],
+            [4.0, 0.0, 0.0, 1.0, 0.0, 8.0, 0.0],
+            [3.5, 3.5, 0.0, -1.0, 0.0, 3.5, 0.0],
+        ]
+    )
+    titles = ["sparse", "empty", "mixed", "constant"]
+
+    scalar_histograms = [
+        HistogramData.from_data(
+            row[row > 0],
+            n_bins=5,
+            tickmode="5 ticks",
+            title=title,
+        )
+        for row, title in zip(data, titles)
+    ]
+    batch_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=5,
+        tickmode="5 ticks",
+        title=None,
+        row_batch_size=1,
+        positive_only=True,
+        titles=titles,
+    )
+
+    assert len(batch_histograms) == len(scalar_histograms)
+    for scalar_histogram, batch_histogram in zip(scalar_histograms, batch_histograms):
+        assert batch_histogram.bar_heights == scalar_histogram.bar_heights
+        assert batch_histogram.bar_values == scalar_histogram.bar_values
+        assert batch_histogram.tick_vals == scalar_histogram.tick_vals
+        assert batch_histogram.title == scalar_histogram.title
+
+
+def test_histogram_data_from_data_batch_positive_only_polars_matches_torch_path():
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("polars")
+
+    data = torch.tensor(
+        [
+            [0.0, 0.1, 0.0, 2.5, -3.0, 0.0, 0.7],
+            [0.0, 0.0, 0.0, 0.0, -2.0, -1.0, 0.0],
+            [4.0, 0.0, 0.0, 1.0, 0.0, 8.0, 0.0],
+            [3.5, 3.5, 0.0, -1.0, 0.0, 3.5, 0.0],
+        ]
+    )
+    titles = ["sparse", "empty", "mixed", "constant"]
+
+    torch_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=5,
+        tickmode="5 ticks",
+        title=None,
+        positive_only=True,
+        titles=titles,
+        backend="torch",
+    )
+    polars_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=5,
+        tickmode="5 ticks",
+        title=None,
+        positive_only=True,
+        titles=titles,
+        backend="polars",
+    )
+
+    assert len(polars_histograms) == len(torch_histograms)
+    for torch_histogram, polars_histogram in zip(torch_histograms, polars_histograms):
+        assert polars_histogram.bar_heights == torch_histogram.bar_heights
+        assert polars_histogram.bar_values == torch_histogram.bar_values
+        assert polars_histogram.tick_vals == torch_histogram.tick_vals
+        assert polars_histogram.title == torch_histogram.title
+
+
+def test_histogram_data_from_data_batch_arrow_table_matches_object_path():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [-1.0, 0.0, 1.0, 2.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    titles = ["mixed", "constant", "empty"]
+
+    eager_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+        titles=titles,
+    )
+    arrow_table = HistogramData.from_data_batch_arrow_table(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+        titles=titles,
+    )
+    round_trip_histograms = HistogramData.from_arrow_table(arrow_table)
+
+    assert len(round_trip_histograms) == len(eager_histograms)
+    for eager_histogram, round_trip_histogram in zip(
+        eager_histograms, round_trip_histograms
+    ):
+        assert round_trip_histogram.bar_heights == eager_histogram.bar_heights
+        assert round_trip_histogram.bar_values == eager_histogram.bar_values
+        assert round_trip_histogram.tick_vals == eager_histogram.tick_vals
+        assert round_trip_histogram.title == eager_histogram.title
+
+
+def test_histogram_data_dense_arrow_table_matches_object_path_without_constant_fallback():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [-2.0, -1.0, 0.5, 3.0],
+            [1.0, 2.0, 4.0, 8.0],
+            [-4.0, -2.0, -1.0, 0.25],
+        ],
+        dtype=torch.float32,
+    )
+    titles = ["mixed", "positive", "negative"]
+
+    eager_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+        titles=titles,
+    )
+    arrow_table = HistogramData.from_data_batch_arrow_table(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+        titles=titles,
+        row_batch_size=2,
+    )
+    round_trip_histograms = HistogramData.from_arrow_table(arrow_table)
+
+    assert len(round_trip_histograms) == len(eager_histograms)
+    for eager_histogram, round_trip_histogram in zip(
+        eager_histograms, round_trip_histograms
+    ):
+        assert round_trip_histogram.bar_heights == eager_histogram.bar_heights
+        assert round_trip_histogram.bar_values == eager_histogram.bar_values
+        assert round_trip_histogram.tick_vals == eager_histogram.tick_vals
+        assert round_trip_histogram.title == eager_histogram.title
+
+
+def test_histogram_data_small_range_ticks_stay_compact_and_match_arrow_path():
+    pytest.importorskip("pyarrow")
+
+    data = torch.tensor(
+        [
+            [-0.021, -0.010, 0.000, 0.019],
+            [-0.032, -0.002, 0.011, 0.027],
+        ],
+        dtype=torch.float32,
+    )
+
+    eager_histograms = HistogramData.from_data_batch(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+    )
+    arrow_table = HistogramData.from_data_batch_arrow_table(
+        data,
+        n_bins=4,
+        tickmode="5 ticks",
+        title=None,
+    )
+    round_trip_histograms = HistogramData.from_arrow_table(arrow_table)
+
+    for eager_histogram, round_trip_histogram in zip(
+        eager_histograms, round_trip_histograms
+    ):
+        assert eager_histogram.tick_vals == round_trip_histogram.tick_vals
+        assert len(eager_histogram.tick_vals) <= 7
 
 
 def test_feature_statistics_update():
