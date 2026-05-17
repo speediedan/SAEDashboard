@@ -163,6 +163,25 @@ def test_resolved_neuronpedia_set_name_appends_suffix() -> None:
     assert resolved_name == "gemmascope-2-transcoder-262k-rte__phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514"
 
 
+def test_resolved_columnar_activation_copy_ids_include_suffix() -> None:
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gemma-scope-2-1b-it-transcoders-all",
+        sae_path="layer_9_width_262k_l0_small_affine",
+        outputs_dir="test_outputs",
+        np_set_name="gemmascope-2-transcoder-262k-rte",
+    )
+    runner.np_sae_id_suffix = "phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514"
+    runner.layer = 9
+
+    assert runner._resolved_columnar_activation_copy_layer() == (
+        "9-gemmascope-2-transcoder-262k-rte__phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514"
+    )
+    assert runner._resolved_columnar_activation_copy_id_prefix() == (
+        "9-gemmascope-2-transcoder-262k-rte__phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514-activation"
+    )
+
+
 def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> None:
     shared_tokens_file = tmp_path / "shared_tokens.pt"
     expected_tokens = torch.tensor([[1, 2, 3], [1, 2, 3]], dtype=torch.long)

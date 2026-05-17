@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+import sae_dashboard.feature_data_generator as feature_data_generator
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.utils_fns import resolve_correlation_accumulation_device
@@ -15,6 +16,39 @@ def test_resolve_correlation_accumulation_device_rejects_unavailable_cuda(monkey
 
     with pytest.raises(ValueError, match="requires CUDA"):
         resolve_correlation_accumulation_device("cpu", "cuda")
+
+
+def test_get_feature_data_uses_configured_correlation_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_devices: list[torch.device] = []
+
+    class CapturingRollingCorrCoef:
+        def __init__(
+            self,
+            indices: list[int] | None = None,
+            with_self: bool = False,
+            dtype: torch.dtype = torch.float32,
+            device: torch.device = torch.device("cpu"),
+        ) -> None:
+            captured_devices.append(device)
+
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        device="cpu",
+        correlation_accumulation_device="cpu",
+    )
+    generator.token_minibatches = []
+    generator.full_sequence_length = 0
+    generator.encoder = type("Encoder", (), {"W_dec": torch.ones((1, 3))})()
+    generator.model = object()
+
+    monkeypatch.setattr(feature_data_generator, "RollingCorrCoef", CapturingRollingCorrCoef)
+    monkeypatch.setattr(feature_data_generator, "to_resid_direction", lambda feature_out_dir, model: feature_out_dir)
+
+    generator.get_feature_data([0])
+
+    assert captured_devices == [torch.device("cpu"), torch.device("cpu")]
 
 
 def test_batch_tokens_uses_prompt_minibatch_schedule() -> None:

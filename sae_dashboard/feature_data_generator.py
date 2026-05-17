@@ -27,7 +27,10 @@ from sae_dashboard.transformer_lens_wrapper import (
     TransformerLensWrapper,
     to_resid_direction,
 )
-from sae_dashboard.utils_fns import RollingCorrCoef
+from sae_dashboard.utils_fns import (
+    RollingCorrCoef,
+    resolve_correlation_accumulation_device,
+)
 
 Arr = np.ndarray
 
@@ -377,8 +380,12 @@ class FeatureDataGenerator:
         )
 
         # Create objects to store the data for computing rolling stats
-        corrcoef_neurons = RollingCorrCoef()
-        corrcoef_encoder = RollingCorrCoef(indices=feature_indices, with_self=True)
+        correlation_device = resolve_correlation_accumulation_device(
+            self.cfg.device,
+            self.cfg.correlation_accumulation_device,
+        )
+        corrcoef_neurons = RollingCorrCoef(device=correlation_device)
+        corrcoef_encoder = RollingCorrCoef(indices=feature_indices, with_self=True, device=correlation_device)
 
         # Get encoder & decoder directions
         feature_out_dir = self.encoder.W_dec[feature_indices]  # [feats d_autoencoder]

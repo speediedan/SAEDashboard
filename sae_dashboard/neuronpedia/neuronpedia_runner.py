@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Set, Tuple, cast
 
@@ -54,7 +54,7 @@ from sae_dashboard.perf_logging import (
     process_io_snapshot,
     timed_stage,
 )
-from sae_dashboard.sae_vis_data import SaeVisConfig
+from sae_dashboard.sae_vis_data import SaeVisColumnarData, SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.utils_fns import has_duplicate_rows
 
@@ -1554,6 +1554,16 @@ class NeuronpediaRunner:
         )
         return artifact_path
 
+    def _resolved_columnar_activation_copy_layer(self) -> str:
+        if self.layer is None:
+            raise ValueError(
+                "layer must be resolved before columnar activation metadata is built."
+            )
+        return f"{self.layer}-{self._resolved_neuronpedia_set_name()}"
+
+    def _resolved_columnar_activation_copy_id_prefix(self) -> str:
+        return f"{self._resolved_columnar_activation_copy_layer()}-activation"
+
     def _load_prompt_bucket_schedule(
         self, tokens: torch.Tensor
     ) -> list[dict[str, Any]] | None:
@@ -1862,7 +1872,20 @@ class NeuronpediaRunner:
                     feature_batch_count = feature_batch_count + 1
                     continue
 
-                output_file = f"{self.cfg.outputs_dir}/batch-{feature_batch_count}.json"
+                if self.cfg.dashboard_output_format == "columnar":
+                    output_root = (
+                        Path(self.cfg.outputs_dir)
+                        / f"batch-{feature_batch_count}.columnar"
+                    )
+                    output_file = str(output_root / "manifest.json")
+                    if output_root.exists() and not Path(output_file).is_file():
+                        shutil.rmtree(output_root)
+                else:
+                    output_root = None
+                    output_file = (
+                        f"{self.cfg.outputs_dir}/batch-{feature_batch_count}.json"
+                    )
+
                 if Path(output_file).is_file():
                     logline = (
                         f"\n++++++++++ Skipping Batch #{feature_batch_count} output. "
@@ -1935,6 +1958,29 @@ class NeuronpediaRunner:
                         if self.cfg.sequence_replay_artifact_dir
                         else None
                     ),
+                    correlation_accumulation_device=self.cfg.correlation_accumulation_device,
+                    feature_statistics_backend=self.cfg.feature_statistics_backend,
+                    logits_histogram_backend=self.cfg.logits_histogram_backend,
+                    activation_histogram_backend=self.cfg.activation_histogram_backend,
+                    defer_component_construction=self.cfg.defer_component_construction,
+                    sequence_selection_backend=self.cfg.sequence_selection_backend,
+                    dashboard_output_format=self.cfg.dashboard_output_format,
+                    columnar_artifact_dir=output_root,
+                    columnar_artifact_format=self.cfg.columnar_artifact_format,
+                    columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
+                    columnar_emit_activation_rows=self.cfg.columnar_emit_activation_rows,
+                    columnar_emit_activation_copy_rows=self.cfg.columnar_emit_activation_copy_rows,
+                    columnar_activation_copy_model_id=(
+                        self.cfg.columnar_activation_copy_model_id or self.model_id
+                    ),
+                    columnar_activation_copy_layer=self._resolved_columnar_activation_copy_layer(),
+                    columnar_activation_copy_creator_id=(
+                        os.getenv("DEFAULT_CREATOR_ID") or ""
+                    ),
+                    columnar_activation_copy_created_at=datetime.now(timezone.utc)
+                    .replace(tzinfo=None)
+                    .isoformat(),
+                    columnar_activation_copy_id_prefix=self._resolved_columnar_activation_copy_id_prefix(),
                 )
 
                 self._log_token_snapshot(
@@ -1952,50 +1998,71 @@ class NeuronpediaRunner:
                 )
                 self._log_resource_snapshot(f"after_feature_run_{feature_batch_count}")
 
-                converter_input_artifact = self._write_converter_input_artifact(
-                    feature_data,
-                    feature_batch_count,
-                )
+                converter_input_artifact = None
+                if self.cfg.dashboard_output_format != "columnar":
+                    converter_input_artifact = self._write_converter_input_artifact(
+                        feature_data,
+                        feature_batch_count,
+                    )
 
                 self.cfg.model_id = self.model_id
                 self.cfg.layer = self.layer
-                with timed_stage(
-                    self.cfg.log_performance,
-                    "neuronpedia_conversion_and_json_serialization",
-                    batch=feature_batch_count,
-                    feature_count=len(features_to_process),
-                ):
-                    json_object = NeuronpediaConverter.convert_to_np_json(
-                        self.model, feature_data, self.cfg, self.vocab_dict
-                    )
-                write_start_io = process_io_snapshot()
-                with elapsed_timer() as write_timing:
-                    with open(
-                        output_file,
-                        "w",
-                    ) as f:
-                        f.write(json_object)
-                write_end_io = process_io_snapshot()
-                if self.cfg.log_performance:
-                    output_bytes = len(json_object.encode("utf-8"))
-                    write_wall_s = max(write_timing.get("wall_s", 0.0), 1e-9)
-                    log_perf_event(
-                        "disk_write",
-                        batch=feature_batch_count,
-                        path=output_file,
-                        output_bytes=output_bytes,
-                        wall_s=write_wall_s,
-                        output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
-                        process_io_delta=io_delta(write_start_io, write_end_io),
-                    )
-                    if converter_input_artifact is not None:
-                        log_perf_event(
-                            "converter_input_artifact",
-                            batch=feature_batch_count,
-                            path=str(converter_input_artifact),
-                            size_bytes=converter_input_artifact.stat().st_size,
+                if self.cfg.dashboard_output_format == "columnar":
+                    if not isinstance(feature_data, SaeVisColumnarData):
+                        raise TypeError(
+                            "Columnar dashboard output requires SaeVisRunner to return SaeVisColumnarData."
                         )
-                print(f"Output written to {output_file}")
+                    if self.cfg.log_performance:
+                        log_perf_event(
+                            "columnar_output_summary",
+                            batch=feature_batch_count,
+                            feature_count=len(features_to_process),
+                            artifact_dir=str(feature_data.artifact_dir),
+                            manifest_path=str(feature_data.manifest_path),
+                            row_counts={
+                                batch.feature_batch_index: batch.row_counts
+                                for batch in feature_data.batches
+                            },
+                        )
+                    print(f"Columnar output written to {feature_data.manifest_path}")
+                else:
+                    with timed_stage(
+                        self.cfg.log_performance,
+                        "neuronpedia_conversion_and_json_serialization",
+                        batch=feature_batch_count,
+                        feature_count=len(features_to_process),
+                    ):
+                        json_object = NeuronpediaConverter.convert_to_np_json(
+                            self.model, feature_data, self.cfg, self.vocab_dict
+                        )
+                    write_start_io = process_io_snapshot()
+                    with elapsed_timer() as write_timing:
+                        with open(
+                            output_file,
+                            "w",
+                        ) as f:
+                            f.write(json_object)
+                    write_end_io = process_io_snapshot()
+                    if self.cfg.log_performance:
+                        output_bytes = len(json_object.encode("utf-8"))
+                        write_wall_s = max(write_timing.get("wall_s", 0.0), 1e-9)
+                        log_perf_event(
+                            "disk_write",
+                            batch=feature_batch_count,
+                            path=output_file,
+                            output_bytes=output_bytes,
+                            wall_s=write_wall_s,
+                            output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
+                            process_io_delta=io_delta(write_start_io, write_end_io),
+                        )
+                        if converter_input_artifact is not None:
+                            log_perf_event(
+                                "converter_input_artifact",
+                                batch=feature_batch_count,
+                                path=str(converter_input_artifact),
+                                size_bytes=converter_input_artifact.stat().st_size,
+                            )
+                    print(f"Output written to {output_file}")
                 batch_end_io = process_io_snapshot()
                 if self.cfg.log_performance:
                     log_perf_event(
@@ -2327,6 +2394,78 @@ def main():
         ),
     )
     parser.add_argument(
+        "--correlation-accumulation-device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Policy for correlation accumulator placement.",
+    )
+    parser.add_argument(
+        "--feature-statistics-backend",
+        choices=("object", "arrow"),
+        default="arrow",
+        help="Backend for columnar feature statistics packaging.",
+    )
+    parser.add_argument(
+        "--logits-histogram-backend",
+        choices=("object", "arrow"),
+        default="arrow",
+        help="Backend for columnar logits histogram packaging.",
+    )
+    parser.add_argument(
+        "--activation-histogram-backend",
+        choices=("torch", "polars"),
+        default="torch",
+        help="Backend for positive-only activation histogram packaging in columnar mode.",
+    )
+    parser.add_argument(
+        "--defer-component-construction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Avoid rebuilding the legacy nested component graph when columnar output is requested.",
+    )
+    parser.add_argument(
+        "--sequence-selection-backend",
+        choices=("eager_cpu", "lazy_gpu"),
+        default="eager_cpu",
+        help="Sequence candidate-selection backend.",
+    )
+    parser.add_argument(
+        "--dashboard-output-format",
+        choices=("legacy_json", "columnar"),
+        default="legacy_json",
+        help="Dashboard output format.",
+    )
+    parser.add_argument(
+        "--columnar-artifact-format",
+        choices=("arrow", "parquet"),
+        default="arrow",
+        help="On-disk format for columnar dashboard tables.",
+    )
+    parser.add_argument(
+        "--columnar-emit-sequence-rows",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit raw sequence_rows tables in columnar mode.",
+    )
+    parser.add_argument(
+        "--columnar-emit-activation-rows",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Emit semantic activation_rows tables in columnar mode.",
+    )
+    parser.add_argument(
+        "--columnar-emit-activation-copy-rows",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit Neuronpedia Activation COPY-shaped activation_copy_rows in columnar mode.",
+    )
+    parser.add_argument(
+        "--columnar-activation-copy-model-id",
+        type=str,
+        default=None,
+        help="Optional modelId override used when emitting activation_copy_rows.",
+    )
+    parser.add_argument(
         "--torch-profile",
         action="store_true",
         help="Capture a torch.profiler Chrome trace for each generated batch.",
@@ -2621,8 +2760,20 @@ def main():
         log_hook_aliases=args.log_hook_aliases,
         log_performance=args.log_performance,
         cleanup_each_minibatch=args.cleanup_each_minibatch,
+        correlation_accumulation_device=args.correlation_accumulation_device,
         converter_input_artifact_dir=args.converter_input_artifact_dir,
         sequence_replay_artifact_dir=args.sequence_replay_artifact_dir,
+        feature_statistics_backend=args.feature_statistics_backend,
+        logits_histogram_backend=args.logits_histogram_backend,
+        activation_histogram_backend=args.activation_histogram_backend,
+        defer_component_construction=args.defer_component_construction,
+        sequence_selection_backend=args.sequence_selection_backend,
+        dashboard_output_format=args.dashboard_output_format,
+        columnar_artifact_format=args.columnar_artifact_format,
+        columnar_emit_sequence_rows=args.columnar_emit_sequence_rows,
+        columnar_emit_activation_rows=args.columnar_emit_activation_rows,
+        columnar_emit_activation_copy_rows=args.columnar_emit_activation_copy_rows,
+        columnar_activation_copy_model_id=args.columnar_activation_copy_model_id,
         torch_profile=args.torch_profile,
         torch_profile_dir=args.torch_profile_dir,
         use_cached_activations=args.use_cached_activations,

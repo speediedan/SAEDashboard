@@ -1,13 +1,18 @@
+import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 import torch
 
 import sae_dashboard.perf_logging as perf_logging
 import sae_dashboard.sae_vis_runner as sae_vis_runner_module
 from sae_dashboard.components import FeatureTablesData, LogitsTableData
-from sae_dashboard.sae_vis_data import SaeVisConfig
+from sae_dashboard.sae_vis_data import SaeVisColumnarData, SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
+from sae_dashboard.sequence_data_generator import SequenceCoordinateTable
 
 
 class _FakeFeatureDataGenerator:
@@ -32,9 +37,38 @@ class _FakeSequenceDataGenerator:
         resid_post,
         feature_resid_dir,
         selection_mask=None,
+        selection_backend="eager_cpu",
     ):
-        del feat_acts, feat_logits, resid_post, feature_resid_dir, selection_mask
+        del (
+            feat_acts,
+            feat_logits,
+            resid_post,
+            feature_resid_dir,
+            selection_mask,
+            selection_backend,
+        )
         return []
+
+    def get_sequence_coordinate_table(
+        self,
+        feat_acts,
+        feat_logits,
+        resid_post,
+        feature_resid_dir,
+        selection_mask=None,
+        selection_backend="eager_cpu",
+    ):
+        del feat_acts, feat_logits, resid_post, feature_resid_dir, selection_mask, selection_backend
+        return SequenceCoordinateTable(
+            group_names=["TOP ACTIVATIONS<br>MAX = 1.000"],
+            group_sizes=[1],
+            original_indices=torch.tensor([0], dtype=torch.long),
+            qualifying_token_indices=torch.tensor([1], dtype=torch.long),
+            source_token_indices=torch.tensor([[0, 1]], dtype=torch.long),
+            token_ids=torch.tensor([[101, 102]], dtype=torch.long),
+            feat_acts=np.array([[0.123, 0.555]], dtype=np.float64),
+            token_logits=torch.tensor([[0.01, 0.02]], dtype=torch.float32),
+        )
 
 
 class _FakeEncoder:
@@ -54,6 +88,18 @@ def _capture_perf_events(monkeypatch) -> list[dict[str, object]]:
     monkeypatch.setattr(perf_logging, "log_perf_event", _record)
     monkeypatch.setattr(sae_vis_runner_module, "log_perf_event", _record)
     return perf_events
+
+
+def _read_columnar_table(table_path: Path):
+    if table_path.suffix == ".arrow":
+        pyarrow = importlib.import_module("pyarrow")
+        pyarrow_ipc = importlib.import_module("pyarrow.ipc")
+        with pyarrow.memory_map(str(table_path), "r") as source:
+            return pyarrow_ipc.RecordBatchFileReader(source).read_all()
+    if table_path.suffix == ".parquet":
+        pyarrow_parquet = importlib.import_module("pyarrow.parquet")
+        return pyarrow_parquet.read_table(table_path)
+    raise AssertionError(f"Unsupported columnar table suffix: {table_path.suffix}")
 
 
 def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
@@ -140,3 +186,163 @@ def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
         sae_vis_data.feature_data_dict[0].acts_histogram_data.title
         == "ACTIVATIONS<br>DENSITY = 100.000%"
     )
+
+
+@pytest.mark.parametrize("artifact_format", ["arrow", "parquet"])
+def test_SaeVisRunner_columnar_output_writes_importer_compatible_bundle(
+    tmp_path: Path,
+    monkeypatch,
+    artifact_format: str,
+) -> None:
+    perf_events = _capture_perf_events(monkeypatch)
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.FeatureDataGeneratorFactory.create",
+        lambda cfg, model, encoder, tokens: _FakeFeatureDataGenerator(),
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.SequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_logits_table_data",
+        lambda **kwargs: LogitsTableData(),
+    )
+
+    cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        minibatch_size_features=1,
+        minibatch_size_tokens=1,
+        quantile_feature_batch_size=1,
+        device="cpu",
+        dtype="float32",
+        ignore_tokens={0},
+        log_performance=True,
+        dashboard_output_format="columnar",
+        columnar_artifact_dir=tmp_path / "batch-0.columnar",
+        columnar_artifact_format=artifact_format,
+        columnar_emit_sequence_rows=True,
+        columnar_emit_activation_rows=True,
+        columnar_emit_activation_copy_rows=True,
+        columnar_activation_copy_model_id="model-a",
+        columnar_activation_copy_layer="9-source-a",
+        columnar_activation_copy_creator_id="creator-a",
+        columnar_activation_copy_created_at="2026-01-02T03:04:05",
+        columnar_activation_copy_id_prefix="act",
+        feature_statistics_backend="arrow",
+        logits_histogram_backend="arrow",
+        activation_histogram_backend="torch",
+    )
+    tokens = torch.tensor([[7, 0]], dtype=torch.long)
+
+    columnar_data = SaeVisRunner(cfg).run(
+        encoder=_FakeEncoder(),
+        model=SimpleNamespace(
+            W_U=torch.tensor([[1.0]], dtype=torch.float32),
+            tokenizer=SimpleNamespace(
+                convert_ids_to_tokens=lambda token_ids: [
+                    f"tok_{token_id}" for token_id in token_ids
+                ],
+                pad_token_id=0,
+            ),
+        ),
+        tokens=tokens,
+    )
+
+    assert isinstance(columnar_data, SaeVisColumnarData)
+    assert columnar_data.manifest_path.is_file()
+
+    root_manifest = json.loads(columnar_data.manifest_path.read_text(encoding="utf-8"))
+    assert root_manifest["dashboard_output_format"] == "columnar"
+    assert root_manifest["columnar_artifact_format"] == artifact_format
+    assert root_manifest["batches"] == [
+        {
+            "artifact_dir": "feature_batch_0",
+            "feature_batch_index": 0,
+            "feature_indices": [0],
+        }
+    ]
+
+    batch_manifest_path = cfg.columnar_artifact_dir / "feature_batch_0" / "manifest.json"
+    batch_manifest = json.loads(batch_manifest_path.read_text(encoding="utf-8"))
+    expected_tables = {
+        "feature_statistics",
+        "feature_tables",
+        "logits_histograms",
+        "activation_histograms",
+        "logits_tables",
+        "sequence_rows",
+        "activation_rows",
+        "activation_copy_rows",
+    }
+    assert set(batch_manifest["tables"]) == expected_tables
+    assert batch_manifest["row_counts"]["sequence_rows"] == 2
+    assert batch_manifest["row_counts"]["activation_rows"] == 1
+    assert batch_manifest["row_counts"]["activation_copy_rows"] == 1
+
+    logits_histograms_path = (
+        cfg.columnar_artifact_dir
+        / "feature_batch_0"
+        / batch_manifest["tables"]["logits_histograms"]
+    )
+    logits_histograms = _read_columnar_table(logits_histograms_path)
+    assert "feature_index" in logits_histograms.column_names
+    assert "row_index" not in logits_histograms.column_names
+    assert logits_histograms.to_pylist()[0]["feature_index"] == 0
+
+    activation_histograms_path = (
+        cfg.columnar_artifact_dir
+        / "feature_batch_0"
+        / batch_manifest["tables"]["activation_histograms"]
+    )
+    activation_histograms = _read_columnar_table(activation_histograms_path)
+    assert "feature_index" in activation_histograms.column_names
+    assert "row_index" not in activation_histograms.column_names
+    assert activation_histograms.to_pylist()[0]["feature_index"] == 0
+
+    activation_copy_rows_path = (
+        cfg.columnar_artifact_dir
+        / "feature_batch_0"
+        / batch_manifest["tables"]["activation_copy_rows"]
+    )
+    activation_copy_rows = _read_columnar_table(activation_copy_rows_path).to_pylist()
+    assert activation_copy_rows == [
+        {
+            "id": "act-0-0",
+            "tokens": ["tok_101", "tok_102"],
+            "dataIndex": None,
+            "index": 0,
+            "layer": "9-source-a",
+            "modelId": "model-a",
+            "dataSource": None,
+            "maxValue": 0.555,
+            "maxValueTokenIndex": 1,
+            "minValue": 0.123,
+            "values": [0.123, 0.555],
+            "dfaValues": [],
+            "dfaTargetIndex": None,
+            "dfaMaxValue": None,
+            "creatorId": "creator-a",
+            "createdAt": "2026-01-02T03:04:05",
+            "lossValues": [],
+            "logitContributions": None,
+            "binMin": -1.0,
+            "binMax": 1.0,
+            "binContains": -1.0,
+            "qualifyingTokenIndex": 0,
+        }
+    ]
+
+    stage_names = {
+        str(event["stage"])
+        for event in perf_events
+        if event.get("event") == "stage_timing"
+    }
+    assert f"sequence_row_{artifact_format}_stream_write" in stage_names
+    assert "activation_copy_row_packaging" in stage_names

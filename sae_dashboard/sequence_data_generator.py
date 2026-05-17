@@ -593,7 +593,7 @@ class SequenceDataGenerator:
             self.get_buffer_and_padding(tokens)
         )
         self._candidate_index_cache: dict[
-            tuple[object, ...], tuple[Tensor, Tensor]
+            tuple[object, ...], tuple[Tensor, Tensor, Tensor]
         ] = {}
         self.reset_profile_stats()
 
@@ -863,7 +863,7 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices = self._get_candidate_mask_and_indices(
+        candidate_mask, candidate_indices, candidate_flat_indices = self._get_candidate_mask_and_indices(
             feat_acts,
             buffer,
             selection_mask,
@@ -873,7 +873,7 @@ class SequenceDataGenerator:
         )
 
         candidate_extract_start = perf_counter() if profile_enabled else 0.0
-        candidate_values = feat_acts[candidate_mask]
+        candidate_values = feat_acts.reshape(-1)[candidate_flat_indices]
         feat_max = (
             float(candidate_values.max().item())
             if candidate_values.numel() > 0
@@ -1081,7 +1081,7 @@ class SequenceDataGenerator:
         feat_acts: Tensor,
         buffer: tuple[int, int] | None,
         selection_mask: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         selection_mask_key: tuple[object, ...]
         if selection_mask is None:
             selection_mask_key = (None,)
@@ -1123,11 +1123,19 @@ class SequenceDataGenerator:
                 buffer_mask[:, buffer[0] : buffer[1]] = True
                 candidate_mask &= buffer_mask
 
-        candidate_indices = torch.stack(torch.where(candidate_mask), dim=-1)
+        candidate_flat_indices = torch.where(candidate_mask.reshape(-1))[0]
+        candidate_indices = torch.stack(
+            torch.unravel_index(candidate_flat_indices, candidate_mask.shape),
+            dim=-1,
+        )
         if len(self._candidate_index_cache) >= 4:
             self._candidate_index_cache.clear()
-        self._candidate_index_cache[cache_key] = (candidate_mask, candidate_indices)
-        return candidate_mask, candidate_indices
+        self._candidate_index_cache[cache_key] = (
+            candidate_mask,
+            candidate_indices,
+            candidate_flat_indices,
+        )
+        return candidate_mask, candidate_indices, candidate_flat_indices
 
     def _build_interval_quantiles(self, feat_max: float, device: torch.device) -> Tensor:
         return torch.linspace(
@@ -1197,7 +1205,7 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices = self._get_candidate_mask_and_indices(
+        candidate_mask, candidate_indices, candidate_flat_indices = self._get_candidate_mask_and_indices(
             feat_acts,
             buffer,
             selection_mask,
@@ -1207,7 +1215,7 @@ class SequenceDataGenerator:
         )
 
         candidate_extract_start = perf_counter() if profile_enabled else 0.0
-        candidate_values = feat_acts[candidate_mask]
+        candidate_values = feat_acts.reshape(-1)[candidate_flat_indices]
         feat_max = (
             float(candidate_values.max().item())
             if candidate_values.numel() > 0

@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from dataclasses_json import dataclass_json
 from rich import print as rprint
@@ -32,6 +32,22 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     sequence_replay_artifact_dir="Optional directory where per-feature-batch sequence replay bundles are written for offline get_indices_dict(...) replay.",
     torch_profile="Whether the Neuronpedia runner should wrap this run in torch.profiler",
     torch_profile_dir="Optional directory for torch profiler traces",
+    correlation_accumulation_device="Policy for where correlation accumulators should live during packaging.",
+    feature_statistics_backend="Backend used to build columnar feature statistics when dashboard_output_format is columnar.",
+    logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
+    activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
+    defer_component_construction="Whether columnar/dashboard callers should avoid rebuilding the legacy nested component graph when not needed.",
+    sequence_selection_backend="Candidate-selection backend for sequence packaging.",
+    dashboard_output_format="Output mode for dashboard generation: legacy JSON or importer-compatible columnar bundles.",
+    columnar_artifact_dir="Root directory for columnar bundle output when dashboard_output_format is columnar.",
+    columnar_artifact_format="On-disk format for columnar tables: Arrow IPC or Parquet.",
+    columnar_emit_activation_rows="Whether to emit semantic activation_rows tables alongside sequence_rows in columnar mode.",
+    columnar_emit_activation_copy_rows="Whether to emit Neuronpedia Activation COPY-shaped activation_copy_rows in columnar mode.",
+    columnar_activation_copy_model_id="Optional modelId override for activation_copy_rows payloads.",
+    columnar_activation_copy_layer="Optional Neuronpedia source/layer id embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_creator_id="Optional creator id embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_created_at="Optional createdAt timestamp embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_id_prefix="Prefix used when synthesizing activation_copy_rows ids.",
 )
 
 OUT_OF_RANGE_TOKEN = "<|outofrange|>"
@@ -83,6 +99,23 @@ class SaeVisConfig:
     sequence_replay_artifact_dir: Path | None = None
     torch_profile: bool = False
     torch_profile_dir: Path | None = None
+    correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
+    feature_statistics_backend: Literal["object", "arrow"] = "object"
+    logits_histogram_backend: Literal["object", "arrow"] = "object"
+    activation_histogram_backend: Literal["torch", "polars"] = "torch"
+    defer_component_construction: bool = False
+    sequence_selection_backend: Literal["eager_cpu", "lazy_gpu"] = "eager_cpu"
+    dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
+    columnar_artifact_dir: Path | None = None
+    columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
+    columnar_emit_sequence_rows: bool = False
+    columnar_emit_activation_rows: bool = False
+    columnar_emit_activation_copy_rows: bool = False
+    columnar_activation_copy_model_id: str | None = None
+    columnar_activation_copy_layer: str | None = None
+    columnar_activation_copy_creator_id: str | None = None
+    columnar_activation_copy_created_at: str | None = None
+    columnar_activation_copy_id_prefix: str = "columnar-activation"
     cache_dir: Path | None = None  # Path to cache the data
 
     def to_dict(self) -> dict[str, Any]:
