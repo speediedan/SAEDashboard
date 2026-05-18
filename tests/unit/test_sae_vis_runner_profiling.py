@@ -2,21 +2,29 @@ import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 import numpy as np
 import pytest
 import torch
+from sae_lens import SAE, HookedSAETransformer
+from torch import Tensor
 
 import sae_dashboard.perf_logging as perf_logging
 import sae_dashboard.sae_vis_runner as sae_vis_runner_module
 from sae_dashboard.components import FeatureTablesData, LogitsTableData
 from sae_dashboard.sae_vis_data import SaeVisColumnarData, SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
-from sae_dashboard.sequence_data_generator import SequenceCoordinateTable
+from sae_dashboard.sequence_data_generator import (
+    SequenceCoordinateTable,
+    SequenceSelectionBackend,
+)
 
 
 class _FakeFeatureDataGenerator:
-    def get_feature_data(self, features, progress):
+    def get_feature_data(
+        self, features: list[int], progress: list[Any] | None
+    ) -> tuple[Tensor, None, Tensor, Tensor, None, None, None]:
         del features, progress
         all_feat_acts = torch.tensor([[[1.0], [0.0]]], dtype=torch.float32)
         feature_resid_dir = torch.tensor([[1.0]], dtype=torch.float32)
@@ -25,20 +33,20 @@ class _FakeFeatureDataGenerator:
 
 
 class _FakeSequenceDataGenerator:
-    def __init__(self, cfg, tokens, W_U):
+    def __init__(self, cfg: SaeVisConfig, tokens: Tensor, W_U: Tensor) -> None:
         self.cfg = cfg
         self.tokens = tokens
         self.W_U = W_U
 
     def get_sequences_data(
         self,
-        feat_acts,
-        feat_logits,
-        resid_post,
-        feature_resid_dir,
-        selection_mask=None,
-        selection_backend="eager_cpu",
-    ):
+        feat_acts: Tensor,
+        feat_logits: Tensor | None,
+        resid_post: Tensor | None,
+        feature_resid_dir: Tensor,
+        selection_mask: Tensor | None = None,
+        selection_backend: SequenceSelectionBackend = "eager_cpu",
+    ) -> list[Any]:
         del (
             feat_acts,
             feat_logits,
@@ -51,14 +59,21 @@ class _FakeSequenceDataGenerator:
 
     def get_sequence_coordinate_table(
         self,
-        feat_acts,
-        feat_logits,
-        resid_post,
-        feature_resid_dir,
-        selection_mask=None,
-        selection_backend="eager_cpu",
-    ):
-        del feat_acts, feat_logits, resid_post, feature_resid_dir, selection_mask, selection_backend
+        feat_acts: Tensor,
+        feat_logits: Tensor | None,
+        resid_post: Tensor | None,
+        feature_resid_dir: Tensor,
+        selection_mask: Tensor | None = None,
+        selection_backend: SequenceSelectionBackend = "eager_cpu",
+    ) -> SequenceCoordinateTable:
+        del (
+            feat_acts,
+            feat_logits,
+            resid_post,
+            feature_resid_dir,
+            selection_mask,
+            selection_backend,
+        )
         return SequenceCoordinateTable(
             group_names=["TOP ACTIVATIONS<br>MAX = 1.000"],
             group_sizes=[1],
@@ -79,7 +94,7 @@ class _FakeEncoder:
         return None
 
 
-def _capture_perf_events(monkeypatch) -> list[dict[str, object]]:
+def _capture_perf_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     perf_events: list[dict[str, object]] = []
 
     def _record(event: str, /, **fields: object) -> None:
@@ -90,7 +105,7 @@ def _capture_perf_events(monkeypatch) -> list[dict[str, object]]:
     return perf_events
 
 
-def _read_columnar_table(table_path: Path):
+def _read_columnar_table(table_path: Path) -> Any:
     if table_path.suffix == ".arrow":
         pyarrow = importlib.import_module("pyarrow")
         pyarrow_ipc = importlib.import_module("pyarrow.ipc")
@@ -104,7 +119,7 @@ def _read_columnar_table(table_path: Path):
 
 def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     perf_events = _capture_perf_events(monkeypatch)
     monkeypatch.setattr(
@@ -142,10 +157,14 @@ def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
     tokens = torch.tensor([[7, 0]], dtype=torch.long)
 
     sae_vis_data = SaeVisRunner(cfg).run(
-        encoder=_FakeEncoder(),
-        model=SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32)),
+        encoder=cast(SAE[Any], _FakeEncoder()),
+        model=cast(
+            HookedSAETransformer,
+            SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32)),
+        ),
         tokens=tokens,
     )
+    assert not isinstance(sae_vis_data, SaeVisColumnarData)
 
     stage_names = {
         str(event["stage"])
@@ -164,13 +183,17 @@ def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
     }.issubset(stage_names)
 
     packaging_summary = next(
-        event for event in perf_events if event.get("event") == "packaging_shape_summary"
+        event
+        for event in perf_events
+        if event.get("event") == "packaging_shape_summary"
     )
     assert packaging_summary["valid_token_count"] == 1
     assert packaging_summary["token_shape"] == [1, 2]
 
     artifact_event = next(
-        event for event in perf_events if event.get("event") == "sequence_replay_artifact"
+        event
+        for event in perf_events
+        if event.get("event") == "sequence_replay_artifact"
     )
     artifact_path = Path(str(artifact_event["path"]))
     assert artifact_path.is_file()
@@ -191,8 +214,8 @@ def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
 @pytest.mark.parametrize("artifact_format", ["arrow", "parquet"])
 def test_SaeVisRunner_columnar_output_writes_importer_compatible_bundle(
     tmp_path: Path,
-    monkeypatch,
-    artifact_format: str,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_format: Literal["arrow", "parquet"],
 ) -> None:
     perf_events = _capture_perf_events(monkeypatch)
     monkeypatch.setattr(
@@ -239,17 +262,21 @@ def test_SaeVisRunner_columnar_output_writes_importer_compatible_bundle(
         logits_histogram_backend="arrow",
         activation_histogram_backend="torch",
     )
+    assert cfg.columnar_artifact_dir is not None
     tokens = torch.tensor([[7, 0]], dtype=torch.long)
 
     columnar_data = SaeVisRunner(cfg).run(
-        encoder=_FakeEncoder(),
-        model=SimpleNamespace(
-            W_U=torch.tensor([[1.0]], dtype=torch.float32),
-            tokenizer=SimpleNamespace(
-                convert_ids_to_tokens=lambda token_ids: [
-                    f"tok_{token_id}" for token_id in token_ids
-                ],
-                pad_token_id=0,
+        encoder=cast(SAE[Any], _FakeEncoder()),
+        model=cast(
+            HookedSAETransformer,
+            SimpleNamespace(
+                W_U=torch.tensor([[1.0]], dtype=torch.float32),
+                tokenizer=SimpleNamespace(
+                    convert_ids_to_tokens=lambda token_ids: [
+                        f"tok_{token_id}" for token_id in token_ids
+                    ],
+                    pad_token_id=0,
+                ),
             ),
         ),
         tokens=tokens,
@@ -269,7 +296,9 @@ def test_SaeVisRunner_columnar_output_writes_importer_compatible_bundle(
         }
     ]
 
-    batch_manifest_path = cfg.columnar_artifact_dir / "feature_batch_0" / "manifest.json"
+    batch_manifest_path = (
+        cfg.columnar_artifact_dir / "feature_batch_0" / "manifest.json"
+    )
     batch_manifest = json.loads(batch_manifest_path.read_text(encoding="utf-8"))
     expected_tables = {
         "feature_statistics",

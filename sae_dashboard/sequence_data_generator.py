@@ -278,7 +278,9 @@ class SequenceCoordinateTable:
         feat_acts = np.asarray(self.feat_acts, dtype=np.float64)
         group_names_by_sequence = [
             group_name
-            for group_name, group_size in zip(self.group_names, self.group_sizes, strict=True)
+            for group_name, group_size in zip(
+                self.group_names, self.group_sizes, strict=True
+            )
             for _ in range(group_size)
         ]
 
@@ -333,7 +335,9 @@ class SequenceCoordinateTable:
         return columns
 
     @staticmethod
-    def activation_row_arrow_record_batch_from_columns(columns: dict[str, list[Any]]) -> Any:
+    def activation_row_arrow_record_batch_from_columns(
+        columns: dict[str, list[Any]]
+    ) -> Any:
         pyarrow, _, _ = _load_sequence_row_pyarrow_modules()
         return pyarrow.RecordBatch.from_pydict(
             columns,
@@ -428,7 +432,9 @@ class SequenceCoordinateTable:
             "bin_contains",
             "qualifying_token_index",
         }
-        missing_columns = required_columns - set(activation_row_record_batch.schema.names)
+        missing_columns = required_columns - set(
+            activation_row_record_batch.schema.names
+        )
         if missing_columns:
             raise ValueError(
                 "Activation row record batch is missing required columns for activation_copy conversion: "
@@ -480,7 +486,9 @@ class SequenceCoordinateTable:
                     activation_row_record_batch.schema.get_field_index("max_value")
                 ),
                 activation_row_record_batch.column(
-                    activation_row_record_batch.schema.get_field_index("max_value_token_index")
+                    activation_row_record_batch.schema.get_field_index(
+                        "max_value_token_index"
+                    )
                 ),
                 activation_row_record_batch.column(
                     activation_row_record_batch.schema.get_field_index("min_value")
@@ -505,7 +513,9 @@ class SequenceCoordinateTable:
                     activation_row_record_batch.schema.get_field_index("bin_contains")
                 ),
                 activation_row_record_batch.column(
-                    activation_row_record_batch.schema.get_field_index("qualifying_token_index")
+                    activation_row_record_batch.schema.get_field_index(
+                        "qualifying_token_index"
+                    )
                 ),
             ],
             schema=SequenceCoordinateTable.activation_copy_row_arrow_schema(),
@@ -670,11 +680,11 @@ class SequenceDataGenerator:
                 self._profile_totals["indices_concat_wall_s"], 6
             ),
             "get_indices_dict_wall_s": round(get_indices_dict_wall_s, 6),
-            "interval_scan_share": round(
-                interval_scan_wall_s / get_indices_dict_wall_s, 6
-            )
-            if get_indices_dict_wall_s > 0.0
-            else 0.0,
+            "interval_scan_share": (
+                round(interval_scan_wall_s / get_indices_dict_wall_s, 6)
+                if get_indices_dict_wall_s > 0.0
+                else 0.0
+            ),
         }
         self.reset_profile_stats()
         return summary
@@ -863,10 +873,12 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices, candidate_flat_indices = self._get_candidate_mask_and_indices(
-            feat_acts,
-            buffer,
-            selection_mask,
+        candidate_mask, candidate_indices, candidate_flat_indices = (
+            self._get_candidate_mask_and_indices(
+                feat_acts,
+                buffer,
+                selection_mask,
+            )
         )
         mask_setup_wall_s = (
             perf_counter() - mask_setup_start if profile_enabled else 0.0
@@ -918,16 +930,16 @@ class SequenceDataGenerator:
         sampled_index_count = top_indices.shape[0]
         if self.seq_cfg.n_quantiles > 0:
             interval_scan_start = perf_counter() if profile_enabled else 0.0
-            quantiles = self._build_interval_quantiles(feat_max, candidate_values.device)
+            quantiles = self._build_interval_quantiles(
+                feat_max, candidate_values.device
+            )
             candidate_values_for_intervals = candidate_values.to(dtype=quantiles.dtype)
             valid_token_count = max(1, candidate_token_count)
             for i in range(self.seq_cfg.n_quantiles - 1, -1, -1):
                 lower = float(quantiles[i].item())
                 upper = float(quantiles[i + 1].item())
                 interval_where_start = perf_counter() if profile_enabled else 0.0
-                interval_member_mask = (
-                    candidate_values_for_intervals >= lower
-                ) & (
+                interval_member_mask = (candidate_values_for_intervals >= lower) & (
                     candidate_values_for_intervals <= upper
                 )
                 pct = interval_member_mask.sum().item() / valid_token_count
@@ -970,23 +982,23 @@ class SequenceDataGenerator:
         if profile_enabled:
             self._profile_totals["feature_calls"] += 1.0
             self._profile_totals["candidate_token_count_total"] += candidate_token_count
-            self._profile_totals["candidate_positive_count_total"] += (
-                candidate_positive_count
-            )
+            self._profile_totals[
+                "candidate_positive_count_total"
+            ] += candidate_positive_count
             self._profile_totals["candidate_zero_count_total"] += candidate_zero_count
-            self._profile_totals["candidate_negative_count_total"] += (
-                candidate_negative_count
-            )
+            self._profile_totals[
+                "candidate_negative_count_total"
+            ] += candidate_negative_count
             self._profile_totals["lowest_interval_count_total"] += lowest_interval_count
-            self._profile_totals["largest_interval_count_total"] += (
-                largest_interval_count
-            )
-            self._profile_totals["interval_candidate_count_total"] += (
-                interval_candidate_count
-            )
-            self._profile_totals["nonempty_interval_group_count_total"] += (
-                nonempty_interval_group_count
-            )
+            self._profile_totals[
+                "largest_interval_count_total"
+            ] += largest_interval_count
+            self._profile_totals[
+                "interval_candidate_count_total"
+            ] += interval_candidate_count
+            self._profile_totals[
+                "nonempty_interval_group_count_total"
+            ] += nonempty_interval_group_count
             self._profile_totals["sampled_index_count_total"] += sampled_index_count
             self._profile_totals["mask_setup_wall_s"] += mask_setup_wall_s
             self._profile_totals["candidate_extract_wall_s"] += candidate_extract_wall_s
@@ -1137,7 +1149,9 @@ class SequenceDataGenerator:
         )
         return candidate_mask, candidate_indices, candidate_flat_indices
 
-    def _build_interval_quantiles(self, feat_max: float, device: torch.device) -> Tensor:
+    def _build_interval_quantiles(
+        self, feat_max: float, device: torch.device
+    ) -> Tensor:
         return torch.linspace(
             0,
             feat_max,
@@ -1172,12 +1186,8 @@ class SequenceDataGenerator:
 
         candidate_values_for_intervals = candidate_values.to(dtype=quantiles.dtype)
         interval_membership = (
-            candidate_values_for_intervals.unsqueeze(0)
-            >= quantiles[:-1].unsqueeze(1)
-        ) & (
-            candidate_values_for_intervals.unsqueeze(0)
-            <= quantiles[1:].unsqueeze(1)
-        )
+            candidate_values_for_intervals.unsqueeze(0) >= quantiles[:-1].unsqueeze(1)
+        ) & (candidate_values_for_intervals.unsqueeze(0) <= quantiles[1:].unsqueeze(1))
         interval_ids, interval_positions = torch.where(interval_membership)
         interval_counts = torch.bincount(
             interval_ids,
@@ -1205,10 +1215,12 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices, candidate_flat_indices = self._get_candidate_mask_and_indices(
-            feat_acts,
-            buffer,
-            selection_mask,
+        candidate_mask, candidate_indices, candidate_flat_indices = (
+            self._get_candidate_mask_and_indices(
+                feat_acts,
+                buffer,
+                selection_mask,
+            )
         )
         mask_setup_wall_s = (
             perf_counter() - mask_setup_start if profile_enabled else 0.0
@@ -1274,22 +1286,30 @@ class SequenceDataGenerator:
                     if profile_enabled:
                         interval_where_wall_s += perf_counter() - interval_where_start
                         interval_candidate_count += interval_count
-                        largest_interval_count = max(largest_interval_count, interval_count)
+                        largest_interval_count = max(
+                            largest_interval_count, interval_count
+                        )
                         if i == 0:
                             lowest_interval_count = interval_count
                         if interval_count > 0:
                             nonempty_interval_group_count += 1
                     if interval_count > self.seq_cfg.quantile_group_size:
-                        interval_sample_start = perf_counter() if profile_enabled else 0.0
-                        sampled_relative_positions_np: np.ndarray = sample_unique_indices(
-                            interval_count,
-                            self.seq_cfg.quantile_group_size,
-                        ).numpy()
+                        interval_sample_start = (
+                            perf_counter() if profile_enabled else 0.0
+                        )
+                        sampled_relative_positions_np: np.ndarray = (
+                            sample_unique_indices(
+                                interval_count,
+                                self.seq_cfg.quantile_group_size,
+                            ).numpy()
+                        )
                         interval_positions_np = interval_positions_np[
                             sampled_relative_positions_np
                         ]
                         if profile_enabled:
-                            interval_sample_wall_s += perf_counter() - interval_sample_start
+                            interval_sample_wall_s += (
+                                perf_counter() - interval_sample_start
+                            )
                     indices = candidate_indices[
                         torch.as_tensor(interval_positions_np, dtype=torch.long)
                     ]
@@ -1314,27 +1334,37 @@ class SequenceDataGenerator:
                     lower, upper = quantile_values[i : i + 2]
                     interval_start = int(interval_offsets_list[i])
                     interval_end = int(interval_offsets_list[i + 1])
-                    interval_positions = interval_positions_flat[interval_start:interval_end]
+                    interval_positions = interval_positions_flat[
+                        interval_start:interval_end
+                    ]
                     interval_count = int(interval_counts_list[i])
                     pct = interval_count / valid_token_count
                     if profile_enabled:
                         interval_candidate_count += interval_count
-                        largest_interval_count = max(largest_interval_count, interval_count)
+                        largest_interval_count = max(
+                            largest_interval_count, interval_count
+                        )
                         if i == 0:
                             lowest_interval_count = interval_count
                         if interval_count > 0:
                             nonempty_interval_group_count += 1
                     if interval_count > self.seq_cfg.quantile_group_size:
-                        interval_sample_start = perf_counter() if profile_enabled else 0.0
-                        sampled_relative_positions_tensor: Tensor = sample_unique_indices(
-                            interval_count,
-                            self.seq_cfg.quantile_group_size,
-                        ).to(interval_positions.device)
+                        interval_sample_start = (
+                            perf_counter() if profile_enabled else 0.0
+                        )
+                        sampled_relative_positions_tensor: Tensor = (
+                            sample_unique_indices(
+                                interval_count,
+                                self.seq_cfg.quantile_group_size,
+                            ).to(interval_positions.device)
+                        )
                         indices = candidate_indices[
                             interval_positions[sampled_relative_positions_tensor]
                         ]
                         if profile_enabled:
-                            interval_sample_wall_s += perf_counter() - interval_sample_start
+                            interval_sample_wall_s += (
+                                perf_counter() - interval_sample_start
+                            )
                     else:
                         indices = candidate_indices[interval_positions]
                     sampled_index_count += int(indices.shape[0])
@@ -1355,23 +1385,23 @@ class SequenceDataGenerator:
         if profile_enabled:
             self._profile_totals["feature_calls"] += 1.0
             self._profile_totals["candidate_token_count_total"] += candidate_token_count
-            self._profile_totals["candidate_positive_count_total"] += (
-                candidate_positive_count
-            )
+            self._profile_totals[
+                "candidate_positive_count_total"
+            ] += candidate_positive_count
             self._profile_totals["candidate_zero_count_total"] += candidate_zero_count
-            self._profile_totals["candidate_negative_count_total"] += (
-                candidate_negative_count
-            )
+            self._profile_totals[
+                "candidate_negative_count_total"
+            ] += candidate_negative_count
             self._profile_totals["lowest_interval_count_total"] += lowest_interval_count
-            self._profile_totals["largest_interval_count_total"] += (
-                largest_interval_count
-            )
-            self._profile_totals["interval_candidate_count_total"] += (
-                interval_candidate_count
-            )
-            self._profile_totals["nonempty_interval_group_count_total"] += (
-                nonempty_interval_group_count
-            )
+            self._profile_totals[
+                "largest_interval_count_total"
+            ] += largest_interval_count
+            self._profile_totals[
+                "interval_candidate_count_total"
+            ] += interval_candidate_count
+            self._profile_totals[
+                "nonempty_interval_group_count_total"
+            ] += nonempty_interval_group_count
             self._profile_totals["sampled_index_count_total"] += sampled_index_count
             self._profile_totals["mask_setup_wall_s"] += mask_setup_wall_s
             self._profile_totals["candidate_extract_wall_s"] += candidate_extract_wall_s

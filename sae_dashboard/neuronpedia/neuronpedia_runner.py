@@ -189,7 +189,9 @@ class NeuronpediaRunner:
             pyarrow = None
 
         if pyarrow is not None:
-            release_unused = getattr(pyarrow.default_memory_pool(), "release_unused", None)
+            release_unused = getattr(
+                pyarrow.default_memory_pool(), "release_unused", None
+            )
             if callable(release_unused):
                 release_unused()
 
@@ -1019,7 +1021,9 @@ class NeuronpediaRunner:
         return str(outputs_dir)
 
     def _resolved_neuronpedia_set_name(self) -> str:
-        set_name = self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        set_name = (
+            self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        )
         if self.np_sae_id_suffix is None:
             return set_name
         return f"{set_name}__{self.np_sae_id_suffix}"
@@ -1828,7 +1832,9 @@ class NeuronpediaRunner:
         wandb_cfg["sae_cfg"] = self.sae.cfg.to_dict()
 
         current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        set_name = self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        set_name = (
+            self.cfg.sae_set if self.cfg.np_set_name is None else self.cfg.np_set_name
+        )
         if self.cfg.use_wandb:
             wandb.init(
                 project="sae-dashboard-generation",
@@ -1927,9 +1933,11 @@ class NeuronpediaRunner:
                     log_performance=self.cfg.log_performance,
                     cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
                     torch_profile=self.cfg.torch_profile,
-                    torch_profile_dir=Path(self.cfg.torch_profile_dir)
-                    if self.cfg.torch_profile_dir
-                    else None,
+                    torch_profile_dir=(
+                        Path(self.cfg.torch_profile_dir)
+                        if self.cfg.torch_profile_dir
+                        else None
+                    ),
                     device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,
                     feature_centric_layout=layout,
                     perform_ablation_experiments=False,

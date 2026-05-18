@@ -50,7 +50,9 @@ class _FinalLayerBridgeModel(nn.Module):
             "blocks.0.hook_resid_pre": _MockHookPoint("blocks.0.hook_resid_pre"),
         }
         self.active_hooks: list[tuple[str, object]] = []
-        self.original_model = type("OriginalModel", (), {"model": _FinalLayerBridgeBody(self)})()
+        self.original_model = type(
+            "OriginalModel", (), {"model": _FinalLayerBridgeBody(self)}
+        )()
         self.run_with_hooks_called = False
 
     def hooks(self, *, fwd_hooks):
@@ -58,7 +60,9 @@ class _FinalLayerBridgeModel(nn.Module):
 
     def run_with_hooks(self, *args, **kwargs):
         self.run_with_hooks_called = True
-        raise AssertionError("run_with_hooks should not be called for final-layer activation-only passes")
+        raise AssertionError(
+            "run_with_hooks should not be called for final-layer activation-only passes"
+        )
 
 
 class _TruncatingBridgeModel(nn.Module):
@@ -80,7 +84,9 @@ class _TruncatingBridgeModel(nn.Module):
         for hook_name, hook_fn in fwd_hooks:
             hook = self.hook_dict[hook_name]
             if "hook_z" in hook_name:
-                activation = truncated_tokens.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 2, 1)
+                activation = (
+                    truncated_tokens.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 2, 1)
+                )
             else:
                 activation = truncated_tokens.unsqueeze(-1)
             hook_fn(activation, hook)
@@ -263,7 +269,9 @@ def test_activation_shape_check_detects_truncation(
         "blocks.0.hook_resid_pre": tokens[:32].float().unsqueeze(-1),
     }
 
-    assert not truncating_bridge_wrapper._activation_shapes_match_tokens(activation_dict, tokens)
+    assert not truncating_bridge_wrapper._activation_shapes_match_tokens(
+        activation_dict, tokens
+    )
 
 
 def test_forward_suppresses_logits_when_not_requested(
@@ -289,5 +297,7 @@ def test_forward_bypasses_lm_head_for_final_layer_activation_only_pass() -> None
 
     assert "output" not in activation_dict
     assert activation_dict["blocks.0.hook_resid_pre"].shape == (4, 3, 1)
-    assert torch.equal(activation_dict["blocks.0.hook_resid_pre"].squeeze(-1), tokens.float())
+    assert torch.equal(
+        activation_dict["blocks.0.hook_resid_pre"].squeeze(-1), tokens.float()
+    )
     assert wrapper.model.run_with_hooks_called is False

@@ -36,7 +36,9 @@ class _FakeMsgspecEncoder:
         ).encode("utf-8")
 
 
-def test_convert_to_np_json_fast_path_matches_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_convert_to_np_json_fast_path_matches_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     feature = NeuronpediaDashboardFeature(
         feature_index=np.int64(7),
         neg_values=[np.float32(-1.25)],
@@ -143,12 +145,18 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
         deterministic_json=True,
     )
 
-    assert payload == (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(encoding="utf-8")
+    assert payload == (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
+        encoding="utf-8"
+    )
     assert fake_msgspec_encoder.encode_calls == 0
 
 
-def test_encode_batch_payload_deterministic_matches_reference_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    fixture_text = (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(encoding="utf-8")
+def test_encode_batch_payload_deterministic_matches_reference_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_text = (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
+        encoding="utf-8"
+    )
     batch_payload = json.loads(fixture_text)
     fake_msgspec_encoder = _FakeMsgspecEncoder()
     monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
@@ -162,15 +170,23 @@ def test_encode_batch_payload_deterministic_matches_reference_batch(monkeypatch:
     assert fake_msgspec_encoder.encode_calls == 0
 
 
-def test_encode_batch_payload_fast_path_matches_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    batch_payload = json.loads((FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(encoding="utf-8"))
+def test_encode_batch_payload_fast_path_matches_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch_payload = json.loads(
+        (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(encoding="utf-8")
+    )
 
     monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", None)
-    fallback_payload = converter_module.NeuronpediaConverter.encode_batch_payload(batch_payload)
+    fallback_payload = converter_module.NeuronpediaConverter.encode_batch_payload(
+        batch_payload
+    )
 
     fake_msgspec_encoder = _FakeMsgspecEncoder()
     monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
-    msgspec_payload = converter_module.NeuronpediaConverter.encode_batch_payload(batch_payload)
+    msgspec_payload = converter_module.NeuronpediaConverter.encode_batch_payload(
+        batch_payload
+    )
 
     assert json.loads(msgspec_payload) == json.loads(fallback_payload)
     assert fake_msgspec_encoder.encode_calls == 1
@@ -199,7 +215,9 @@ def test_convert_preserved_snapshot_to_np_json_reuses_full_converter(
     )
     fake_vis_data = cast(Any, SimpleNamespace(feature_data_dict={7: object()}))
 
-    def fake_process_features(model: Any, data_dict: Any, np_cfg: Any, vocab_dict: Any, original_vectors: Any) -> list[Any]:
+    def fake_process_features(
+        model: Any, data_dict: Any, np_cfg: Any, vocab_dict: Any, original_vectors: Any
+    ) -> list[Any]:
         assert model.cfg.d_vocab == 256000
         assert data_dict == fake_vis_data.feature_data_dict
         assert np_cfg is runner_cfg
@@ -220,7 +238,11 @@ def test_convert_preserved_snapshot_to_np_json_reuses_full_converter(
         "model_d_vocab": 256000,
     }
 
-    payload = converter_module.NeuronpediaConverter.convert_preserved_snapshot_to_np_json(snapshot)
+    payload = (
+        converter_module.NeuronpediaConverter.convert_preserved_snapshot_to_np_json(
+            snapshot
+        )
+    )
 
     assert json.loads(payload)["features"][0]["feature_index"] == 7
 

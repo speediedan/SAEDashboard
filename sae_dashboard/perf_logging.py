@@ -18,7 +18,13 @@ def _format_perf_value(value: Any) -> str:
 
 def log_perf_event(event: str, **fields: Any) -> None:
     payload = {"event": event, **fields}
-    print("[runner_perf] " + " ".join(f"{key}={_format_perf_value(value)}" for key, value in payload.items()), flush=True)
+    print(
+        "[runner_perf] "
+        + " ".join(
+            f"{key}={_format_perf_value(value)}" for key, value in payload.items()
+        ),
+        flush=True,
+    )
 
 
 def cpu_snapshot() -> dict[str, Any]:
@@ -60,7 +66,10 @@ def process_io_snapshot() -> dict[str, int]:
 
 
 def io_delta(start: dict[str, int], end: dict[str, int]) -> dict[str, int]:
-    return {key: end.get(key, 0) - start.get(key, 0) for key in sorted(set(start) | set(end))}
+    return {
+        key: end.get(key, 0) - start.get(key, 0)
+        for key in sorted(set(start) | set(end))
+    }
 
 
 @contextmanager
@@ -76,7 +85,11 @@ def timed_stage(
         return
 
     torch_device = torch.device(device) if device is not None else None
-    use_cuda_events = torch_device is not None and torch_device.type == "cuda" and torch.cuda.is_available()
+    use_cuda_events = (
+        torch_device is not None
+        and torch_device.type == "cuda"
+        and torch.cuda.is_available()
+    )
     start_event = torch.cuda.Event(enable_timing=True) if use_cuda_events else None
     end_event = torch.cuda.Event(enable_timing=True) if use_cuda_events else None
 

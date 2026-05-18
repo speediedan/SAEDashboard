@@ -83,7 +83,9 @@ def test_get_model_acts_uses_primary_acts_batch_size():
     class _FakeModel:
         def __init__(self):
             self.forward_batch_sizes = []
-            self.activation_config = type("ActivationConfig", (), {"primary_hook_point": "hook"})()
+            self.activation_config = type(
+                "ActivationConfig", (), {"primary_hook_point": "hook"}
+            )()
 
         def forward(self, tokens, return_logits=False):
             self.forward_batch_sizes.append(tokens.shape[0])
@@ -95,7 +97,14 @@ def test_get_model_acts_uses_primary_acts_batch_size():
 
     generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
     generator.cfg = type(
-        "Cfg", (), {"primary_acts_batch_size": 2, "cache_dir": None, "device": "cpu", "log_performance": False}
+        "Cfg",
+        (),
+        {
+            "primary_acts_batch_size": 2,
+            "cache_dir": None,
+            "device": "cpu",
+            "log_performance": False,
+        },
     )()
     generator.model = _FakeModel()
 

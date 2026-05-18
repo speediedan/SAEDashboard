@@ -45,7 +45,9 @@ def _msgspec_json_enc_hook(value: Any) -> Any:
 
 
 _MSGSPEC_JSON_ENCODER = (
-    msgspec.json.Encoder(enc_hook=_msgspec_json_enc_hook) if msgspec is not None else None
+    msgspec.json.Encoder(enc_hook=_msgspec_json_enc_hook)
+    if msgspec is not None
+    else None
 )
 
 # Type alias for model types
@@ -146,7 +148,9 @@ class NeuronpediaConverter:
             vocab_dict,
             original_vectors,
         )
-        batch_data = NeuronpediaConverter._create_batch_data(np_cfg, features_outputs).to_dict()
+        batch_data = NeuronpediaConverter._create_batch_data(
+            np_cfg, features_outputs
+        ).to_dict()
         return NeuronpediaConverter.encode_batch_payload(
             batch_data,
             deterministic_json=deterministic_json,
@@ -414,7 +418,9 @@ class NeuronpediaConverter:
         if trimmed_len == len(token_ids):
             return token_ids, values, dfa_values
 
-        trimmed_dfa_values = dfa_values[:trimmed_len] if dfa_values is not None else None
+        trimmed_dfa_values = (
+            dfa_values[:trimmed_len] if dfa_values is not None else None
+        )
         return token_ids[:trimmed_len], values[:trimmed_len], trimmed_dfa_values
 
     @staticmethod
@@ -460,14 +466,18 @@ class NeuronpediaConverter:
         activation_values = FeatureProcessor.round_list(sequence.feat_acts)
         if activation_thresholds is not None:
             threshold = activation_thresholds[feature_index]
-            activation_values = [v if v >= threshold else 0.0 for v in activation_values]
+            activation_values = [
+                v if v >= threshold else 0.0 for v in activation_values
+            ]
 
         pad_token_id = getattr(getattr(model, "tokenizer", None), "pad_token_id", None)
-        token_ids, activation_values, activation.dfa_values = NeuronpediaConverter._trim_trailing_pad_tokens(
-            token_ids,
-            activation_values,
-            activation.dfa_values,
-            pad_token_id,
+        token_ids, activation_values, activation.dfa_values = (
+            NeuronpediaConverter._trim_trailing_pad_tokens(
+                token_ids,
+                activation_values,
+                activation.dfa_values,
+                pad_token_id,
+            )
         )
 
         activation.tokens = [

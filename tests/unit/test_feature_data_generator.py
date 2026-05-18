@@ -11,14 +11,18 @@ def test_resolve_correlation_accumulation_device_cpu_policy() -> None:
     assert resolve_correlation_accumulation_device("cuda", "cpu") == torch.device("cpu")
 
 
-def test_resolve_correlation_accumulation_device_rejects_unavailable_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_correlation_accumulation_device_rejects_unavailable_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     with pytest.raises(ValueError, match="requires CUDA"):
         resolve_correlation_accumulation_device("cpu", "cuda")
 
 
-def test_get_feature_data_uses_configured_correlation_device(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_feature_data_uses_configured_correlation_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_devices: list[torch.device] = []
 
     class CapturingRollingCorrCoef:
@@ -43,8 +47,14 @@ def test_get_feature_data_uses_configured_correlation_device(monkeypatch: pytest
     generator.encoder = type("Encoder", (), {"W_dec": torch.ones((1, 3))})()
     generator.model = object()
 
-    monkeypatch.setattr(feature_data_generator, "RollingCorrCoef", CapturingRollingCorrCoef)
-    monkeypatch.setattr(feature_data_generator, "to_resid_direction", lambda feature_out_dir, model: feature_out_dir)
+    monkeypatch.setattr(
+        feature_data_generator, "RollingCorrCoef", CapturingRollingCorrCoef
+    )
+    monkeypatch.setattr(
+        feature_data_generator,
+        "to_resid_direction",
+        lambda feature_out_dir, model: feature_out_dir,
+    )
 
     generator.get_feature_data([0])
 
@@ -82,7 +92,10 @@ def test_batch_tokens_uses_prompt_minibatch_schedule() -> None:
     minibatches = FeatureDataGenerator.batch_tokens(generator, tokens)
 
     assert [minibatch.prompt_indices for minibatch in minibatches] == [(2, 3), (0, 1)]
-    assert [tuple(minibatch.tokens.shape) for minibatch in minibatches] == [(2, 4), (2, 5)]
+    assert [tuple(minibatch.tokens.shape) for minibatch in minibatches] == [
+        (2, 4),
+        (2, 5),
+    ]
     assert [minibatch.primary_acts_batch_size for minibatch in minibatches] == [1, 2]
     assert minibatches[0].tokens.tolist() == [[10, 11, 12, 0], [13, 14, 15, 16]]
     assert minibatches[1].tokens.tolist() == [[1, 2, 3, 4, 0], [5, 6, 7, 8, 9]]

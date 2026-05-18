@@ -40,21 +40,21 @@ class TransformerLensWrapper(nn.Module):
 
     def validate_hook_points(self):
         """Checks that the hook points are valid and that the model has them"""
-        assert self.activation_config.primary_hook_point in self.model.hook_dict, (
-            f"Invalid hook point: {self.activation_config.primary_hook_point}"
-        )
+        assert (
+            self.activation_config.primary_hook_point in self.model.hook_dict
+        ), f"Invalid hook point: {self.activation_config.primary_hook_point}"
 
         for hook_point in self.activation_config.auxiliary_hook_points:
-            assert hook_point in self.model.hook_dict, (
-                f"Invalid hook point: {hook_point}"
-            )
+            assert (
+                hook_point in self.model.hook_dict
+            ), f"Invalid hook point: {hook_point}"
 
     def get_layer(self, hook_point: str):
         """Get the layer (so we can do the early stopping in our forward pass)"""
         layer_match = re.match(r"blocks\.(\d+)\.", hook_point)
-        assert layer_match, (
-            f"Error: expecting hook_point to be 'blocks.{{layer}}.{{...}}', but got {hook_point!r}"
-        )
+        assert (
+            layer_match
+        ), f"Error: expecting hook_point to be 'blocks.{{layer}}.{{...}}', but got {hook_point!r}"
         return int(layer_match.group(1))
 
     @staticmethod
@@ -110,7 +110,9 @@ class TransformerLensWrapper(nn.Module):
             )
 
         hooks_context = getattr(self.model, "hooks", None)
-        context_manager = hooks_context(fwd_hooks=hooks) if callable(hooks_context) else nullcontext()
+        context_manager = (
+            hooks_context(fwd_hooks=hooks) if callable(hooks_context) else nullcontext()
+        )
         with context_manager:
             body_model(input_ids=tokens)
 

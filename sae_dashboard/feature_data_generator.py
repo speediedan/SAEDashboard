@@ -54,8 +54,12 @@ class ActivationCaptureStats:
         cuda_reserved_gib: float | None,
     ) -> None:
         self.peak_rss_gib = _max_optional(self.peak_rss_gib, rss_gib)
-        self.peak_cuda_allocated_gib = _max_optional(self.peak_cuda_allocated_gib, cuda_allocated_gib)
-        self.peak_cuda_reserved_gib = _max_optional(self.peak_cuda_reserved_gib, cuda_reserved_gib)
+        self.peak_cuda_allocated_gib = _max_optional(
+            self.peak_cuda_allocated_gib, cuda_allocated_gib
+        )
+        self.peak_cuda_reserved_gib = _max_optional(
+            self.peak_cuda_reserved_gib, cuda_reserved_gib
+        )
 
 
 def _max_optional(current: float | None, candidate: float | None) -> float | None:
@@ -110,7 +114,9 @@ class FeatureDataGenerator:
         status_path = Path("/proc/self/status")
         if not status_path.exists():
             return None
-        for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in status_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
             if line.startswith("VmRSS:"):
                 parts = line.split()
                 if len(parts) >= 2 and parts[1].isdigit():
@@ -138,8 +144,8 @@ class FeatureDataGenerator:
         peak_cuda_reserved_gib: float | None,
     ) -> tuple[float | None, float | None, float | None]:
         current_rss_gib = self._current_rss_gib()
-        current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
-            getattr(self.cfg, "device", None)
+        current_cuda_allocated_gib, current_cuda_reserved_gib = (
+            self._cuda_memory_snapshot(getattr(self.cfg, "device", None))
         )
         return (
             _max_optional(peak_rss_gib, current_rss_gib),
@@ -148,11 +154,15 @@ class FeatureDataGenerator:
         )
 
     @torch.inference_mode()
-    def batch_tokens(self, tokens: Int[Tensor, "batch seq"]) -> list[PromptTokenMinibatch]:
+    def batch_tokens(
+        self, tokens: Int[Tensor, "batch seq"]
+    ) -> list[PromptTokenMinibatch]:
         if self.cfg.prompt_minibatch_schedule:
             token_minibatches: list[PromptTokenMinibatch] = []
             for schedule_entry in self.cfg.prompt_minibatch_schedule:
-                prompt_indices = tuple(int(index) for index in schedule_entry.get("prompt_indices", []))
+                prompt_indices = tuple(
+                    int(index) for index in schedule_entry.get("prompt_indices", [])
+                )
                 if not prompt_indices:
                     continue
                 seq_length = int(schedule_entry.get("seq_length", tokens.shape[1]))
@@ -167,7 +177,9 @@ class FeatureDataGenerator:
                 if primary_acts_batch_size is not None:
                     primary_acts_batch_size = int(primary_acts_batch_size)
                 prompt_index_tensor = torch.tensor(prompt_indices, dtype=torch.long)
-                trimmed_tokens = tokens.index_select(0, prompt_index_tensor)[:, :seq_length].contiguous()
+                trimmed_tokens = tokens.index_select(0, prompt_index_tensor)[
+                    :, :seq_length
+                ].contiguous()
                 token_minibatches.append(
                     PromptTokenMinibatch(
                         prompt_indices=prompt_indices,
@@ -185,7 +197,9 @@ class FeatureDataGenerator:
 
         # Get tokens into minibatches, for the fwd pass
         token_minibatches = (
-            (tokens,) if self.cfg.minibatch_size_tokens is None else tokens.split(self.cfg.minibatch_size_tokens)
+            (tokens,)
+            if self.cfg.minibatch_size_tokens is None
+            else tokens.split(self.cfg.minibatch_size_tokens)
         )
         token_minibatches = list(token_minibatches)
 
@@ -195,7 +209,9 @@ class FeatureDataGenerator:
             prompt_count = int(token_minibatch.shape[0])
             prompt_minibatch_specs.append(
                 PromptTokenMinibatch(
-                    prompt_indices=tuple(range(prompt_offset, prompt_offset + prompt_count)),
+                    prompt_indices=tuple(
+                        range(prompt_offset, prompt_offset + prompt_count)
+                    ),
                     tokens=token_minibatch,
                     seq_length=int(token_minibatch.shape[1]),
                     primary_acts_batch_size=self.cfg.primary_acts_batch_size,
@@ -287,7 +303,9 @@ class FeatureDataGenerator:
         *,
         prompt_indices: tuple[int, ...],
     ) -> None:
-        index_tensor = torch.tensor(prompt_indices, dtype=torch.long, device=destination.device)
+        index_tensor = torch.tensor(
+            prompt_indices, dtype=torch.long, device=destination.device
+        )
         destination.index_copy_(0, index_tensor, chunk)
 
     def _forward_model_acts(
@@ -299,8 +317,8 @@ class FeatureDataGenerator:
     ) -> Dict[str, torch.Tensor]:
         capture_stats = stats if stats is not None else ActivationCaptureStats()
         current_rss_gib = self._current_rss_gib()
-        current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
-            getattr(self.cfg, "device", None)
+        current_cuda_allocated_gib, current_cuda_reserved_gib = (
+            self._cuda_memory_snapshot(getattr(self.cfg, "device", None))
         )
         capture_stats.update_peaks(
             rss_gib=current_rss_gib,
@@ -320,10 +338,12 @@ class FeatureDataGenerator:
                 return_logits=False,  # type: ignore[arg-type]
             )
             capture_stats.model_forward_passes += 1
-            capture_stats.total_forward_wall_s += time.perf_counter() - forward_start_time
+            capture_stats.total_forward_wall_s += (
+                time.perf_counter() - forward_start_time
+            )
             current_rss_gib = self._current_rss_gib()
-            current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
-                getattr(self.cfg, "device", None)
+            current_cuda_allocated_gib, current_cuda_reserved_gib = (
+                self._cuda_memory_snapshot(getattr(self.cfg, "device", None))
             )
             capture_stats.update_peaks(
                 rss_gib=current_rss_gib,
@@ -338,10 +358,12 @@ class FeatureDataGenerator:
             forward_start_time = time.perf_counter()
             chunk_activations = self.model.forward(token_chunk.to("cpu"), return_logits=False)  # type: ignore[arg-type]
             capture_stats.model_forward_passes += 1
-            capture_stats.total_forward_wall_s += time.perf_counter() - forward_start_time
+            capture_stats.total_forward_wall_s += (
+                time.perf_counter() - forward_start_time
+            )
             current_rss_gib = self._current_rss_gib()
-            current_cuda_allocated_gib, current_cuda_reserved_gib = self._cuda_memory_snapshot(
-                getattr(self.cfg, "device", None)
+            current_cuda_allocated_gib, current_cuda_reserved_gib = (
+                self._cuda_memory_snapshot(getattr(self.cfg, "device", None))
             )
             capture_stats.update_peaks(
                 rss_gib=current_rss_gib,
@@ -372,11 +394,15 @@ class FeatureDataGenerator:
         total_model_forward_passes = 0
         total_forward_wall_s = 0.0
         get_feature_data_start_time = time.perf_counter()
-        total_prompt_count = sum(int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches)
-        peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
-            None,
-            None,
-            None,
+        total_prompt_count = sum(
+            int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches
+        )
+        peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
+            self._update_resource_peaks(
+                None,
+                None,
+                None,
+            )
         )
 
         # Create objects to store the data for computing rolling stats
@@ -385,7 +411,9 @@ class FeatureDataGenerator:
             self.cfg.correlation_accumulation_device,
         )
         corrcoef_neurons = RollingCorrCoef(device=correlation_device)
-        corrcoef_encoder = RollingCorrCoef(indices=feature_indices, with_self=True, device=correlation_device)
+        corrcoef_encoder = RollingCorrCoef(
+            indices=feature_indices, with_self=True, device=correlation_device
+        )
 
         # Get encoder & decoder directions
         feature_out_dir = self.encoder.W_dec[feature_indices]  # [feats d_autoencoder]
@@ -404,12 +432,18 @@ class FeatureDataGenerator:
         # ! Compute & concatenate together all feature activations & post-activation function values
         for i, minibatch in enumerate(self.token_minibatches):
             model_activation_dict = self.get_model_acts(i, minibatch)
-            capture_stats = getattr(self, "_last_activation_capture_stats", ActivationCaptureStats())
+            capture_stats = getattr(
+                self, "_last_activation_capture_stats", ActivationCaptureStats()
+            )
             total_model_forward_passes += capture_stats.model_forward_passes
             total_forward_wall_s += capture_stats.total_forward_wall_s
             peak_rss_gib = _max_optional(peak_rss_gib, capture_stats.peak_rss_gib)
-            peak_cuda_allocated_gib = _max_optional(peak_cuda_allocated_gib, capture_stats.peak_cuda_allocated_gib)
-            peak_cuda_reserved_gib = _max_optional(peak_cuda_reserved_gib, capture_stats.peak_cuda_reserved_gib)
+            peak_cuda_allocated_gib = _max_optional(
+                peak_cuda_allocated_gib, capture_stats.peak_cuda_allocated_gib
+            )
+            peak_cuda_reserved_gib = _max_optional(
+                peak_cuda_reserved_gib, capture_stats.peak_cuda_reserved_gib
+            )
             with timed_stage(
                 self.cfg.log_performance,
                 "primary_acts_device_transfer",
@@ -419,7 +453,9 @@ class FeatureDataGenerator:
             ):
                 primary_acts = model_activation_dict[
                     self.model.activation_config.primary_hook_point  # type: ignore
-                ].to(self.encoder.device)  # make sure acts are on the correct device
+                ].to(
+                    self.encoder.device
+                )  # make sure acts are on the correct device
             all_features_acts = None
 
             with timed_stage(
@@ -436,10 +472,14 @@ class FeatureDataGenerator:
                 ):
                     # Get all features' activations
                     all_features_acts = self.encoder.encode(primary_acts)
-                    feature_acts = all_features_acts[:, :, feature_indices].to(DTYPES[self.cfg.dtype])
+                    feature_acts = all_features_acts[:, :, feature_indices].to(
+                        DTYPES[self.cfg.dtype]
+                    )
                 else:
                     with FeatureMaskingContext(self.encoder, feature_indices):
-                        feature_acts = self.encoder.encode(primary_acts).to(DTYPES[self.cfg.dtype])
+                        feature_acts = self.encoder.encode(primary_acts).to(
+                            DTYPES[self.cfg.dtype]
+                        )
 
                 # Optionally filter out token positions whose hidden-state norm is
                 # an extreme outlier relative to the median norm in this minibatch.
@@ -455,10 +495,12 @@ class FeatureDataGenerator:
                             high_norm_mask.unsqueeze(-1).to(primary_acts.device), 0
                         )
 
-            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
-                peak_rss_gib,
-                peak_cuda_allocated_gib,
-                peak_cuda_reserved_gib,
+            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
+                self._update_resource_peaks(
+                    peak_rss_gib,
+                    peak_cuda_allocated_gib,
+                    peak_cuda_reserved_gib,
+                )
             )
 
             with timed_stage(
@@ -493,12 +535,16 @@ class FeatureDataGenerator:
                 # Persist prompt-wide feature activations on CPU so each minibatch does
                 # not stay resident on GPU until the final concat. Downcast to bfloat16
                 # on host so larger feature batches fit without walking back the GPU fix.
-                feature_acts_cpu = feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16, non_blocking=True)
+                feature_acts_cpu = feature_acts_for_output.to(
+                    device="cpu", dtype=torch.bfloat16, non_blocking=True
+                )
 
-            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = self._update_resource_peaks(
-                peak_rss_gib,
-                peak_cuda_allocated_gib,
-                peak_cuda_reserved_gib,
+            peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
+                self._update_resource_peaks(
+                    peak_rss_gib,
+                    peak_cuda_allocated_gib,
+                    peak_cuda_reserved_gib,
+                )
             )
 
             with timed_stage(
@@ -539,9 +585,15 @@ class FeatureDataGenerator:
                     for prompt_idx in range(feature_data.shape[0]):
                         global_prompt_idx = minibatch.prompt_indices[prompt_idx]
                         all_dfa_results[feature_idx][global_prompt_idx] = {
-                            "dfaValues": feature_data[prompt_idx]["dfa_values"].tolist(),
-                            "dfaTargetIndex": int(feature_data[prompt_idx]["dfa_target_index"]),
-                            "dfaMaxValue": float(feature_data[prompt_idx]["dfa_max_value"]),
+                            "dfaValues": feature_data[prompt_idx][
+                                "dfa_values"
+                            ].tolist(),
+                            "dfaTargetIndex": int(
+                                feature_data[prompt_idx]["dfa_target_index"]
+                            ),
+                            "dfaMaxValue": float(
+                                feature_data[prompt_idx]["dfa_max_value"]
+                            ),
                         }
 
             # Update the 1st progress bar; fwd passes and sequence data dominate these computations.
@@ -589,12 +641,15 @@ class FeatureDataGenerator:
                 "token_minibatch_count": len(self.token_minibatches),
                 "model_forward_passes": total_model_forward_passes,
                 "total_forward_wall_s": total_forward_wall_s,
-                "get_feature_data_wall_s": time.perf_counter() - get_feature_data_start_time,
+                "get_feature_data_wall_s": time.perf_counter()
+                - get_feature_data_start_time,
                 "primary_acts_batch_size": self.cfg.primary_acts_batch_size,
                 "cleanup_each_minibatch": self.cfg.cleanup_each_minibatch,
             }
             if total_model_forward_passes > 0:
-                summary_fields["avg_forward_wall_s"] = total_forward_wall_s / total_model_forward_passes
+                summary_fields["avg_forward_wall_s"] = (
+                    total_forward_wall_s / total_model_forward_passes
+                )
             if peak_rss_gib is not None:
                 summary_fields["peak_rss_gib"] = peak_rss_gib
             if peak_cuda_allocated_gib is not None:
@@ -668,11 +723,8 @@ class FeatureDataGenerator:
                     minibatch_index=minibatch_index,
                     token_shape=tuple(minibatch_tokens.shape),
                 ):
-                    activation_dict = torch.load(
-                        cache_path,
-                        map_location="cpu",
-                        weights_only=False,
-                        mmap=True,
+                    activation_dict = load_tensor_dict_torch(
+                        cache_path, self.cfg.device
                     )
             else:
                 with timed_stage(
@@ -704,7 +756,9 @@ class FeatureDataGenerator:
                     stats=capture_stats,
                 )
 
-        if not self.model._activation_shapes_match_tokens(activation_dict, minibatch_tokens):
+        if not self.model._activation_shapes_match_tokens(
+            activation_dict, minibatch_tokens
+        ):
             with timed_stage(
                 self.cfg.log_performance,
                 "activation_capture_shape_refresh",
@@ -745,7 +799,9 @@ class FeatureDataGenerator:
                 The object storing the minimal data necessary to compute corrcoef between pairwise feature activations.
         """
         # Update the CorrCoef object between feature activation & neurons
-        feature_acts_by_feature = einops.rearrange(feature_acts, "batch seq feats -> feats (batch seq)")
+        feature_acts_by_feature = einops.rearrange(
+            feature_acts, "batch seq feats -> feats (batch seq)"
+        )
         if corrcoef_neurons is not None:
             corrcoef_neurons.update(
                 feature_acts_by_feature,
@@ -765,7 +821,9 @@ def save_tensor_dict_torch(tensor_dict: Dict[str, torch.Tensor], filename: Path)
 
 
 def load_tensor_dict_torch(filename: Path, device: str) -> Dict[str, torch.Tensor]:
-    return torch.load(filename, map_location=torch.device(device))  # Directly load to GPU
+    return torch.load(
+        filename, map_location=torch.device(device)
+    )  # Directly load to GPU
 
 
 class FeatureMaskingContext:

@@ -59,8 +59,12 @@ def test_get_tokens_no_duplicates(
     )
 
 
-def test_materialize_pretokenized_dataset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    dataset = Dataset.from_dict({"input_ids": [list(range(128)), list(range(128, 256)), list(range(256, 384))]})
+def test_materialize_pretokenized_dataset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dataset = Dataset.from_dict(
+        {"input_ids": [list(range(128)), list(range(128, 256)), list(range(256, 384))]}
+    )
     pretokenized_path = tmp_path / "rte_tokens"
 
     def fake_load_from_disk(path: str) -> Dataset:
@@ -92,7 +96,9 @@ def test_materialize_pretokenized_dataset(monkeypatch: pytest.MonkeyPatch, tmp_p
 def test_materialize_structured_dataset_uses_supplied_text_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dataset = Dataset.from_dict({"prompt": ["Already rendered prompt."], "other": ["ignored"]})
+    dataset = Dataset.from_dict(
+        {"prompt": ["Already rendered prompt."], "other": ["ignored"]}
+    )
 
     def fake_load_dataset(
         path: str,
@@ -145,7 +151,10 @@ def test_create_output_directory_sanitizes_model_id(tmp_path: Path) -> None:
     output_dir = Path(runner.create_output_directory())
 
     assert output_dir.parent == tmp_path / "layer_10"
-    assert output_dir.name == "google_gemma-3-1b-it_gemma-scope-2-1b-it-transcoders-all_blocks.10.hook_mlp_in_262144"
+    assert (
+        output_dir.name
+        == "google_gemma-3-1b-it_gemma-scope-2-1b-it-transcoders-all_blocks.10.hook_mlp_in_262144"
+    )
 
 
 def test_resolved_neuronpedia_set_name_appends_suffix() -> None:
@@ -160,7 +169,10 @@ def test_resolved_neuronpedia_set_name_appends_suffix() -> None:
 
     resolved_name = runner._resolved_neuronpedia_set_name()
 
-    assert resolved_name == "gemmascope-2-transcoder-262k-rte__phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514"
+    assert (
+        resolved_name
+        == "gemmascope-2-transcoder-262k-rte__phase1-pr-clean-lazy-parquet-importwarmfix-l9-20260514"
+    )
 
 
 def test_resolved_columnar_activation_copy_ids_include_suffix() -> None:
@@ -206,7 +218,9 @@ def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> Non
     assert Path(runner.cfg.outputs_dir, "tokens_2.pt").exists()
 
 
-def test_load_prompt_bucket_schedule_uses_selected_bucket_configs(tmp_path: Path) -> None:
+def test_load_prompt_bucket_schedule_uses_selected_bucket_configs(
+    tmp_path: Path,
+) -> None:
     output_dir = tmp_path / "layer_10"
     output_dir.mkdir(parents=True)
     tokens = torch.tensor(
@@ -221,7 +235,10 @@ def test_load_prompt_bucket_schedule_uses_selected_bucket_configs(tmp_path: Path
         dtype=torch.long,
     )
     torch.save(tokens, output_dir / "tokens_6.pt")
-    torch.save(torch.tensor([32, 64, 65, 100, 128, 200], dtype=torch.int32), output_dir / "tokens_6.effective_lengths.pt")
+    torch.save(
+        torch.tensor([32, 64, 65, 100, 128, 200], dtype=torch.int32),
+        output_dir / "tokens_6.effective_lengths.pt",
+    )
     schedule_path = tmp_path / "selected_bucket_configs.json"
     schedule_path.write_text(
         json.dumps(
@@ -277,7 +294,9 @@ def test_load_prompt_bucket_schedule_uses_selected_bucket_configs(tmp_path: Path
     ]
 
 
-def test_load_prompt_bucket_schedule_can_auto_bucket_from_effective_lengths(tmp_path: Path) -> None:
+def test_load_prompt_bucket_schedule_can_auto_bucket_from_effective_lengths(
+    tmp_path: Path,
+) -> None:
     output_dir = tmp_path / "layer_10"
     output_dir.mkdir(parents=True)
     tokens = torch.tensor(
@@ -299,7 +318,9 @@ def test_load_prompt_bucket_schedule_can_auto_bucket_from_effective_lengths(tmp_
     )
     torch.save(tokens, output_dir / "tokens_12.pt")
     torch.save(
-        torch.tensor([40, 50, 60, 64, 64, 64, 65, 70, 80, 90, 110, 120], dtype=torch.int32),
+        torch.tensor(
+            [40, 50, 60, 64, 64, 64, 65, 70, 80, 90, 110, 120], dtype=torch.int32
+        ),
         output_dir / "tokens_12.effective_lengths.pt",
     )
 
@@ -323,7 +344,11 @@ def test_load_prompt_bucket_schedule_can_auto_bucket_from_effective_lengths(tmp_
     schedule = runner._load_prompt_bucket_schedule(tokens)
 
     assert schedule == [
-        {"prompt_indices": [0, 1, 2, 3], "seq_length": 64, "primary_acts_batch_size": 2},
+        {
+            "prompt_indices": [0, 1, 2, 3],
+            "seq_length": 64,
+            "primary_acts_batch_size": 2,
+        },
         {"prompt_indices": [4, 5], "seq_length": 64, "primary_acts_batch_size": 2},
         {"prompt_indices": [6, 7], "seq_length": 128, "primary_acts_batch_size": 1},
         {"prompt_indices": [8, 9], "seq_length": 128, "primary_acts_batch_size": 1},
@@ -393,9 +418,20 @@ def test_auto_bucket_schedule_can_generate_shared_sidecars_from_pretokenized_dat
     assert runner.cfg.shared_tokens_file == str(shared_tokens_file)
     assert shared_tokens_file.is_file()
     assert (pretokenized_path / "tokens_4.effective_lengths.pt").is_file()
-    assert (output_dir / "google_gemma-3-1b-it_gemma-scope-2-1b-it-transcoders-all_blocks.9.hook_mlp_in_262144" / "tokens_4.pt").is_file()
-    assert tokens.tolist() == [[11, 12, 0, 0], [21, 22, 0, 0], [31, 32, 33, 34], [41, 42, 43, 44]]
-    metadata = json.loads((pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8"))
+    assert (
+        output_dir
+        / "google_gemma-3-1b-it_gemma-scope-2-1b-it-transcoders-all_blocks.9.hook_mlp_in_262144"
+        / "tokens_4.pt"
+    ).is_file()
+    assert tokens.tolist() == [
+        [11, 12, 0, 0],
+        [21, 22, 0, 0],
+        [31, 32, 33, 34],
+        [41, 42, 43, 44],
+    ]
+    metadata = json.loads(
+        (pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["deduplicate"] is True
     assert schedule == [
         {"prompt_indices": [0, 1], "seq_length": 2, "primary_acts_batch_size": 2},
@@ -462,8 +498,15 @@ def test_auto_bucket_schedule_can_preserve_duplicate_rows_from_pretokenized_data
     tokens = runner.get_tokens()
     schedule = runner._load_prompt_bucket_schedule(tokens)
 
-    assert tokens.tolist() == [[11, 12, 0, 0], [11, 12, 0, 0], [31, 32, 33, 34], [41, 42, 43, 44]]
-    metadata = json.loads((pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8"))
+    assert tokens.tolist() == [
+        [11, 12, 0, 0],
+        [11, 12, 0, 0],
+        [31, 32, 33, 34],
+        [41, 42, 43, 44],
+    ]
+    metadata = json.loads(
+        (pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["tensor_shape"] == [4, 4]
     assert metadata["unique_rows"] == 3
     assert metadata["deduplicate"] is False
@@ -530,9 +573,16 @@ def test_auto_bucket_schedule_uses_model_tokenizer_pad_token_when_metadata_omits
     tokens = runner.get_tokens()
     schedule = runner._load_prompt_bucket_schedule(tokens)
 
-    metadata = json.loads((pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (pretokenized_path / "tokens_4.metadata.json").read_text(encoding="utf-8")
+    )
 
-    assert tokens.tolist() == [[11, 12, 0, 0], [21, 22, 0, 0], [31, 32, 33, 34], [41, 42, 43, 44]]
+    assert tokens.tolist() == [
+        [11, 12, 0, 0],
+        [21, 22, 0, 0],
+        [31, 32, 33, 34],
+        [41, 42, 43, 44],
+    ]
     assert metadata["pad_token_id"] == 0
     assert schedule == [
         {"prompt_indices": [0, 1], "seq_length": 2, "primary_acts_batch_size": 2},
@@ -576,7 +626,9 @@ def test_auto_bucket_schedule_strict_count_errors_on_deduped_shortfall(
     )
 
     with pytest.raises(ValueError, match="did not satisfy the requested prompt count"):
-        runner._prepare_shared_tokens_from_pretokenized_dataset(pretokenized_path / "tokens_3.pt")
+        runner._prepare_shared_tokens_from_pretokenized_dataset(
+            pretokenized_path / "tokens_3.pt"
+        )
 
 
 def test_generate_tokens_requests_cpu_batches() -> None:

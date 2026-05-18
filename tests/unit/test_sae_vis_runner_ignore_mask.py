@@ -27,6 +27,7 @@ class _FakeSequenceDataGenerator:
         resid_post,
         feature_resid_dir,
         selection_mask=None,
+        selection_backend=None,
     ):
         return []
 
@@ -62,7 +63,9 @@ def test_feature_statistics_ignore_mask_excludes_ignored_tokens(monkeypatch) -> 
     )
     monkeypatch.setattr(
         "sae_dashboard.sae_vis_runner.get_features_table_data",
-        lambda **kwargs: {name: [value] for name, value in FeatureTablesData().__dict__.items()},
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
     )
     monkeypatch.setattr(
         "sae_dashboard.sae_vis_runner.get_logits_table_data",
@@ -72,7 +75,9 @@ def test_feature_statistics_ignore_mask_excludes_ignored_tokens(monkeypatch) -> 
     fake_model = SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32))
     fake_encoder = _FakeEncoder()
 
-    sae_vis_data = SaeVisRunner(cfg).run(encoder=fake_encoder, model=fake_model, tokens=tokens)
+    sae_vis_data = SaeVisRunner(cfg).run(
+        encoder=fake_encoder, model=fake_model, tokens=tokens
+    )
 
     assert sae_vis_data.feature_stats.max == [1.0]
     assert sae_vis_data.feature_stats.frac_nonzero == [1.0]

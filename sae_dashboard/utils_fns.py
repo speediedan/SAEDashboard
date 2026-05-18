@@ -450,9 +450,9 @@ class TopK:
             return utils.to_numpy(topk.values), utils.to_numpy(topk.indices)
 
         # Get the topk of the tensor, but only computed over the values of the tensor which are nontrivial
-        assert tensor_mask.shape == tensor.shape[:-1], (
-            "Error: unexpected shape for tensor mask."
-        )
+        assert (
+            tensor_mask.shape == tensor.shape[:-1]
+        ), "Error: unexpected shape for tensor mask."
         tensor_nontrivial_values = tensor[tensor_mask]  # shape [rows d]
         k = min(self.k, tensor_nontrivial_values.shape[-1])
         k = self.k
@@ -1015,9 +1015,9 @@ class FeatureStatistics:
 
         Note, we also deal with the special case where self has no data.
         """
-        assert self.ranges_and_precisions == other.ranges_and_precisions, (
-            "Error: can't merge two FeatureStatistics objects with different ranges."
-        )
+        assert (
+            self.ranges_and_precisions == other.ranges_and_precisions
+        ), "Error: can't merge two FeatureStatistics objects with different ranges."
 
         self.max.extend(other.max)
         self.frac_nonzero.extend(other.frac_nonzero)
@@ -1121,9 +1121,9 @@ def split_string(
     str1: str,
     str2: str,
 ) -> tuple[str, str]:
-    assert str1 in input_string and str2 in input_string, (
-        "Error: str1 and str2 must be in input_string"
-    )
+    assert (
+        str1 in input_string and str2 in input_string
+    ), "Error: str1 and str2 must be in input_string"
     pattern = f"({re.escape(str1)}.*?){re.escape(str2)}"
     match = re.search(pattern, input_string, flags=re.DOTALL)
     if match:
@@ -1364,19 +1364,19 @@ class RollingCorrCoef:
         assert x.ndim == 2 and y.ndim == 2, "Both x and y should be 2D"
         X, Nx = x.shape
         Y, Ny = y.shape
-        assert Nx == Ny, (
-            "Error: x and y should have the same size in the last dimension"
-        )
+        assert (
+            Nx == Ny
+        ), "Error: x and y should have the same size in the last dimension"
         if self.with_self:
             assert X == Y, "If with_self is True, then x and y should be the same shape"
         if self.X is not None:
-            assert X == self.X, (
-                "Error: updating a corrcoef object with different sized dataset."
-            )
+            assert (
+                X == self.X
+            ), "Error: updating a corrcoef object with different sized dataset."
         if self.Y is not None:
-            assert Y == self.Y, (
-                "Error: updating a corrcoef object with different sized dataset."
-            )
+            assert (
+                Y == self.Y
+            ), "Error: updating a corrcoef object with different sized dataset."
         self.X = X
         self.Y = Y
 
@@ -2023,9 +2023,9 @@ class HistogramData:
                                 min_list[output_index],
                                 tickmode,
                             ),
-                            "title": titles[source_index]
-                            if titles is not None
-                            else title,
+                            "title": (
+                                titles[source_index] if titles is not None else title
+                            ),
                         }
 
             for row_index, histogram in enumerate(histograms):

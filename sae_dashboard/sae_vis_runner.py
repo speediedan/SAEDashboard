@@ -250,9 +250,10 @@ class SaeVisRunner:
                     row_count += int(batch.num_rows)
         return row_count
 
-
     @staticmethod
-    def _decode_token_ids(model: HookedSAETransformer, token_ids: list[int]) -> list[str]:
+    def _decode_token_ids(
+        model: HookedSAETransformer, token_ids: list[int]
+    ) -> list[str]:
         tokens = model.tokenizer.convert_ids_to_tokens(token_ids)  # type: ignore[attr-defined]
         if isinstance(tokens, str):
             return [tokens]
@@ -279,7 +280,9 @@ class SaeVisRunner:
             )
 
         if feature_stats is None:
-            raise ValueError("feature_stats is required for object feature statistics tables.")
+            raise ValueError(
+                "feature_stats is required for object feature statistics tables."
+            )
         return pyarrow.table(
             {
                 "feature_index": pyarrow.array(feature_indices, type=pyarrow.int64()),
@@ -313,7 +316,9 @@ class SaeVisRunner:
         return pyarrow.table(
             {
                 "feature_index": pyarrow.array(feature_indices, type=pyarrow.int64()),
-                "bar_heights": pyarrow.array([row.bar_heights for row in histogram_rows]),
+                "bar_heights": pyarrow.array(
+                    [row.bar_heights for row in histogram_rows]
+                ),
                 "bar_values": pyarrow.array([row.bar_values for row in histogram_rows]),
                 "tick_vals": pyarrow.array([row.tick_vals for row in histogram_rows]),
                 "title": pyarrow.array([row.title for row in histogram_rows]),
@@ -330,10 +335,18 @@ class SaeVisRunner:
         return pyarrow.table(
             {
                 "feature_index": pyarrow.array(feature_indices, type=pyarrow.int64()),
-                "bottom_token_ids": pyarrow.array([row.bottom_token_ids for row in logits_table_rows]),
-                "bottom_logits": pyarrow.array([row.bottom_logits for row in logits_table_rows]),
-                "top_token_ids": pyarrow.array([row.top_token_ids for row in logits_table_rows]),
-                "top_logits": pyarrow.array([row.top_logits for row in logits_table_rows]),
+                "bottom_token_ids": pyarrow.array(
+                    [row.bottom_token_ids for row in logits_table_rows]
+                ),
+                "bottom_logits": pyarrow.array(
+                    [row.bottom_logits for row in logits_table_rows]
+                ),
+                "top_token_ids": pyarrow.array(
+                    [row.top_token_ids for row in logits_table_rows]
+                ),
+                "top_logits": pyarrow.array(
+                    [row.top_logits for row in logits_table_rows]
+                ),
             }
         )
 
@@ -358,7 +371,9 @@ class SaeVisRunner:
             )
 
         pyarrow, pyarrow_ipc, pyarrow_parquet = self._load_columnar_modules()
-        artifact_dir = self.cfg.columnar_artifact_dir / f"feature_batch_{feature_batch_index}"
+        artifact_dir = (
+            self.cfg.columnar_artifact_dir / f"feature_batch_{feature_batch_index}"
+        )
         artifact_dir.mkdir(parents=True, exist_ok=True)
         row_counts: dict[str, int] = {}
         tables: dict[str, str] = {}
@@ -445,7 +460,9 @@ class SaeVisRunner:
             ):
                 row_counts["sequence_rows"] = self._write_columnar_record_batches(
                     (
-                        sequence_coordinate_tables[feature_index].to_sequence_row_arrow_record_batch(feature_index)
+                        sequence_coordinate_tables[
+                            feature_index
+                        ].to_sequence_row_arrow_record_batch(feature_index)
                         for feature_index in feature_indices
                     ),
                     artifact_dir / sequence_rows_name,
@@ -458,7 +475,10 @@ class SaeVisRunner:
 
         activation_row_batches: list[Any] = []
         activation_copy_row_batches: list[Any] = []
-        if self.cfg.columnar_emit_activation_rows or self.cfg.columnar_emit_activation_copy_rows:
+        if (
+            self.cfg.columnar_emit_activation_rows
+            or self.cfg.columnar_emit_activation_copy_rows
+        ):
             with timed_stage(
                 self.cfg.log_performance,
                 "activation_row_packaging",
@@ -480,11 +500,15 @@ class SaeVisRunner:
                         activation_copy_row_batches.append(
                             SequenceCoordinateTable.activation_copy_row_arrow_record_batch_from_activation_row_record_batch(
                                 activation_row_batch,
-                                model_id=self.cfg.columnar_activation_copy_model_id or "",
+                                model_id=self.cfg.columnar_activation_copy_model_id
+                                or "",
                                 layer=self.cfg.columnar_activation_copy_layer or "",
-                                creator_id=self.cfg.columnar_activation_copy_creator_id or "",
+                                creator_id=self.cfg.columnar_activation_copy_creator_id
+                                or "",
                                 created_at=self.cfg.columnar_activation_copy_created_at
-                                or datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                                or datetime.now(timezone.utc)
+                                .replace(tzinfo=None)
+                                .isoformat(),
                                 activation_id_prefix=self.cfg.columnar_activation_copy_id_prefix,
                             )
                         )
@@ -547,9 +571,7 @@ class SaeVisRunner:
             row_counts=row_counts,
         )
 
-    def _write_columnar_root_manifest(
-        self, batches: list[SaeVisColumnarBatch]
-    ) -> Path:
+    def _write_columnar_root_manifest(self, batches: list[SaeVisColumnarBatch]) -> Path:
         if self.cfg.columnar_artifact_dir is None:
             raise ValueError(
                 "columnar_artifact_dir must be set when dashboard_output_format='columnar'."
@@ -783,9 +805,14 @@ class SaeVisRunner:
             batch=feature_batch_index,
             feature_count=len(features),
         ):
-            if feature_statistics_table is not None and "positive_density" in feature_statistics_table.schema.names:
-                activation_histogram_titles = build_activation_histogram_titles_from_densities(
-                    feature_statistics_table.column("positive_density").to_pylist()
+            if (
+                feature_statistics_table is not None
+                and "positive_density" in feature_statistics_table.schema.names
+            ):
+                activation_histogram_titles = (
+                    build_activation_histogram_titles_from_densities(
+                        feature_statistics_table.column("positive_density").to_pylist()
+                    )
                 )
             else:
                 activation_histogram_titles = build_activation_histogram_titles(
@@ -949,6 +976,242 @@ class SaeVisRunner:
             model=model,
         )
 
+    def _run_object_feature_batch(
+        self,
+        *,
+        feature_batch_index: int,
+        features: list[int],
+        tokens: Int[Tensor, "batch seq"],
+        model: HookedSAETransformer,
+        encoder: SAE[Any],
+        unembed_matrix: Tensor,
+        feature_data_generator: FeatureDataGenerator,
+        sequence_data_generator: SequenceDataGenerator,
+        progress: Any,
+        all_consolidated_dfa_results: dict[int, dict[Any, Any]],
+    ) -> SaeVisData:
+        with timed_stage(
+            self.cfg.log_performance,
+            "activation_and_encode_total",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            (
+                all_feat_acts,
+                _,
+                feature_resid_dir,
+                feature_out_dir,
+                corrcoef_neurons,
+                corrcoef_encoder,
+                batch_dfa_results,
+            ) = feature_data_generator.get_feature_data(features, progress)
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "logits_projection",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            logits = einops.einsum(
+                feature_resid_dir.to(
+                    device=unembed_matrix.device,
+                    dtype=unembed_matrix.dtype,
+                ),
+                unembed_matrix,
+                "feats d_model, d_model d_vocab -> feats d_vocab",
+            ).to(self.device)
+
+        ignore_tokens_mask = _build_ignore_tokens_mask(
+            self.cfg,
+            tokens,
+            all_feat_acts.device,
+        )
+        flat_all_feat_acts = einops.rearrange(
+            all_feat_acts,
+            "batch seq feats -> feats (batch seq)",
+        )
+        flat_ignore_tokens_mask = einops.rearrange(
+            ignore_tokens_mask,
+            "batch seq -> (batch seq)",
+        )
+        valid_token_count = int(flat_ignore_tokens_mask.sum().item())
+
+        if self.cfg.log_performance:
+            log_perf_event(
+                "packaging_shape_summary",
+                batch=feature_batch_index,
+                feature_count=len(features),
+                token_shape=list(tokens.shape),
+                valid_token_count=valid_token_count,
+            )
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "feature_statistics_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            feature_stats_input = flat_all_feat_acts[:, flat_ignore_tokens_mask]
+            if feature_stats_input.shape[-1] == 0:
+                feature_stats_input = torch.zeros(
+                    (flat_all_feat_acts.shape[0], 1),
+                    dtype=flat_all_feat_acts.dtype,
+                    device=flat_all_feat_acts.device,
+                )
+            feature_stats = FeatureStatistics.create(
+                data=feature_stats_input,
+                batch_size=self.cfg.quantile_feature_batch_size,
+                use_sparse_quantiles=True,
+            )
+
+        feature_data_dict: dict[int, FeatureData] = {
+            feat: FeatureData() for feat in features
+        }
+        layout = self.cfg.feature_centric_layout
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "feature_table_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            feature_tables_data = get_features_table_data(
+                feature_out_dir=feature_out_dir,
+                corrcoef_neurons=corrcoef_neurons,
+                corrcoef_encoder=corrcoef_encoder,
+                n_rows=layout.feature_tables_cfg.n_rows,  # type: ignore
+            )
+            for row_index, feat in enumerate(features):
+                feature_data_dict[feat].feature_tables_data = FeatureTablesData(
+                    **{name: values[row_index] for name, values in feature_tables_data.items()}  # type: ignore
+                )
+
+        if batch_dfa_results:
+            for feature_idx, feature_data in batch_dfa_results.items():
+                all_consolidated_dfa_results[feature_idx].update(feature_data)
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "logits_histogram_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            for feat, logit_vector in zip(features, logits):
+                feature_data_dict[feat].logits_histogram_data = (
+                    LogitsHistogramData.from_data(
+                        data=logit_vector.to(torch.float32),
+                        n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
+                        tickmode="5 ticks",
+                        title=None,
+                    )
+                )
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "activation_histogram_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            for row_index, feat in enumerate(features):
+                feat_acts = all_feat_acts[..., row_index]
+                masked_feat_acts = feat_acts * ignore_tokens_mask
+                nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
+                valid_feature_token_count = max(
+                    1,
+                    int(ignore_tokens_mask.sum().item()),
+                )
+                histogram_title = (
+                    "ACTIVATIONS<br>DENSITY = "
+                    f"{nonzero_feat_acts.numel() / valid_feature_token_count:.3%}"
+                )
+                if nonzero_feat_acts.numel() == 0:
+                    feature_data_dict[feat].acts_histogram_data = ActsHistogramData(
+                        title=histogram_title
+                    )
+                else:
+                    feature_data_dict[feat].acts_histogram_data = (
+                        ActsHistogramData.from_data(
+                            data=nonzero_feat_acts.to(torch.float32),
+                            n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
+                            tickmode="5 ticks",
+                            title=histogram_title,
+                        )
+                    )
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "logits_table_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            for feat, logit_vector in zip(features, logits):
+                feature_data_dict[feat].logits_table_data = get_logits_table_data(
+                    logit_vector=logit_vector,
+                    n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
+                )
+
+        with timed_stage(
+            self.cfg.log_performance,
+            "sequence_packaging",
+            device=self.device,
+            batch=feature_batch_index,
+            feature_count=len(features),
+        ):
+            for row_index, feat in enumerate(features):
+                masked_feat_acts = all_feat_acts[..., row_index] * ignore_tokens_mask
+                feature_data_dict[feat].sequence_data = (
+                    sequence_data_generator.get_sequences_data(
+                        feat_acts=masked_feat_acts,
+                        feat_logits=logits[row_index],
+                        resid_post=torch.tensor([]),
+                        feature_resid_dir=feature_resid_dir[row_index],
+                        selection_mask=ignore_tokens_mask,
+                        selection_backend=self.cfg.sequence_selection_backend,
+                    )
+                )
+                if self.cfg.use_dfa:
+                    feature_data_dict[feat].dfa_data = all_consolidated_dfa_results.get(
+                        feat,
+                        None,
+                    )
+                    feature_data_dict[feat].decoder_weights_data = (
+                        get_decoder_weights_distribution(encoder, model, feat)[0]
+                    )
+                if progress is not None:
+                    progress[1].update(1)
+
+        artifact_path = self._write_sequence_replay_artifact(
+            feature_batch_index=feature_batch_index,
+            features=features,
+            tokens=tokens,
+            selection_mask=ignore_tokens_mask,
+            valid_token_count=valid_token_count,
+            all_feat_acts=all_feat_acts,
+            logits=logits,
+            feature_resid_dir=feature_resid_dir,
+        )
+        if artifact_path is not None and self.cfg.log_performance:
+            log_perf_event(
+                "sequence_replay_artifact",
+                batch=feature_batch_index,
+                path=artifact_path,
+                feature_count=len(features),
+                valid_token_count=valid_token_count,
+            )
+
+        return SaeVisData(
+            cfg=self.cfg,
+            feature_data_dict=feature_data_dict,
+            feature_stats=feature_stats,
+        )
+
     @torch.inference_mode()
     def run(
         self,
@@ -959,9 +1222,12 @@ class SaeVisRunner:
     ) -> SaeVisData | SaeVisColumnarData:
         self.set_seeds()
 
-        if "CLTLayerWrapper" in str(type(encoder)) or encoder.cfg.architecture() in [
-            "temporal"
-        ]:
+        encoder_cfg = getattr(encoder, "cfg", None)
+        encoder_architecture = getattr(encoder_cfg, "architecture", None)
+        if callable(encoder_architecture):
+            encoder_architecture = encoder_architecture()
+
+        if "CLTLayerWrapper" in str(type(encoder)) or encoder_architecture in ["temporal"]:
             print("SaeVisRunner: Skipping fold_W_dec_norm() for CLT wrapper.")
         else:
             encoder.fold_W_dec_norm()
@@ -979,12 +1245,15 @@ class SaeVisRunner:
         feature_batches = self.get_feature_batches(features_list)
         progress = self.get_progress_bar(tokens, feature_batches, features_list)
 
+        create_kwargs: dict[str, Any] = {}
+        if self.cfg.use_huggingface:
+            create_kwargs["tokenizer"] = tokenizer
         feature_data_generator = FeatureDataGeneratorFactory.create(
             self.cfg,
             model,
             encoder,
             tokens,
-            tokenizer=tokenizer,
+            **create_kwargs,
         )
 
         unembed_matrix = (
@@ -998,7 +1267,9 @@ class SaeVisRunner:
             W_U=unembed_matrix,
         )
 
-        all_consolidated_dfa_results: dict[int, dict[Any, Any]] = {feature_idx: {} for feature_idx in features_list}
+        all_consolidated_dfa_results: dict[int, dict[Any, Any]] = {
+            feature_idx: {} for feature_idx in features_list
+        }
         for feature_batch_index, features in enumerate(feature_batches):
             if self._columnar_enabled:
                 columnar_batches.append(
@@ -1021,358 +1292,20 @@ class SaeVisRunner:
                         torch.cuda.empty_cache()
                 continue
 
-            with timed_stage(
-                self.cfg.log_performance,
-                "activation_and_encode_total",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                (
-                    all_feat_acts,
-                    _,
-                    feature_resid_dir,
-                    feature_out_dir,
-                    corrcoef_neurons,
-                    corrcoef_encoder,
-                    batch_dfa_results,
-                ) = feature_data_generator.get_feature_data(features, progress)
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "logits_projection",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                logits = einops.einsum(
-                    feature_resid_dir.to(
-                        device=unembed_matrix.device,
-                        dtype=unembed_matrix.dtype,
-                    ),
-                    unembed_matrix,
-                    "feats d_model, d_model d_vocab -> feats d_vocab",
-                ).to(self.device)
-
-            ignore_tokens_mask = _build_ignore_tokens_mask(
-                self.cfg,
-                tokens,
-                all_feat_acts.device,
-            )
-            flat_all_feat_acts = einops.rearrange(
-                all_feat_acts,
-                "batch seq feats -> feats (batch seq)",
-            )
-            flat_ignore_tokens_mask = einops.rearrange(
-                ignore_tokens_mask,
-                "batch seq -> (batch seq)",
-            )
-            valid_token_count = int(flat_ignore_tokens_mask.sum().item())
-
-            if self.cfg.log_performance:
-                log_perf_event(
-                    "packaging_shape_summary",
-                    batch=feature_batch_index,
-                    feature_count=len(features),
-                    token_shape=list(tokens.shape),
-                    valid_token_count=valid_token_count,
+            sae_vis_data.update(
+                self._run_object_feature_batch(
+                    feature_batch_index=feature_batch_index,
+                    features=features,
+                    tokens=tokens,
+                    model=model,
+                    encoder=encoder,
+                    unembed_matrix=unembed_matrix,
+                    feature_data_generator=feature_data_generator,
+                    sequence_data_generator=sequence_data_generator,
+                    progress=progress,
+                    all_consolidated_dfa_results=all_consolidated_dfa_results,
                 )
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "feature_statistics_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                feature_stats_input = flat_all_feat_acts[:, flat_ignore_tokens_mask]
-                if feature_stats_input.shape[-1] == 0:
-                    feature_stats_input = torch.zeros(
-                        (flat_all_feat_acts.shape[0], 1),
-                        dtype=flat_all_feat_acts.dtype,
-                        device=flat_all_feat_acts.device,
-                    )
-                feature_stats: FeatureStatistics | None = None
-                feature_statistics_table = None
-                if self._columnar_enabled and self.cfg.feature_statistics_backend == "arrow":
-                    pyarrow, _, _ = self._load_columnar_modules()
-                    feature_statistics_table = self._feature_statistics_arrow_table(
-                        feature_indices=[int(feature) for feature in features],
-                        feature_stats_input=feature_stats_input,
-                        feature_stats=None,
-                        pyarrow=pyarrow,
-                    )
-                else:
-                    feature_stats = FeatureStatistics.create(
-                        data=feature_stats_input,
-                        batch_size=self.cfg.quantile_feature_batch_size,
-                        use_sparse_quantiles=True,
-                    )
-
-            feature_data_dict: dict[int, FeatureData] = {
-                feat: FeatureData() for feat in features
-            }
-            layout = self.cfg.feature_centric_layout
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "feature_table_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                feature_tables_data = get_features_table_data(
-                    feature_out_dir=feature_out_dir,
-                    corrcoef_neurons=corrcoef_neurons,
-                    corrcoef_encoder=corrcoef_encoder,
-                    n_rows=layout.feature_tables_cfg.n_rows,  # type: ignore
-                )
-                for row_index, feat in enumerate(features):
-                    feature_data_dict[feat].feature_tables_data = FeatureTablesData(
-                        **{name: values[row_index] for name, values in feature_tables_data.items()}  # type: ignore
-                    )
-
-            if batch_dfa_results:
-                for feature_idx, feature_data in batch_dfa_results.items():
-                    all_consolidated_dfa_results[feature_idx].update(feature_data)
-
-            logits_histogram_table = None
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "logits_histogram_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                if self._columnar_enabled and self.cfg.logits_histogram_backend == "arrow":
-                    pyarrow, _, _ = self._load_columnar_modules()
-                    logits_histogram_table = HistogramData.from_data_batch_arrow_table(
-                        data=logits.to(torch.float32),
-                        n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
-                        tickmode="5 ticks",
-                        title=None,
-                        backend="torch",
-                    )
-                    logits_histogram_table = self._replace_index_column(
-                        logits_histogram_table,
-                        column_name="row_index",
-                        new_column_name="feature_index",
-                        values=[int(feature) for feature in features],
-                        pyarrow=pyarrow,
-                    )
-                else:
-                    for feat, logit_vector in zip(features, logits):
-                        feature_data_dict[feat].logits_histogram_data = (
-                            LogitsHistogramData.from_data(
-                                data=logit_vector.to(torch.float32),
-                                n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
-                                tickmode="5 ticks",
-                                title=None,
-                            )
-                        )
-
-            activation_histogram_table = None
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "activation_histogram_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                if self._columnar_enabled:
-                    if feature_statistics_table is not None and "positive_density" in feature_statistics_table.schema.names:
-                        activation_histogram_titles = build_activation_histogram_titles_from_densities(
-                            feature_statistics_table.column("positive_density").to_pylist()
-                        )
-                    else:
-                        activation_histogram_titles = build_activation_histogram_titles(
-                            flat_all_feat_acts,
-                            valid_mask=flat_ignore_tokens_mask,
-                        )
-                    masked_flat_all_feat_acts = flat_all_feat_acts * flat_ignore_tokens_mask.to(
-                        device=flat_all_feat_acts.device,
-                        dtype=flat_all_feat_acts.dtype,
-                    )
-                    if self.cfg.activation_histogram_backend in {"torch", "polars"}:
-                        pyarrow, _, _ = self._load_columnar_modules()
-                        activation_histogram_table = HistogramData.from_data_batch_arrow_table(
-                            data=masked_flat_all_feat_acts,
-                            n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
-                            tickmode="5 ticks",
-                            title=None,
-                            positive_only=True,
-                            titles=activation_histogram_titles,
-                            backend=self.cfg.activation_histogram_backend,
-                        )
-                        activation_histogram_table = self._replace_index_column(
-                            activation_histogram_table,
-                            column_name="row_index",
-                            new_column_name="feature_index",
-                            values=[int(feature) for feature in features],
-                            pyarrow=pyarrow,
-                        )
-
-                if activation_histogram_table is None:
-                    for row_index, feat in enumerate(features):
-                        feat_acts = all_feat_acts[..., row_index]
-                        masked_feat_acts = feat_acts * ignore_tokens_mask
-                        nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
-                        valid_feature_token_count = max(
-                            1,
-                            int(ignore_tokens_mask.sum().item()),
-                        )
-                        histogram_title = (
-                            "ACTIVATIONS<br>DENSITY = "
-                            f"{nonzero_feat_acts.numel() / valid_feature_token_count:.3%}"
-                        )
-                        if nonzero_feat_acts.numel() == 0:
-                            feature_data_dict[feat].acts_histogram_data = ActsHistogramData(
-                                title=histogram_title
-                            )
-                        else:
-                            feature_data_dict[feat].acts_histogram_data = (
-                                ActsHistogramData.from_data(
-                                    data=nonzero_feat_acts.to(torch.float32),
-                                    n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
-                                    tickmode="5 ticks",
-                                    title=histogram_title,
-                                )
-                            )
-
-            logits_table_rows: list[Any] = []
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "logits_table_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                for feat, logit_vector in zip(features, logits):
-                    feature_data_dict[feat].logits_table_data = get_logits_table_data(
-                        logit_vector=logit_vector,
-                        n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
-                    )
-                    logits_table_rows.append(feature_data_dict[feat].logits_table_data)
-
-            sequence_coordinate_tables: dict[int, SequenceCoordinateTable] = {}
-
-            with timed_stage(
-                self.cfg.log_performance,
-                "sequence_packaging",
-                device=self.device,
-                batch=feature_batch_index,
-                feature_count=len(features),
-            ):
-                for row_index, feat in enumerate(features):
-                    masked_feat_acts = all_feat_acts[..., row_index] * ignore_tokens_mask
-                    if self._columnar_enabled:
-                        sequence_coordinate_tables[feat] = (
-                            sequence_data_generator.get_sequence_coordinate_table(
-                                feat_acts=masked_feat_acts,
-                                feat_logits=logits[row_index],
-                                resid_post=torch.tensor([]),
-                                feature_resid_dir=feature_resid_dir[row_index],
-                                selection_mask=ignore_tokens_mask,
-                                selection_backend=self.cfg.sequence_selection_backend,
-                            )
-                        )
-                    else:
-                        feature_data_dict[feat].sequence_data = (
-                            sequence_data_generator.get_sequences_data(
-                                feat_acts=masked_feat_acts,
-                                feat_logits=logits[row_index],
-                                resid_post=torch.tensor([]),
-                                feature_resid_dir=feature_resid_dir[row_index],
-                                selection_mask=ignore_tokens_mask,
-                                selection_backend=self.cfg.sequence_selection_backend,
-                            )
-                        )
-                    if self.cfg.use_dfa:
-                        feature_data_dict[feat].dfa_data = all_consolidated_dfa_results.get(
-                            feat,
-                            None,
-                        )
-                        feature_data_dict[feat].decoder_weights_data = (
-                            get_decoder_weights_distribution(encoder, model, feat)[0]
-                        )
-                    if progress is not None:
-                        progress[1].update(1)
-
-            artifact_path = self._write_sequence_replay_artifact(
-                feature_batch_index=feature_batch_index,
-                features=features,
-                tokens=tokens,
-                selection_mask=ignore_tokens_mask,
-                valid_token_count=valid_token_count,
-                all_feat_acts=all_feat_acts,
-                logits=logits,
-                feature_resid_dir=feature_resid_dir,
             )
-            if artifact_path is not None and self.cfg.log_performance:
-                log_perf_event(
-                    "sequence_replay_artifact",
-                    batch=feature_batch_index,
-                    path=artifact_path,
-                    feature_count=len(features),
-                    valid_token_count=valid_token_count,
-                )
-
-            if self._columnar_enabled:
-                pyarrow, _, _ = self._load_columnar_modules()
-                if feature_statistics_table is None:
-                    feature_statistics_table = self._feature_statistics_arrow_table(
-                        feature_indices=[int(feature) for feature in features],
-                        feature_stats_input=feature_stats_input,
-                        feature_stats=feature_stats,
-                        pyarrow=pyarrow,
-                    )
-                if logits_histogram_table is None:
-                    logits_histogram_table = self._histogram_arrow_table_from_objects(
-                        feature_indices=[int(feature) for feature in features],
-                        histogram_rows=[
-                            feature_data_dict[int(feature)].logits_histogram_data
-                            for feature in features
-                        ],
-                        pyarrow=pyarrow,
-                    )
-                if activation_histogram_table is None:
-                    activation_histogram_table = self._histogram_arrow_table_from_objects(
-                        feature_indices=[int(feature) for feature in features],
-                        histogram_rows=[
-                            feature_data_dict[int(feature)].acts_histogram_data
-                            for feature in features
-                        ],
-                        pyarrow=pyarrow,
-                    )
-                columnar_batches.append(
-                    self._write_columnar_batch(
-                        feature_batch_index=feature_batch_index,
-                        feature_indices=[int(feature) for feature in features],
-                        feature_stats_input=feature_stats_input,
-                        feature_stats=feature_stats,
-                        feature_statistics_table=feature_statistics_table,
-                        feature_tables_data=feature_tables_data,
-                        logits_histogram_table=logits_histogram_table,
-                        activation_histogram_table=activation_histogram_table,
-                        logits_table_rows=logits_table_rows,
-                        sequence_coordinate_tables=sequence_coordinate_tables,
-                        model=model,
-                    )
-                )
-                if self.cfg.cleanup_each_minibatch:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                continue
-            new_feature_data = SaeVisData(
-                cfg=self.cfg,
-                feature_data_dict=feature_data_dict,
-                feature_stats=feature_stats,
-            )
-            sae_vis_data.update(new_feature_data)
 
             if self.cfg.cleanup_each_minibatch:
                 gc.collect()
