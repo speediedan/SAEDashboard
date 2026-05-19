@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -39,7 +41,10 @@ class FeatureDataGenerator:
         self.cfg = cfg
         self.model = model
         self.encoder = encoder
+        self.full_sequence_length = int(tokens.shape[1])
         self.token_minibatches = self.batch_tokens(tokens)
+        if self.cfg.cache_dir is not None:
+            self._prepare_activation_cache_dir(tokens)
 
         # DFA is only supported for TransformerLens models
         if cfg.use_dfa:
@@ -68,6 +73,69 @@ class FeatureDataGenerator:
         token_minibatches = [tok.to(self.cfg.device) for tok in token_minibatches]
 
         return token_minibatches
+
+    @staticmethod
+    def _activation_cache_manifest_path(cache_dir: Path) -> Path:
+        return cache_dir / "activation_cache_layout.json"
+
+    @staticmethod
+    def _build_activation_cache_layout_key(tokens: Tensor) -> str:
+        digest = hashlib.sha1()
+        token_array = tokens.detach().to("cpu").contiguous().numpy()
+        digest.update(np.asarray(token_array.shape, dtype=np.int32).tobytes())
+        digest.update(str(token_array.dtype).encode("utf-8"))
+        digest.update(token_array.tobytes())
+        return digest.hexdigest()[:16]
+
+    def _expected_activation_cache_manifest(self, tokens: Tensor) -> dict[str, Any]:
+        return {
+            "cache_version": 1,
+            "layout_key": self._build_activation_cache_layout_key(tokens),
+            "token_shape": list(tokens.shape),
+            "token_dtype": str(tokens.dtype),
+            "prompt_minibatch_count": len(self.token_minibatches),
+        }
+
+    def _prepare_activation_cache_dir(self, tokens: Tensor) -> None:
+        cache_dir = self.cfg.cache_dir
+        if cache_dir is None:
+            return
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._activation_cache_manifest_path(cache_dir)
+        expected_manifest = self._expected_activation_cache_manifest(tokens)
+        existing_manifest: dict[str, Any] | None = None
+
+        if manifest_path.is_file():
+            try:
+                existing_manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except json.JSONDecodeError:
+                existing_manifest = None
+
+        if existing_manifest != expected_manifest:
+            for stale_cache_path in cache_dir.glob("model_activations_*.pt"):
+                stale_cache_path.unlink()
+            manifest_path.write_text(
+                json.dumps(expected_manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+    @staticmethod
+    def _pad_sequence_tensor(sequence_tensor: Tensor, *, target_seq_len: int) -> Tensor:
+        current_seq_len = int(sequence_tensor.shape[1])
+        if current_seq_len == target_seq_len:
+            return sequence_tensor
+        if current_seq_len > target_seq_len:
+            raise ValueError(
+                f"Cannot pad tensor with seq length {current_seq_len} into shorter target {target_seq_len}"
+            )
+        padded_tensor = sequence_tensor.new_zeros(
+            (sequence_tensor.shape[0], target_seq_len, *sequence_tensor.shape[2:])
+        )
+        padded_tensor[:, :current_seq_len].copy_(sequence_tensor)
+        return padded_tensor
 
     @torch.inference_mode()
     def get_feature_data(  # type: ignore
@@ -155,7 +223,9 @@ class FeatureDataGenerator:
             )
 
             # Add these to the lists (we'll eventually concat)
-            all_feat_acts.append(feature_acts)
+            all_feat_acts.append(
+                self._pad_sequence_tensor(feature_acts, target_seq_len=self.full_sequence_length)
+            )
 
             # Calculate DFA
             if self.cfg.use_dfa and self.dfa_calculator:
@@ -318,7 +388,11 @@ class FeatureMaskingContext:
             # set the weight
             setattr(self.sae, "b_enc", nn.Parameter(masked_weight))
 
-        elif architecture in ["jumprelu", "jumprelu_transcoder"]:
+        elif architecture in [
+            "jumprelu",
+            "jumprelu_transcoder",
+            "jumprelu_skip_transcoder",
+        ]:
             ## b_enc
             self.original_weight["b_enc"] = getattr(self.sae, "b_enc").data.clone()
             # mask the weight
