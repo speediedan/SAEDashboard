@@ -584,7 +584,7 @@ class FeatureDataGenerator:
                 # not stay resident on GPU until the final concat. Downcast to bfloat16
                 # on host so larger feature batches fit without walking back the GPU fix.
                 feature_acts_cpu = feature_acts_for_output.to(
-                    device="cpu", dtype=torch.bfloat16, non_blocking=True
+                    device="cpu", dtype=torch.bfloat16
                 )
 
             peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (

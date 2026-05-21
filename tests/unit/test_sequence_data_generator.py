@@ -594,3 +594,113 @@ def test_get_indices_dict_lazy_gpu_matches_eager_cpu_for_bfloat16_interval_bound
     assert torch.equal(lazy_indices_bold, eager_indices_bold)
     for group_name, eager_indices in eager_indices_dict.items():
         assert torch.equal(lazy_indices_dict[group_name], eager_indices)
+
+
+def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() -> (
+    None
+):
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 1  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.n_quantiles = 4  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.quantile_group_size = 16  # type: ignore
+
+    tokens = torch.arange(4, dtype=torch.long).reshape(1, 4)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts_float32 = torch.tensor(
+        [[0.5001, 0.1, 1.0, 0.0]],
+        dtype=torch.float32,
+    )
+    feat_acts_bfloat16 = feat_acts_float32.to(torch.bfloat16)
+    selection_mask = torch.tensor(
+        [[True, True, True, False]],
+        dtype=torch.bool,
+    )
+
+    eager_indices_dict, _, _ = generator.get_indices_dict_eager_cpu(
+        generator.buffer,
+        feat_acts_float32,
+        selection_mask=selection_mask,
+    )
+    lazy_indices_dict, _, _ = generator.get_indices_dict_lazy_gpu(
+        generator.buffer,
+        feat_acts_bfloat16,
+        selection_mask=selection_mask,
+    )
+
+    target_index = torch.tensor([0, 0], dtype=torch.long)
+
+    def interval_groups_for_target(
+        indices_dict: dict[str, torch.Tensor],
+    ) -> list[str]:
+        return [
+            group_name
+            for group_name, group_indices in indices_dict.items()
+            if group_name.startswith("INTERVAL")
+            and any(torch.equal(group_index, target_index) for group_index in group_indices)
+        ]
+
+    eager_groups = interval_groups_for_target(eager_indices_dict)
+    lazy_groups = interval_groups_for_target(lazy_indices_dict)
+
+    assert float(feat_acts_bfloat16[0, 0].float().item()) == pytest.approx(0.5)
+    assert len(eager_groups) == 1
+    assert eager_groups[0].startswith("INTERVAL 0.500 - 0.750")
+    assert len(lazy_groups) == 2
+    assert any(group.startswith("INTERVAL 0.250 - 0.500") for group in lazy_groups)
+    assert any(group.startswith("INTERVAL 0.500 - 0.750") for group in lazy_groups)
+
+
+@pytest.mark.xfail(
+    reason="Phase 4 planned half-open interval semantics are not implemented yet."
+)
+def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins() -> (
+    None
+):
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 1  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.n_quantiles = 4  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.quantile_group_size = 16  # type: ignore
+
+    tokens = torch.arange(4, dtype=torch.long).reshape(1, 4)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts = torch.tensor(
+        [[0.5, 0.1, 1.0, 0.0]],
+        dtype=torch.float32,
+    )
+    selection_mask = torch.tensor(
+        [[True, True, True, False]],
+        dtype=torch.bool,
+    )
+
+    random.seed(12345)
+    eager_indices_dict, _, _ = generator.get_indices_dict_eager_cpu(
+        generator.buffer,
+        feat_acts,
+        selection_mask=selection_mask,
+    )
+    random.seed(12345)
+    lazy_indices_dict, _, _ = generator.get_indices_dict_lazy_gpu(
+        generator.buffer,
+        feat_acts,
+        selection_mask=selection_mask,
+    )
+
+    target_index = torch.tensor([0, 0], dtype=torch.long)
+
+    def interval_groups_for_target(
+        indices_dict: dict[str, torch.Tensor],
+    ) -> list[str]:
+        return [
+            group_name
+            for group_name, group_indices in indices_dict.items()
+            if group_name.startswith("INTERVAL")
+            and any(torch.equal(group_index, target_index) for group_index in group_indices)
+        ]
+
+    eager_groups = interval_groups_for_target(eager_indices_dict)
+    lazy_groups = interval_groups_for_target(lazy_indices_dict)
+
+    assert eager_groups == ["INTERVAL 0.500 - 0.750"]
+    assert lazy_groups == ["INTERVAL 0.500 - 0.750"]
