@@ -153,6 +153,54 @@ class FeatureDataGenerator:
             _max_optional(peak_cuda_reserved_gib, current_cuda_reserved_gib),
         )
 
+    @staticmethod
+    def _activation_cache_manifest_path(cache_dir: Path) -> Path:
+        return cache_dir / "activation_cache_layout.json"
+
+    @staticmethod
+    def _build_activation_cache_layout_key(tokens: Tensor) -> str:
+        digest = hashlib.sha1()
+        token_array = tokens.detach().to("cpu").contiguous().numpy()
+        digest.update(np.asarray(token_array.shape, dtype=np.int32).tobytes())
+        digest.update(str(token_array.dtype).encode("utf-8"))
+        digest.update(token_array.tobytes())
+        return digest.hexdigest()[:16]
+
+    def _expected_activation_cache_manifest(self, tokens: Tensor) -> dict[str, Any]:
+        return {
+            "cache_version": 1,
+            "layout_key": self._build_activation_cache_layout_key(tokens),
+            "token_shape": list(tokens.shape),
+            "token_dtype": str(tokens.dtype),
+            "prompt_minibatch_count": len(self.token_minibatches),
+        }
+
+    def _prepare_activation_cache_dir(self, tokens: Tensor) -> None:
+        cache_dir = self.cfg.cache_dir
+        if cache_dir is None:
+            return
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._activation_cache_manifest_path(cache_dir)
+        expected_manifest = self._expected_activation_cache_manifest(tokens)
+        existing_manifest: dict[str, Any] | None = None
+
+        if manifest_path.is_file():
+            try:
+                existing_manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except json.JSONDecodeError:
+                existing_manifest = None
+
+        if existing_manifest != expected_manifest:
+            for stale_cache_path in cache_dir.glob("model_activations_*.pt"):
+                stale_cache_path.unlink()
+            manifest_path.write_text(
+                json.dumps(expected_manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
     @torch.inference_mode()
     def batch_tokens(
         self, tokens: Int[Tensor, "batch seq"]
