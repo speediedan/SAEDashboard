@@ -8,6 +8,7 @@ import torch
 from datasets import Dataset
 from transformer_lens import HookedTransformer
 
+import sae_dashboard.neuronpedia.neuronpedia_runner as neuronpedia_runner_module
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
 from sae_dashboard.neuronpedia.prompt_datasets import (
@@ -98,6 +99,79 @@ def test_materialize_pretokenized_dataset(
     assert isinstance(materialized_dataset, Dataset)
     assert len(materialized_dataset) == 2
     assert materialized_dataset.column_names == ["input_ids"]
+
+
+def test_initialize_model_hooked_uses_no_processing_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+    fake_model = SimpleNamespace(tokenizer=object())
+
+    def fake_from_pretrained_no_processing(
+        *,
+        model_name: str,
+        device: str,
+        n_devices: int,
+        hf_model: Any,
+        dtype: torch.dtype,
+        **kwargs: Any,
+    ) -> Any:
+        calls.update(
+            {
+                "model_name": model_name,
+                "device": device,
+                "n_devices": n_devices,
+                "hf_model": hf_model,
+                "dtype": dtype,
+                "kwargs": kwargs,
+            }
+        )
+        return fake_model
+
+    def fail_from_pretrained(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("hooked runner should not use from_pretrained")
+
+    monkeypatch.setattr(
+        neuronpedia_runner_module.HookedSAETransformer,
+        "from_pretrained_no_processing",
+        fake_from_pretrained_no_processing,
+    )
+    monkeypatch.setattr(
+        neuronpedia_runner_module.HookedSAETransformer,
+        "from_pretrained",
+        fail_from_pretrained,
+    )
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir="test_outputs",
+        huggingface_dataset_path="monology/pile-uncopyrighted",
+        model_wrapper="hooked",
+        model_dtype="bfloat16",
+        model_device="cpu",
+        model_n_devices=1,
+        free_unused_model_layers=False,
+    )
+    runner.sae = SimpleNamespace(cfg=SimpleNamespace(metadata={"hook_name": "blocks.5.hook_resid_pre"}))
+    runner.sae_from_pretrained_kwargs = {"fold_ln": False}
+    runner.model_id = "google/gemma-3-1b-it"
+    runner._log_resource_snapshot = lambda *_args, **_kwargs: None
+    runner._log_hook_alias_summary = lambda *_args, **_kwargs: None
+
+    runner._initialize_model()
+
+    assert runner.model is fake_model
+    assert runner.tokenizer is fake_model.tokenizer
+    assert calls == {
+        "model_name": "google/gemma-3-1b-it",
+        "device": "cpu",
+        "n_devices": 1,
+        "hf_model": None,
+        "dtype": torch.bfloat16,
+        "kwargs": {"fold_ln": False},
+    }
 
 
 def test_materialize_structured_dataset_uses_supplied_text_field(
