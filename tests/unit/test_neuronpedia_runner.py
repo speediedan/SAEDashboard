@@ -10,6 +10,11 @@ from transformer_lens import HookedTransformer
 
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
+from sae_dashboard.neuronpedia.prompt_datasets import (
+    PromptDatasetConfig,
+    load_prompt_dataset,
+    resolve_prompt_dataset,
+)
 
 
 @pytest.fixture
@@ -72,7 +77,7 @@ def test_materialize_pretokenized_dataset(
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_from_disk",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_from_disk",
         fake_load_from_disk,
     )
 
@@ -83,6 +88,8 @@ def test_materialize_pretokenized_dataset(
         outputs_dir="test_outputs",
         n_prompts_total=2,
         huggingface_dataset_path="aps/super_glue",
+        prompt_dataset_mode="load_from_disk",
+        prompt_dataset_path=str(pretokenized_path),
         pretokenized_dataset_path=str(pretokenized_path),
     )
 
@@ -102,19 +109,25 @@ def test_materialize_structured_dataset_uses_supplied_text_field(
 
     def fake_load_dataset(
         path: str,
-        config_name: str | None,
         *,
+        name: str | None,
+        data_dir: str | None,
+        data_files: Any,
         split: str,
         streaming: bool,
+        trust_remote_code: bool | None,
     ) -> Dataset:
         assert path == "aps/super_glue"
-        assert config_name == "rte"
+        assert name == "rte"
+        assert data_dir is None
+        assert data_files is None
         assert split == "train"
         assert streaming is True
+        assert trust_remote_code is None
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_dataset",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_dataset",
         fake_load_dataset,
     )
 
@@ -128,12 +141,87 @@ def test_materialize_structured_dataset_uses_supplied_text_field(
         huggingface_dataset_config_name="rte",
         huggingface_dataset_split="train",
         huggingface_dataset_text_field="prompt",
+        prompt_dataset_mode="load_dataset",
+        prompt_dataset_path="aps/super_glue",
+        prompt_dataset_name="rte",
+        prompt_dataset_split="train",
+        prompt_dataset_text_field="prompt",
     )
 
     materialized_dataset = runner._materialize_prompt_dataset()
 
     assert isinstance(materialized_dataset, Dataset)
     assert materialized_dataset[0]["text"] == "Already rendered prompt."
+
+
+def test_prepare_shared_tokens_from_tokenized_load_dataset_uses_sidecar_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dataset = Dataset.from_dict(
+        {
+            "input_ids": [[1, 2, 0, 0], [3, 4, 5, 0]],
+            "attention_mask": [[1, 1, 0, 0], [1, 1, 1, 0]],
+        }
+    )
+    metadata_path = tmp_path / "sae_lens.json"
+    metadata_path.write_text(json.dumps({"pad_token_id": 0}), encoding="utf-8")
+
+    def fake_load_dataset(
+        path: str,
+        *,
+        name: str | None,
+        data_dir: str | None,
+        data_files: Any,
+        split: str,
+        streaming: bool,
+        trust_remote_code: bool | None,
+    ) -> Dataset:
+        assert path == str(tmp_path)
+        assert name is None
+        assert data_dir is None
+        assert data_files is None
+        assert split == "train"
+        assert streaming is False
+        assert trust_remote_code is None
+        return dataset
+
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.prompt_datasets.load_dataset",
+        fake_load_dataset,
+    )
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir=str(tmp_path / "outputs"),
+        n_prompts_total=2,
+        n_tokens_in_prompt=4,
+        huggingface_dataset_path=str(tmp_path),
+        prompt_dataset_mode="load_dataset",
+        prompt_dataset_path=str(tmp_path),
+        dataset_streaming=False,
+    )
+    runner._prompt_dataset_materialization = load_prompt_dataset(
+        resolve_prompt_dataset(
+            PromptDatasetConfig(
+                dataset_path=str(tmp_path),
+                mode="load_dataset",
+                split="train",
+                streaming=False,
+            )
+        )
+    )
+
+    target_tokens_file = tmp_path / "outputs" / "tokens_2.pt"
+    runner._prepare_shared_tokens_from_prompt_dataset(target_tokens_file)
+
+    tokens = torch.load(target_tokens_file)
+    effective_lengths = torch.load(target_tokens_file.with_suffix(".effective_lengths.pt"))
+
+    assert torch.equal(tokens, torch.tensor([[1, 2, 0, 0], [3, 4, 5, 0]], dtype=torch.long))
+    assert torch.equal(effective_lengths, torch.tensor([2, 3], dtype=torch.int32))
 
 
 def test_create_output_directory_sanitizes_model_id(tmp_path: Path) -> None:
@@ -350,9 +438,9 @@ def test_load_prompt_bucket_schedule_can_auto_bucket_from_effective_lengths(
             "primary_acts_batch_size": 2,
         },
         {"prompt_indices": [4, 5], "seq_length": 64, "primary_acts_batch_size": 2},
-        {"prompt_indices": [6, 7], "seq_length": 128, "primary_acts_batch_size": 1},
-        {"prompt_indices": [8, 9], "seq_length": 128, "primary_acts_batch_size": 1},
-        {"prompt_indices": [10, 11], "seq_length": 128, "primary_acts_batch_size": 1},
+        {"prompt_indices": [6, 7], "seq_length": 120, "primary_acts_batch_size": 1},
+        {"prompt_indices": [8, 9], "seq_length": 120, "primary_acts_batch_size": 1},
+        {"prompt_indices": [10, 11], "seq_length": 120, "primary_acts_batch_size": 1},
     ]
 
 
@@ -384,7 +472,7 @@ def test_auto_bucket_schedule_can_generate_shared_sidecars_from_pretokenized_dat
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_from_disk",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_from_disk",
         fake_load_from_disk,
     )
 
@@ -467,7 +555,7 @@ def test_auto_bucket_schedule_can_preserve_duplicate_rows_from_pretokenized_data
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_from_disk",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_from_disk",
         fake_load_from_disk,
     )
 
@@ -542,7 +630,7 @@ def test_auto_bucket_schedule_uses_model_tokenizer_pad_token_when_metadata_omits
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_from_disk",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_from_disk",
         fake_load_from_disk,
     )
 
@@ -608,7 +696,7 @@ def test_auto_bucket_schedule_strict_count_errors_on_deduped_shortfall(
         return dataset
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.load_from_disk",
+        "sae_dashboard.neuronpedia.prompt_datasets.load_from_disk",
         fake_load_from_disk,
     )
 
@@ -620,15 +708,77 @@ def test_auto_bucket_schedule_strict_count_errors_on_deduped_shortfall(
         n_prompts_total=3,
         n_tokens_in_prompt=4,
         huggingface_dataset_path="aps/super_glue",
+        prompt_dataset_mode="load_from_disk",
+        prompt_dataset_path=str(pretokenized_path),
         pretokenized_dataset_path=str(pretokenized_path),
         strict_shared_prompt_count=True,
         auto_prompt_bucket_schedule=True,
     )
+    runner._prompt_dataset_materialization = load_prompt_dataset(
+        resolve_prompt_dataset(
+            PromptDatasetConfig(
+                dataset_path=str(pretokenized_path),
+                mode="load_from_disk",
+            )
+        )
+    )
 
     with pytest.raises(ValueError, match="did not satisfy the requested prompt count"):
-        runner._prepare_shared_tokens_from_pretokenized_dataset(
+        runner._prepare_shared_tokens_from_prompt_dataset(
             pretokenized_path / "tokens_3.pt"
         )
+
+
+def test_load_prompt_bucket_schedule_can_auto_bucket_from_quantile_ceilings(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "layer_10"
+    output_dir.mkdir(parents=True)
+    tokens = torch.tensor(
+        [
+            [1, 2, 3],
+            [4, 5, 6],
+            [7, 8, 9],
+            [10, 11, 12],
+            [13, 14, 15],
+            [16, 17, 18],
+            [19, 20, 21],
+            [22, 23, 24],
+            [25, 26, 27],
+            [28, 29, 30],
+            [31, 32, 33],
+            [34, 35, 36],
+        ],
+        dtype=torch.long,
+    )
+    torch.save(tokens, output_dir / "tokens_12.pt")
+    torch.save(
+        torch.tensor(
+            [40, 50, 60, 64, 64, 64, 65, 70, 80, 90, 110, 120], dtype=torch.int32
+        ),
+        output_dir / "tokens_12.effective_lengths.pt",
+    )
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gemma-scope-2-1b-it-transcoders-all",
+        sae_path="layer_10_width_262k_l0_small_affine",
+        outputs_dir=str(output_dir),
+        n_prompts_total=12,
+        n_tokens_in_prompt=128,
+        n_prompts_in_forward_pass=2,
+        primary_acts_batch_size=1,
+        shared_tokens_file=str(tmp_path / "shared_tokens.pt"),
+        auto_prompt_bucket_schedule=True,
+        prompt_bucket_scale_limit=2.0,
+        prompt_primary_acts_scale_limit=2.0,
+        prompt_batch_size_round_to=2,
+    )
+
+    schedule = runner._load_prompt_bucket_schedule(tokens)
+
+    assert sorted(index for batch in schedule for index in batch["prompt_indices"]) == list(range(12))
+    assert {batch["seq_length"] for batch in schedule} == {60, 64, 80, 120}
 
 
 def test_generate_tokens_requests_cpu_batches() -> None:

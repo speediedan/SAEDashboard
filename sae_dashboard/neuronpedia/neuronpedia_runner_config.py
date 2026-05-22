@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
-DEFAULT_PROMPT_BUCKET_CEILINGS = (64, 128, 192, 256)
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
 DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT = 4.0
 DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO = 8
@@ -23,12 +22,33 @@ class NeuronpediaRunnerConfig:
     huggingface_dataset_config_name: Optional[str] = None
     huggingface_dataset_split: Optional[str] = None
     huggingface_dataset_text_field: Optional[str] = None
+    # Prompt dataset contract:
+    # - load_dataset for Hub datasets and local/file-backed builders
+    # - load_from_disk for local Dataset.save_to_disk() prompt caches
+    # - legacy_jsonl only for deprecated JSONL dashboard exports
+    # pretokenized_dataset_path still implies load_from_disk when reused as prompt_dataset_path.
+    prompt_dataset_mode: str = "load_dataset"
+    prompt_dataset_path: Optional[str] = None
+    prompt_dataset_name: Optional[str] = None
+    prompt_dataset_split: Optional[str] = None
+    prompt_dataset_text_field: Optional[str] = None
+    prompt_dataset_data_files: tuple[str, ...] = field(default_factory=tuple)
+    prompt_dataset_data_dir: Optional[str] = None
+    prompt_dataset_metadata_path: Optional[str] = None
+    prompt_dataset_trust_remote_code: Optional[bool] = None
     pretokenized_dataset_path: Optional[str] = None
+    # shared_tokens_file points at the staged tokens_*.pt tensor used by all layer runs. If omitted and
+    # pretokenized_dataset_path is set, the runner generates tokens_*.pt, tokens_*.effective_lengths.pt, and
+    # tokens_*.metadata.json beside that pretokenized dataset.
     shared_tokens_file: Optional[str] = None
     deduplicate_shared_prompt_tokens: bool = True
     strict_shared_prompt_count: bool = False
+    # prompt_bucket_schedule_file is an explicit schedule artifact. auto_prompt_bucket_schedule derives the same
+    # scheduling structure directly from the staged effective-length sidecar when no schedule file is supplied.
     prompt_bucket_schedule_file: Optional[str] = None
     auto_prompt_bucket_schedule: bool = False
+    # Optional explicit inclusive ceilings for auto prompt bucketing. When left empty, the runner derives ceilings
+    # from prompt-length quantiles in the staged effective-length sidecar.
     prompt_bucket_ceilings: tuple[int, ...] = field(default_factory=tuple)
     prompt_bucket_scale_limit: float = DEFAULT_PROMPT_BUCKET_SCALE_LIMIT
     prompt_primary_acts_scale_limit: float = DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT

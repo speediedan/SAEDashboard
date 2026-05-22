@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import wandb
 import wandb.sdk
-from datasets import Dataset, IterableDataset, load_dataset, load_from_disk
+from datasets import Dataset, IterableDataset
 from matplotlib import colors
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
 from tqdm import tqdm
@@ -41,10 +41,16 @@ from sae_dashboard.neuronpedia.neuronpedia_export import (
 )
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO,
-    DEFAULT_PROMPT_BUCKET_CEILINGS,
     DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
     DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
     NeuronpediaRunnerConfig,
+)
+from sae_dashboard.neuronpedia.prompt_bucketing import derive_prompt_bucket_ceilings
+from sae_dashboard.neuronpedia.prompt_datasets import (
+    PromptDatasetConfig,
+    PromptDatasetMaterialization,
+    load_prompt_dataset,
+    resolve_prompt_dataset,
 )
 from sae_dashboard.perf_logging import (
     cpu_snapshot,
@@ -446,6 +452,24 @@ class NeuronpediaRunner:
 
         if self.cfg.huggingface_dataset_path == "":
             self.cfg.huggingface_dataset_path = self.sae.cfg.metadata.dataset_path  # type: ignore
+        if self.cfg.prompt_dataset_path is None:
+            if self.cfg.pretokenized_dataset_path:
+                self.cfg.prompt_dataset_path = self.cfg.pretokenized_dataset_path
+            else:
+                self.cfg.prompt_dataset_path = self.cfg.huggingface_dataset_path
+        if self.cfg.prompt_dataset_name is None:
+            self.cfg.prompt_dataset_name = self.cfg.huggingface_dataset_config_name
+        if self.cfg.prompt_dataset_split is None:
+            self.cfg.prompt_dataset_split = self.cfg.huggingface_dataset_split
+        if self.cfg.prompt_dataset_text_field is None:
+            self.cfg.prompt_dataset_text_field = self.cfg.huggingface_dataset_text_field
+        if (
+            self.cfg.pretokenized_dataset_path
+            and self.cfg.prompt_dataset_path == self.cfg.pretokenized_dataset_path
+        ):
+            self.cfg.prompt_dataset_mode = "load_from_disk"
+        if self.cfg.prompt_dataset_mode in {"load_dataset", "legacy_jsonl"} and self.cfg.prompt_dataset_path:
+            self.cfg.huggingface_dataset_path = self.cfg.prompt_dataset_path
 
         self._print_configuration()
 
@@ -476,7 +500,10 @@ class NeuronpediaRunner:
         print(f"Model Device: {self.cfg.model_device}")
         print(f"Model Num Devices: {self.cfg.model_n_devices}")
         print(f"Activation Store Device: {self.cfg.activation_store_device}")
-        print(f"Dataset Path: {self.cfg.huggingface_dataset_path}")
+        print(
+            "Prompt Dataset: "
+            f"mode={self.cfg.prompt_dataset_mode} path={self.cfg.prompt_dataset_path or self.cfg.huggingface_dataset_path}"
+        )
         print(f"Forward Pass size: {self.cfg.n_tokens_in_prompt}")
 
         # number of tokens
@@ -659,65 +686,49 @@ class NeuronpediaRunner:
             )
         print(f"[runner_hook_summary] sample_hooks={hook_dict_keys[:12]}")
 
-    def _materialize_prompt_dataset(self) -> str | Dataset | IterableDataset:
-        if self.cfg.pretokenized_dataset_path:
-            dataset = load_from_disk(self.cfg.pretokenized_dataset_path)
-            if not isinstance(dataset, Dataset):
-                raise ValueError(
-                    "Pretokenized Neuronpedia datasets must be saved as a single HuggingFace Dataset."
-                )
-            if len(dataset) > self.cfg.n_prompts_total:
-                dataset = dataset.select(range(self.cfg.n_prompts_total))
-            print(
-                "NeuronpediaRunner: Loaded pretokenized prompt dataset "
-                f"rows={len(dataset)} path={self.cfg.pretokenized_dataset_path}"
-            )
-            return dataset
-
-        has_structured_dataset_config = any(
-            value is not None and value != ""
-            for value in (
-                self.cfg.huggingface_dataset_config_name,
-                self.cfg.huggingface_dataset_split,
-                self.cfg.huggingface_dataset_text_field,
-            )
-        )
-        if not has_structured_dataset_config:
-            return self.cfg.huggingface_dataset_path
-
-        dataset = load_dataset(
-            self.cfg.huggingface_dataset_path,
-            self.cfg.huggingface_dataset_config_name,
-            split=self.cfg.huggingface_dataset_split or "train",
+    def _prompt_dataset_config(self) -> PromptDatasetConfig:
+        dataset_path = self.cfg.prompt_dataset_path
+        if dataset_path is None and self.cfg.pretokenized_dataset_path:
+            dataset_path = self.cfg.pretokenized_dataset_path
+        if not dataset_path:
+            dataset_path = self.cfg.huggingface_dataset_path
+        prompt_dataset_mode = self.cfg.prompt_dataset_mode
+        if self.cfg.pretokenized_dataset_path and dataset_path == self.cfg.pretokenized_dataset_path:
+            prompt_dataset_mode = "load_from_disk"
+        return PromptDatasetConfig(
+            dataset_path=dataset_path,
+            mode=cast(Any, prompt_dataset_mode),
+            dataset_name=self.cfg.prompt_dataset_name or self.cfg.huggingface_dataset_config_name,
+            split=self.cfg.prompt_dataset_split or self.cfg.huggingface_dataset_split,
+            text_field=self.cfg.prompt_dataset_text_field or self.cfg.huggingface_dataset_text_field,
+            data_files=self.cfg.prompt_dataset_data_files or None,
+            data_dir=self.cfg.prompt_dataset_data_dir,
             streaming=self.cfg.dataset_streaming,
+            trust_remote_code=self.cfg.prompt_dataset_trust_remote_code,
+            metadata_path=self.cfg.prompt_dataset_metadata_path,
         )
 
-        if self.cfg.huggingface_dataset_text_field:
-            text_field = self.cfg.huggingface_dataset_text_field
-
-            def select_text_field(example: dict[str, Any]) -> dict[str, str]:
-                return {"text": str(example[text_field])}
-
-            dataset = dataset.map(select_text_field)
-
-        if isinstance(dataset, Dataset):
-            if len(dataset) > self.cfg.n_prompts_total:
-                dataset = dataset.select(range(self.cfg.n_prompts_total))
+    def _materialize_prompt_dataset(self) -> Dataset | IterableDataset:
+        self._prompt_dataset_materialization = load_prompt_dataset(
+            resolve_prompt_dataset(self._prompt_dataset_config()),
+            max_rows=self.cfg.n_prompts_total,
+        )
+        materialization = self._prompt_dataset_materialization
+        dataset_source = materialization.dataset_source
+        if isinstance(dataset_source, Dataset):
             print(
                 "NeuronpediaRunner: Materialized prompt dataset "
-                f"rows={len(dataset)} path={self.cfg.huggingface_dataset_path} "
-                f"config={self.cfg.huggingface_dataset_config_name} "
-                f"split={self.cfg.huggingface_dataset_split or 'train'}"
+                f"mode={materialization.resolution.mode} rows={len(dataset_source)} "
+                f"path={materialization.resolution.dataset_path} "
+                f"split={materialization.resolution.split}"
             )
         else:
             print(
                 "NeuronpediaRunner: Materialized streaming prompt dataset "
-                f"path={self.cfg.huggingface_dataset_path} "
-                f"config={self.cfg.huggingface_dataset_config_name} "
-                f"split={self.cfg.huggingface_dataset_split or 'train'}"
+                f"mode={materialization.resolution.mode} path={materialization.resolution.dataset_path} "
+                f"split={materialization.resolution.split}"
             )
-
-        return dataset
+        return dataset_source
 
     def _initialize_model(self):
         """Initialize the transformer model."""
@@ -1046,56 +1057,41 @@ class NeuronpediaRunner:
     def _shared_tokens_source_path(self) -> Path | None:
         if self.cfg.shared_tokens_file:
             return Path(self.cfg.shared_tokens_file)
-        if self.cfg.pretokenized_dataset_path:
+        materialization = getattr(self, "_prompt_dataset_materialization", None)
+        if not isinstance(materialization, PromptDatasetMaterialization):
+            return None
+        if materialization.resolution.mode == "load_from_disk":
             default_path = (
-                Path(self.cfg.pretokenized_dataset_path)
+                Path(materialization.resolution.dataset_path)
                 / f"tokens_{self.cfg.n_prompts_total}.pt"
             )
             self.cfg.shared_tokens_file = str(default_path)
             return default_path
+        if materialization.is_tokenized:
+            default_path = self._tokens_file_path()
+            self.cfg.shared_tokens_file = str(default_path)
+            return default_path
         return None
 
-    def _prepare_shared_tokens_from_pretokenized_dataset(
-        self, target_tokens_file: Path
-    ) -> Path:
-        if not self.cfg.pretokenized_dataset_path:
+    def _prepare_shared_tokens_from_prompt_dataset(self, target_tokens_file: Path) -> Path:
+        materialization = getattr(self, "_prompt_dataset_materialization", None)
+        if not isinstance(materialization, PromptDatasetMaterialization):
+            raise ValueError("A materialized prompt dataset is required to generate shared token sidecars.")
+        if not materialization.is_tokenized or materialization.token_column is None:
             raise ValueError(
-                "A pretokenized dataset path is required to generate shared token sidecars automatically."
+                "Shared prompt token sidecars require a tokenized prompt dataset with an input_ids or tokens column."
             )
 
-        dataset = load_from_disk(self.cfg.pretokenized_dataset_path)
-        if not isinstance(dataset, Dataset):
-            raise ValueError(
-                "Pretokenized Neuronpedia datasets must be saved as a single HuggingFace Dataset."
-            )
-
-        if "input_ids" in dataset.column_names:
-            tokens_column = "input_ids"
-        elif "tokens" in dataset.column_names:
-            tokens_column = "tokens"
-        else:
-            raise ValueError(
-                f"Pretokenized dataset {self.cfg.pretokenized_dataset_path} must contain an input_ids or tokens column."
-            )
-
-        dataset_metadata_path = (
-            Path(self.cfg.pretokenized_dataset_path) / "sae_lens.json"
-        )
-        pad_token_id: int | None = None
-        if dataset_metadata_path.is_file():
-            dataset_metadata = json.loads(
-                dataset_metadata_path.read_text(encoding="utf-8")
-            )
-            pad_token_id_raw = dataset_metadata.get("pad_token_id")
-            if pad_token_id_raw is not None:
-                pad_token_id = int(pad_token_id_raw)
+        dataset = materialization.dataset_source
+        tokens_column = materialization.token_column
+        pad_token_id = materialization.pad_token_id
         if pad_token_id is None:
             model_tokenizer = getattr(getattr(self, "model", None), "tokenizer", None)
             model_pad_token_id = getattr(model_tokenizer, "pad_token_id", None)
             if model_pad_token_id is not None:
                 pad_token_id = int(model_pad_token_id)
 
-        dataset_rows = len(dataset)
+        dataset_rows = len(dataset) if isinstance(dataset, Dataset) else None
         unique_sequences: set[tuple[int, ...]] = set()
         token_rows: list[torch.Tensor] = []
         effective_lengths: list[int] = []
@@ -1108,7 +1104,9 @@ class NeuronpediaRunner:
                     f"{self.cfg.n_tokens_in_prompt}: {row_tokens.numel()}"
                 )
             row_tokens = row_tokens[: self.cfg.n_tokens_in_prompt].cpu()
-            attention_mask_value = row_mapping.get("attention_mask")
+            attention_mask_value = row_mapping.get(
+                materialization.attention_mask_column or "attention_mask"
+            )
             if attention_mask_value is not None:
                 attention_mask = torch.as_tensor(attention_mask_value, dtype=torch.long)
                 effective_length = int(
@@ -1140,7 +1138,7 @@ class NeuronpediaRunner:
 
         if not token_rows:
             raise ValueError(
-                f"Pretokenized dataset {self.cfg.pretokenized_dataset_path} did not yield any prompt tokens."
+                f"Prompt dataset {materialization.resolution.dataset_path} did not yield any prompt tokens."
             )
         if (
             self.cfg.strict_shared_prompt_count
@@ -1149,9 +1147,9 @@ class NeuronpediaRunner:
             raise ValueError(
                 "Pretokenized dataset did not satisfy the requested prompt count: "
                 f"rows={len(token_rows)} requested_prompts={self.cfg.n_prompts_total} "
-                f"dataset_rows={dataset_rows} unique_rows={len(unique_sequences)} "
+                f"dataset_rows={dataset_rows if dataset_rows is not None else 'unknown'} unique_rows={len(unique_sequences)} "
                 f"deduplicate={self.cfg.deduplicate_shared_prompt_tokens} "
-                f"path={self.cfg.pretokenized_dataset_path}"
+                f"path={materialization.resolution.dataset_path}"
             )
 
         target_tokens_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1171,7 +1169,9 @@ class NeuronpediaRunner:
                     "unique_rows": len(unique_sequences),
                     "tokens_per_prompt": self.cfg.n_tokens_in_prompt,
                     "deduplicate": self.cfg.deduplicate_shared_prompt_tokens,
-                    "source_dataset_path": self.cfg.pretokenized_dataset_path,
+                    "source_dataset_mode": materialization.resolution.mode,
+                    "source_dataset_path": materialization.resolution.dataset_path,
+                    "source_metadata_path": materialization.metadata_path,
                     "effective_lengths_file": str(
                         self._effective_lengths_file_path(target_tokens_file)
                     ),
@@ -1188,9 +1188,9 @@ class NeuronpediaRunner:
         )
         print(
             "NeuronpediaRunner: Prepared shared prompt tokens "
-            f"rows={len(token_rows)} dataset_rows={dataset_rows} unique_rows={len(unique_sequences)} "
+            f"rows={len(token_rows)} dataset_rows={dataset_rows if dataset_rows is not None else 'unknown'} unique_rows={len(unique_sequences)} "
             f"requested_prompts={self.cfg.n_prompts_total} tokens_per_prompt={self.cfg.n_tokens_in_prompt} "
-            f"deduplicate={self.cfg.deduplicate_shared_prompt_tokens} path={target_tokens_file}"
+            f"deduplicate={self.cfg.deduplicate_shared_prompt_tokens} mode={materialization.resolution.mode} path={target_tokens_file}"
         )
         return target_tokens_file
 
@@ -1202,6 +1202,11 @@ class NeuronpediaRunner:
     def _ensure_shared_tokens_source_file(
         self, *, require_effective_lengths: bool = False
     ) -> Path | None:
+        if getattr(self, "_prompt_dataset_materialization", None) is None and (
+            self.cfg.pretokenized_dataset_path or self.cfg.prompt_dataset_mode in {"load_from_disk", "legacy_jsonl"}
+        ):
+            self._materialize_prompt_dataset()
+
         source = self._shared_tokens_source_path()
         if source is None:
             return None
@@ -1212,8 +1217,9 @@ class NeuronpediaRunner:
         ):
             return source
 
-        if self.cfg.pretokenized_dataset_path:
-            return self._prepare_shared_tokens_from_pretokenized_dataset(source)
+        materialization = getattr(self, "_prompt_dataset_materialization", None)
+        if isinstance(materialization, PromptDatasetMaterialization) and materialization.is_tokenized:
+            return self._prepare_shared_tokens_from_prompt_dataset(source)
 
         candidate_paths = (
             (source, effective_lengths_file) if require_effective_lengths else (source,)
@@ -1287,20 +1293,14 @@ class NeuronpediaRunner:
             return best_pair
         return capped_prompts, capped_acts
 
-    def _normalized_prompt_bucket_ceilings(self) -> tuple[int, ...]:
-        bucket_ceilings = {
-            int(value)
-            for value in self.cfg.prompt_bucket_ceilings
-            if 0 < int(value) <= self.cfg.n_tokens_in_prompt
-        }
-        if not bucket_ceilings:
-            bucket_ceilings = {
-                value
-                for value in DEFAULT_PROMPT_BUCKET_CEILINGS
-                if 0 < value < self.cfg.n_tokens_in_prompt
-            }
-        bucket_ceilings.add(self.cfg.n_tokens_in_prompt)
-        return tuple(sorted(bucket_ceilings))
+    def _normalized_prompt_bucket_ceilings(
+        self, effective_lengths: list[int]
+    ) -> tuple[int, ...]:
+        return derive_prompt_bucket_ceilings(
+            effective_lengths,
+            max_context_size=self.cfg.n_tokens_in_prompt,
+            explicit_bucket_ceilings=self.cfg.prompt_bucket_ceilings,
+        )
 
     def _load_prompt_effective_lengths(self, tokens: torch.Tensor) -> list[int]:
         effective_lengths_path = self._effective_lengths_file_path(
@@ -1354,7 +1354,7 @@ class NeuronpediaRunner:
 
         bucket_entries: list[dict[str, Any]] = []
         lower_exclusive = 0
-        for bucket_ceiling in self._normalized_prompt_bucket_ceilings():
+        for bucket_ceiling in self._normalized_prompt_bucket_ceilings(effective_lengths):
             bucket_prompt_count = sum(
                 1
                 for effective_length in effective_lengths
@@ -1519,6 +1519,8 @@ class NeuronpediaRunner:
 
         target = self._tokens_file_path()
         target.parent.mkdir(parents=True, exist_ok=True)
+        if source == target:
+            return
         self._stage_shared_file(source, target)
 
         source_base_name = (
@@ -2200,11 +2202,33 @@ def main():
         ),
     )
     parser.add_argument(
-        "--dataset-path", required=True, help="HuggingFace dataset path"
+        "--dataset-path",
+        "--prompt-dataset-path",
+        dest="dataset_path",
+        default=None,
+        help="Prompt dataset path or Hugging Face dataset identifier.",
     )
-    parser.add_argument("--dataset-config-name", default=None)
-    parser.add_argument("--dataset-split", default=None)
-    parser.add_argument("--dataset-text-field", default=None)
+    parser.add_argument(
+        "--prompt-dataset-mode",
+        choices=("load_dataset", "load_from_disk", "legacy_jsonl"),
+        default="load_dataset",
+        help=(
+            "Prompt dataset loading mode. Use load_dataset for builder-backed datasets, load_from_disk for local "
+            "Dataset.save_to_disk() prompt caches, and legacy_jsonl only for deprecated legacy JSONL dashboard "
+            "compatibility."
+        ),
+    )
+    parser.add_argument("--dataset-config-name", "--prompt-dataset-name", dest="dataset_config_name", default=None)
+    parser.add_argument("--dataset-split", "--prompt-dataset-split", dest="dataset_split", default=None)
+    parser.add_argument("--dataset-text-field", "--prompt-dataset-text-field", dest="dataset_text_field", default=None)
+    parser.add_argument("--prompt-dataset-data-files", nargs="+", default=None)
+    parser.add_argument("--prompt-dataset-data-dir", default=None)
+    parser.add_argument("--prompt-dataset-metadata-path", default=None)
+    parser.add_argument(
+        "--prompt-dataset-trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument(
         "--pretokenized-dataset-path",
         default=None,
@@ -2258,8 +2282,9 @@ def main():
         "--prompt-bucket-ceilings",
         default=None,
         help=(
-            "Optional comma-separated inclusive prompt-length ceilings for auto prompt bucketing. Defaults to "
-            "64,128,192,256 plus n_tokens_in_prompt."
+            "Optional comma-separated inclusive prompt-length ceilings for auto prompt bucketing. When omitted, the "
+            "runner derives ceilings from staged effective-length quantiles plus the maximum observed effective "
+            "length."
         ),
     )
     parser.add_argument(
@@ -2713,6 +2738,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.dataset_path is None and args.pretokenized_dataset_path is None:
+        parser.error("Provide --dataset-path/--prompt-dataset-path or --pretokenized-dataset-path.")
+
     prompt_bucket_ceilings: tuple[int, ...] = ()
     if args.prompt_bucket_ceilings:
         prompt_bucket_ceilings = tuple(
@@ -2727,10 +2755,19 @@ def main():
         np_set_name=args.np_set_name,
         np_sae_id_suffix=args.np_sae_id_suffix,
         from_local_sae=args.from_local_sae,
-        huggingface_dataset_path=args.dataset_path,
+        huggingface_dataset_path=args.dataset_path or "",
         huggingface_dataset_config_name=args.dataset_config_name,
         huggingface_dataset_split=args.dataset_split,
         huggingface_dataset_text_field=args.dataset_text_field,
+        prompt_dataset_mode=args.prompt_dataset_mode,
+        prompt_dataset_path=args.dataset_path,
+        prompt_dataset_name=args.dataset_config_name,
+        prompt_dataset_split=args.dataset_split,
+        prompt_dataset_text_field=args.dataset_text_field,
+        prompt_dataset_data_files=tuple(args.prompt_dataset_data_files or ()),
+        prompt_dataset_data_dir=args.prompt_dataset_data_dir,
+        prompt_dataset_metadata_path=args.prompt_dataset_metadata_path,
+        prompt_dataset_trust_remote_code=args.prompt_dataset_trust_remote_code,
         pretokenized_dataset_path=args.pretokenized_dataset_path,
         shared_tokens_file=args.shared_tokens_file,
         deduplicate_shared_prompt_tokens=args.deduplicate_shared_prompt_tokens,

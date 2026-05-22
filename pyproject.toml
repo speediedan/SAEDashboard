@@ -49,6 +49,7 @@ priority = "explicit"
 
 [tool.poetry.scripts]
 neuronpedia-runner = "sae_dashboard.neuronpedia.neuronpedia_runner:main"
+neuronpedia-pretokenize = "sae_dashboard.neuronpedia.prompt_pretokenization:main"
 
 [tool.isort]
 profile = "black"
