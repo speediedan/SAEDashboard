@@ -104,7 +104,7 @@ class SaeVisConfig:
     logits_histogram_backend: Literal["object", "arrow"] = "object"
     activation_histogram_backend: Literal["torch", "polars"] = "torch"
     defer_component_construction: bool = False
-    sequence_selection_backend: Literal["eager_cpu", "lazy_gpu"] = "eager_cpu"
+    sequence_selection_backend: Literal["legacy_json_cpu", "lazy_gpu"] = "legacy_json_cpu"
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"

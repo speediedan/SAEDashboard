@@ -45,7 +45,7 @@ class _FakeSequenceDataGenerator:
         resid_post: Tensor | None,
         feature_resid_dir: Tensor,
         selection_mask: Tensor | None = None,
-        selection_backend: SequenceSelectionBackend = "eager_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
     ) -> list[Any]:
         del (
             feat_acts,
@@ -64,7 +64,7 @@ class _FakeSequenceDataGenerator:
         resid_post: Tensor | None,
         feature_resid_dir: Tensor,
         selection_mask: Tensor | None = None,
-        selection_backend: SequenceSelectionBackend = "eager_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
     ) -> SequenceCoordinateTable:
         del (
             feat_acts,
@@ -117,7 +117,7 @@ def _read_columnar_table(table_path: Path) -> Any:
     raise AssertionError(f"Unsupported columnar table suffix: {table_path.suffix}")
 
 
-def test_SaeVisRunner_cpu_eager_profiling_surfaces_stage_timings_and_artifacts(
+def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

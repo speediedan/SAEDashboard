@@ -10,12 +10,27 @@ from transformer_lens import HookedTransformer
 
 import sae_dashboard.neuronpedia.neuronpedia_runner as neuronpedia_runner_module
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
-from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
+from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
+    NeuronpediaRunnerConfig,
+    is_legacy_dashboard_path,
+    warn_if_deprecated_legacy_dashboard_path,
+)
 from sae_dashboard.neuronpedia.prompt_datasets import (
     PromptDatasetConfig,
     load_prompt_dataset,
     resolve_prompt_dataset,
 )
+
+LEGACY_BASELINE_CONTRACT_PATH = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "legacy_dashboard_gen_baseline"
+    / "preserved_baseline_contract.json"
+)
+
+
+def _load_legacy_baseline_contract() -> dict[str, Any]:
+    return json.loads(LEGACY_BASELINE_CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -99,6 +114,59 @@ def test_materialize_pretokenized_dataset(
     assert isinstance(materialized_dataset, Dataset)
     assert len(materialized_dataset) == 2
     assert materialized_dataset.column_names == ["input_ids"]
+
+
+def test_legacy_preserved_baseline_contract_maps_to_deprecated_legacy_runner() -> None:
+    baseline = _load_legacy_baseline_contract()
+
+    assert baseline["preserved_baseline_lineage"] == {
+        "saedashboard": "7886eaa",
+        "saelens": "3eea6552",
+        "neuronpedia": "5a33f17",
+    }
+
+    for scenario_name, scenario in baseline["scenarios"].items():
+        prompt_contract = scenario["prompt_contract"]
+        legacy_contract = scenario["legacy_contract"]
+        shape = scenario["shape"]
+        prompt_dataset_path = (
+            f"/preserved-baseline/{scenario_name}/{prompt_contract['split']}.jsonl"
+        )
+        cfg = NeuronpediaRunnerConfig(
+            sae_set="gemma-scope-2-1b-it-transcoders-all",
+            sae_path="layer_9_width_262k_l0_small_affine",
+            outputs_dir="test_outputs",
+            prompt_dataset_mode=prompt_contract["mode"],
+            prompt_dataset_path=prompt_dataset_path,
+            prompt_dataset_split=prompt_contract["split"],
+            n_tokens_in_prompt=prompt_contract["context_size"],
+            n_features_at_a_time=shape["n_features_per_batch"],
+            n_prompts_in_forward_pass=shape["n_prompts_in_forward_pass"],
+            dashboard_output_format=legacy_contract["dashboard_output_format"],
+            sequence_selection_backend=legacy_contract["sequence_selection_backend"],
+        )
+
+        assert is_legacy_dashboard_path(cfg)
+        with pytest.deprecated_call(match="legacy JSON dashboard path"):
+            warn_if_deprecated_legacy_dashboard_path(cfg)
+        with pytest.deprecated_call(match="legacy_jsonl"):
+            resolution = resolve_prompt_dataset(
+                PromptDatasetConfig(
+                    dataset_path=prompt_dataset_path,
+                    mode=prompt_contract["mode"],
+                    split=prompt_contract["split"],
+                    streaming=False,
+                )
+            )
+        assert resolution.loader_api == 'load_dataset("json", data_files=...)'
+        assert resolution.data_files == {
+            prompt_contract["split"]: prompt_dataset_path
+        }
+        assert prompt_contract["required_files"] == [
+            "train.jsonl",
+            "sae_lens.json",
+        ]
+
 
 
 def test_initialize_model_hooked_uses_no_processing_loader(

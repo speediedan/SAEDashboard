@@ -21,7 +21,7 @@ from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.utils_fns import TopK, sample_unique_indices
 from sae_dashboard.vector_vis_data import VectorVisConfig
 
-SequenceSelectionBackend = Literal["eager_cpu", "lazy_gpu"]
+SequenceSelectionBackend = Literal["legacy_json_cpu", "lazy_gpu"]
 
 
 def _parse_activation_group_name(group_name: str) -> tuple[float, float, float]:
@@ -697,7 +697,7 @@ class SequenceDataGenerator:
         resid_post: Float[Tensor, "batch seq d_model"],
         feature_resid_dir: Float[Tensor, "d_model"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
-        selection_backend: SequenceSelectionBackend = "eager_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
     ) -> SequenceMultiGroupData:
         sequence_coordinate_table = self.get_sequence_coordinate_table(
             feat_acts=feat_acts,
@@ -717,7 +717,7 @@ class SequenceDataGenerator:
         resid_post: Float[Tensor, "batch seq d_model"],
         feature_resid_dir: Float[Tensor, "d_model"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
-        selection_backend: SequenceSelectionBackend = "eager_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
     ) -> SequenceCoordinateTable:
         """
         This function returns the compact selected-sequence table which underlies the right-hand sequence visualizations.
@@ -749,7 +749,7 @@ class SequenceDataGenerator:
                 Optional mask selecting valid token positions for padded prompt batches.
             selection_backend:
                 Candidate-selection backend to use before compact sequence table construction. The default keeps the
-                current eager CPU selector; `"lazy_gpu"` enables the guarded candidate-vector substitute path.
+                preserved legacy JSON CPU selector; `"lazy_gpu"` enables the guarded candidate-vector substitute path.
 
         Returns:
             SequenceCoordinateTable
@@ -842,7 +842,7 @@ class SequenceDataGenerator:
         feat_acts: Float[Tensor, "batch seq"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
     ):
-        return self.get_indices_dict_eager_cpu(
+        return self.get_indices_dict_legacy_json_cpu(
             buffer, feat_acts, selection_mask=selection_mask
         )
 
@@ -853,7 +853,7 @@ class SequenceDataGenerator:
         feat_acts: Float[Tensor, "batch seq"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
     ):
-        if selection_backend == "eager_cpu":
+        if selection_backend == "legacy_json_cpu":
             return self.get_indices_dict(
                 buffer, feat_acts, selection_mask=selection_mask
             )
@@ -863,7 +863,7 @@ class SequenceDataGenerator:
             )
         raise ValueError(f"Unsupported sequence selection backend: {selection_backend}")
 
-    def get_indices_dict_eager_cpu(
+    def get_indices_dict_legacy_json_cpu(
         self,
         buffer: tuple[int, int] | None,
         feat_acts: Float[Tensor, "batch seq"],

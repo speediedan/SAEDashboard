@@ -44,6 +44,7 @@ from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
     DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
     NeuronpediaRunnerConfig,
+    warn_if_deprecated_legacy_dashboard_path,
 )
 from sae_dashboard.neuronpedia.prompt_bucketing import derive_prompt_bucket_ceilings
 from sae_dashboard.neuronpedia.prompt_datasets import (
@@ -135,6 +136,7 @@ class NeuronpediaRunner:
         cfg: NeuronpediaRunnerConfig,
     ):
         self.cfg = cfg
+        warn_if_deprecated_legacy_dashboard_path(cfg)
 
         # Fail fast if Neuronpedia export was requested but required metadata
         # is missing — better to surface this before spending hours generating
@@ -2464,8 +2466,8 @@ def main():
     )
     parser.add_argument(
         "--sequence-selection-backend",
-        choices=("eager_cpu", "lazy_gpu"),
-        default="eager_cpu",
+        choices=("legacy_json_cpu", "lazy_gpu"),
+        default="legacy_json_cpu",
         help="Sequence candidate-selection backend.",
     )
     parser.add_argument(

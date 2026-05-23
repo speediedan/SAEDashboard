@@ -399,7 +399,7 @@ def test_get_sequence_coordinate_table_matches_get_sequences_data(
     assert nested_from_table == nested_direct
 
 
-def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_eager_cpu() -> None:
+def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy_json_cpu() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 4  # type: ignore
@@ -431,13 +431,13 @@ def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_eager_cpu() ->
     resid_post = torch.empty(0)
     feature_resid_dir = torch.empty(0)
 
-    eager_table = generator.get_sequence_coordinate_table(
+    legacy_table = generator.get_sequence_coordinate_table(
         feat_acts=feat_acts,
         feat_logits=feat_logits,
         resid_post=resid_post,
         feature_resid_dir=feature_resid_dir,
         selection_mask=selection_mask,
-        selection_backend="eager_cpu",
+        selection_backend="legacy_json_cpu",
     )
     lazy_table = generator.get_sequence_coordinate_table(
         feat_acts=feat_acts,
@@ -450,7 +450,7 @@ def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_eager_cpu() ->
 
     assert (
         lazy_table.to_sequence_multi_group_data()
-        == eager_table.to_sequence_multi_group_data()
+        == legacy_table.to_sequence_multi_group_data()
     )
 
 
@@ -501,7 +501,7 @@ def test_get_sequences_data_selection_mask_excludes_ignored_padding_positions() 
     )
 
 
-def test_get_indices_dict_lazy_gpu_matches_eager_cpu_indices_with_selection_mask() -> (
+def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selection_mask() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -529,8 +529,8 @@ def test_get_indices_dict_lazy_gpu_matches_eager_cpu_indices_with_selection_mask
     )
 
     random.seed(12345)
-    eager_indices_dict, eager_indices_bold, eager_n_bold = (
-        generator.get_indices_dict_eager_cpu(
+    legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
+        generator.get_indices_dict_legacy_json_cpu(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -545,14 +545,14 @@ def test_get_indices_dict_lazy_gpu_matches_eager_cpu_indices_with_selection_mask
         )
     )
 
-    assert list(lazy_indices_dict) == list(eager_indices_dict)
-    assert lazy_n_bold == eager_n_bold
-    assert torch.equal(lazy_indices_bold, eager_indices_bold)
-    for group_name, eager_indices in eager_indices_dict.items():
-        assert torch.equal(lazy_indices_dict[group_name], eager_indices)
+    assert list(lazy_indices_dict) == list(legacy_indices_dict)
+    assert lazy_n_bold == legacy_n_bold
+    assert torch.equal(lazy_indices_bold, legacy_indices_bold)
+    for group_name, legacy_indices in legacy_indices_dict.items():
+        assert torch.equal(lazy_indices_dict[group_name], legacy_indices)
 
 
-def test_get_indices_dict_lazy_gpu_matches_eager_cpu_for_bfloat16_interval_boundaries() -> (
+def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_for_bfloat16_interval_boundaries() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -573,8 +573,8 @@ def test_get_indices_dict_lazy_gpu_matches_eager_cpu_for_bfloat16_interval_bound
     )
 
     random.seed(12345)
-    eager_indices_dict, eager_indices_bold, eager_n_bold = (
-        generator.get_indices_dict_eager_cpu(
+    legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
+        generator.get_indices_dict_legacy_json_cpu(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -589,11 +589,11 @@ def test_get_indices_dict_lazy_gpu_matches_eager_cpu_for_bfloat16_interval_bound
         )
     )
 
-    assert list(lazy_indices_dict) == list(eager_indices_dict)
-    assert lazy_n_bold == eager_n_bold
-    assert torch.equal(lazy_indices_bold, eager_indices_bold)
-    for group_name, eager_indices in eager_indices_dict.items():
-        assert torch.equal(lazy_indices_dict[group_name], eager_indices)
+    assert list(lazy_indices_dict) == list(legacy_indices_dict)
+    assert lazy_n_bold == legacy_n_bold
+    assert torch.equal(lazy_indices_bold, legacy_indices_bold)
+    for group_name, legacy_indices in legacy_indices_dict.items():
+        assert torch.equal(lazy_indices_dict[group_name], legacy_indices)
 
 
 def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() -> (
@@ -617,7 +617,7 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
         dtype=torch.bool,
     )
 
-    eager_indices_dict, _, _ = generator.get_indices_dict_eager_cpu(
+    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy_json_cpu(
         generator.buffer,
         feat_acts_float32,
         selection_mask=selection_mask,
@@ -640,19 +640,19 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
             and any(torch.equal(group_index, target_index) for group_index in group_indices)
         ]
 
-    eager_groups = interval_groups_for_target(eager_indices_dict)
+    legacy_groups = interval_groups_for_target(legacy_indices_dict)
     lazy_groups = interval_groups_for_target(lazy_indices_dict)
 
     assert float(feat_acts_bfloat16[0, 0].float().item()) == pytest.approx(0.5)
-    assert len(eager_groups) == 1
-    assert eager_groups[0].startswith("INTERVAL 0.500 - 0.750")
+    assert len(legacy_groups) == 1
+    assert legacy_groups[0].startswith("INTERVAL 0.500 - 0.750")
     assert len(lazy_groups) == 2
     assert any(group.startswith("INTERVAL 0.250 - 0.500") for group in lazy_groups)
     assert any(group.startswith("INTERVAL 0.500 - 0.750") for group in lazy_groups)
 
 
 @pytest.mark.xfail(
-    reason="Phase 4 planned half-open interval semantics are not implemented yet."
+    reason="Planned half-open interval semantics are not implemented yet."
 )
 def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins() -> (
     None
@@ -675,7 +675,7 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
     )
 
     random.seed(12345)
-    eager_indices_dict, _, _ = generator.get_indices_dict_eager_cpu(
+    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy_json_cpu(
         generator.buffer,
         feat_acts,
         selection_mask=selection_mask,
@@ -699,8 +699,8 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
             and any(torch.equal(group_index, target_index) for group_index in group_indices)
         ]
 
-    eager_groups = interval_groups_for_target(eager_indices_dict)
+    legacy_groups = interval_groups_for_target(legacy_indices_dict)
     lazy_groups = interval_groups_for_target(lazy_indices_dict)
 
-    assert eager_groups == ["INTERVAL 0.500 - 0.750"]
+    assert legacy_groups == ["INTERVAL 0.500 - 0.750"]
     assert lazy_groups == ["INTERVAL 0.500 - 0.750"]

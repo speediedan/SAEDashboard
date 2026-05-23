@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -5,6 +6,23 @@ DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
 DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT = 4.0
 DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO = 8
+LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE = (
+    "The legacy JSON dashboard path (dashboard_output_format='legacy_json' with "
+    "sequence_selection_backend='legacy_json_cpu') is deprecated and retained only for compatibility/baseline checks. "
+    "Prefer dashboard_output_format='columnar' with sequence_selection_backend='lazy_gpu' for new runs."
+)
+
+
+def is_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> bool:
+    return (
+        cfg.dashboard_output_format == "legacy_json"
+        and cfg.sequence_selection_backend == "legacy_json_cpu"
+    )
+
+
+def warn_if_deprecated_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> None:
+    if is_legacy_dashboard_path(cfg):
+        warnings.warn(LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
 
 
 @dataclass
@@ -128,7 +146,7 @@ class NeuronpediaRunnerConfig:
     logits_histogram_backend: str = "arrow"
     activation_histogram_backend: str = "torch"
     defer_component_construction: bool = False
-    sequence_selection_backend: str = "eager_cpu"
+    sequence_selection_backend: str = "legacy_json_cpu"
     dashboard_output_format: str = "legacy_json"
     columnar_artifact_format: str = "arrow"
     columnar_emit_sequence_rows: bool = False
