@@ -4,6 +4,7 @@ import pytest
 import torch
 from transformer_lens import HookedTransformer
 
+from sae_dashboard.neuronpedia import neuronpedia_runner as runner_module
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
 
@@ -53,6 +54,49 @@ def test_get_tokens_no_duplicates(
     assert (
         len(torch.unique(tokens_cpu, dim=0)) == neuronpedia_runner.cfg.n_prompts_total
     )
+
+
+def test_run_neuronpedia_export_uses_neuronpedia_model_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = NeuronpediaRunnerConfig(
+        sae_set="sae/repo",
+        sae_path="blocks.5.hook_resid_pre",
+        np_set_name="resid-pre",
+        outputs_dir=str(tmp_path / "dashboards"),
+        output_neuronpedia_exports=True,
+        neuronpedia_exports_dir=str(tmp_path / "exports"),
+        neuronpedia_creator_name="Test Creator",
+        neuronpedia_release_id="test-release",
+        neuronpedia_release_title="Test Release",
+        neuronpedia_release_url="https://example.com/release",
+        neuronpedia_source_set_description="Residual stream",
+        neuronpedia_model_name="neuronpedia-model",
+    )
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = cfg
+    runner.layer = 5
+    runner.model_id = "hf-org/hf-model-path"
+    runner.hook_name = "blocks.5.hook_resid_pre"
+
+    captured: dict[str, runner_module.NeuronpediaExportConfig] = {}
+
+    def fake_export_neuronpedia_dashboards(
+        export_cfg: runner_module.NeuronpediaExportConfig,
+    ) -> str:
+        captured["export_cfg"] = export_cfg
+        return str(tmp_path / "exports" / "neuronpedia-model" / "5-resid-pre")
+
+    monkeypatch.setattr(
+        runner_module,
+        "export_neuronpedia_dashboards",
+        fake_export_neuronpedia_dashboards,
+    )
+
+    runner._run_neuronpedia_export()
+
+    assert captured["export_cfg"].exports_dir == str(tmp_path / "exports")
+    assert captured["export_cfg"].model_name == "neuronpedia-model"
 
 
 # def test_add_prefix_suffix_to_tokens(neuronpedia_runner: NeuronpediaRunner) -> None:

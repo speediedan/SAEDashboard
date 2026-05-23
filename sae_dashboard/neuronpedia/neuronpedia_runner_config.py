@@ -123,10 +123,10 @@ class NeuronpediaRunnerConfig:
     neuronpedia_release_url: Optional[str] = None
     neuronpedia_source_set_description: Optional[str] = None
 
-    # Override the model name written to the export. Used as ``Model.id``,
-    # the export ``{model_name}/`` subdirectory, and ``modelId`` on every
-    # Feature / Activation / Source / SourceSet row. Defaults to the
-    # TransformerLens model name auto-detected from the SAE config.
+    # Model name written to the export. Used as ``Model.id``, the export
+    # ``{model_name}/`` subdirectory, and ``modelId`` on every Feature /
+    # Activation / Source / SourceSet row. Required when
+    # ``output_neuronpedia_exports`` is True.
     neuronpedia_model_name: Optional[str] = None
 
     # Override values for the Source row. Defaults to ``sae_set`` /

@@ -1194,6 +1194,7 @@ class NeuronpediaRunner:
             "neuronpedia_source_set_description": (
                 self.cfg.neuronpedia_source_set_description
             ),
+            "neuronpedia_model_name": self.cfg.neuronpedia_model_name,
         }
         missing = [name for name, value in required_fields.items() if not value]
         if missing:
@@ -1217,6 +1218,7 @@ class NeuronpediaRunner:
         assert self.cfg.neuronpedia_release_title is not None
         assert self.cfg.neuronpedia_release_url is not None
         assert self.cfg.neuronpedia_source_set_description is not None
+        assert self.cfg.neuronpedia_model_name is not None
         assert self.layer is not None
         assert self.model_id is not None
 
@@ -1233,7 +1235,7 @@ class NeuronpediaRunner:
             release_id=self.cfg.neuronpedia_release_id,
             release_title=self.cfg.neuronpedia_release_title,
             url=self.cfg.neuronpedia_release_url,
-            model_name=self.cfg.neuronpedia_model_name or self.model_id,
+            model_name=self.cfg.neuronpedia_model_name,
             neuronpedia_source_set_id=self.cfg.np_set_name,
             neuronpedia_source_set_description=(
                 self.cfg.neuronpedia_source_set_description
@@ -1441,7 +1443,8 @@ def main():
             "per-batch features and activations). Requires "
             "--neuronpedia-creator-name, --neuronpedia-release-id, "
             "--neuronpedia-release-title, --neuronpedia-release-url, "
-            "--neuronpedia-source-set-description, and --np-set-name."
+            "--neuronpedia-source-set-description, --neuronpedia-model-name, "
+            "and --np-set-name."
         ),
     )
     parser.add_argument(
@@ -1451,7 +1454,7 @@ def main():
         help=(
             "Where to write Neuronpedia bulk-import exports. Defaults to "
             "'<output-dir>/../neuronpedia_exports'. Files end up under "
-            "{exports-dir}/{model_id}/{layer-source_set}/."
+            "{exports-dir}/{neuronpedia-model-name}/{layer-source_set}/."
         ),
     )
     parser.add_argument(
@@ -1506,8 +1509,8 @@ def main():
         help=(
             "Override the model name written to the export. Used as Model.id, "
             "the export '{model_name}/' subdirectory, and modelId on every "
-            "feature/activation/source/sourceset row. Defaults to the "
-            "TransformerLens model name auto-detected from the SAE config."
+            "feature/activation/source/sourceset row. Required with "
+            "--output-neuronpedia-exports."
         ),
     )
     parser.add_argument(
