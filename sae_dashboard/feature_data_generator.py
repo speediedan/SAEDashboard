@@ -109,6 +109,17 @@ class FeatureDataGenerator:
         else:
             self.dfa_calculator = None
 
+    def _transfer_feature_acts_for_output(
+        self,
+        feature_acts_for_output: Tensor,
+    ) -> Tensor:
+        if (
+            self.cfg.dashboard_output_format == "legacy_json"
+            and self.cfg.sequence_selection_backend == "legacy_json_cpu"
+        ):
+            return feature_acts_for_output.to(device="cpu")
+        return feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
+
     @staticmethod
     def _current_rss_gib() -> float | None:
         status_path = Path("/proc/self/status")
@@ -580,11 +591,11 @@ class FeatureDataGenerator:
                     target_seq_len=self.full_sequence_length,
                 )
 
-                # Persist prompt-wide feature activations on CPU so each minibatch does
-                # not stay resident on GPU until the final concat. Downcast to bfloat16
-                # on host so larger feature batches fit without walking back the GPU fix.
-                feature_acts_cpu = feature_acts_for_output.to(
-                    device="cpu", dtype=torch.bfloat16
+                # Keep the deprecated legacy JSON CPU compatibility lane at the
+                # baseline activation precision while still downcasting newer
+                # paths to control host memory growth.
+                feature_acts_cpu = self._transfer_feature_acts_for_output(
+                    feature_acts_for_output
                 )
 
             peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (

@@ -102,6 +102,10 @@ def _capture_perf_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, obje
 
     monkeypatch.setattr(perf_logging, "log_perf_event", _record)
     monkeypatch.setattr(sae_vis_runner_module, "log_perf_event", _record)
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.log_perf_event",
+        _record,
+    )
     return perf_events
 
 
@@ -131,13 +135,27 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
         "sae_dashboard.sae_vis_runner.get_features_table_data",
         lambda **kwargs: {
             name: [value] for name, value in FeatureTablesData().__dict__.items()
         },
     )
     monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+    monkeypatch.setattr(
         "sae_dashboard.sae_vis_runner.get_logits_table_data",
+        lambda **kwargs: LogitsTableData(),
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_logits_table_data",
         lambda **kwargs: LogitsTableData(),
     )
 
@@ -204,10 +222,10 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
     assert artifact_payload["valid_token_count"] == 1
 
     assert sae_vis_data.feature_stats.max == [1.0]
-    assert sae_vis_data.feature_stats.frac_nonzero == [1.0]
+    assert sae_vis_data.feature_stats.frac_nonzero == [0.5]
     assert (
         sae_vis_data.feature_data_dict[0].acts_histogram_data.title
-        == "ACTIVATIONS<br>DENSITY = 100.000%"
+        == "ACTIVATIONS<br>DENSITY = 50.000%"
     )
 
 

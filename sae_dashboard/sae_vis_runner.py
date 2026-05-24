@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Union
+from typing import Any, Iterable, List, Union, cast
 
 import einops
 import numpy as np
@@ -36,6 +36,15 @@ from sae_dashboard.feature_data_generator import FeatureDataGenerator
 from sae_dashboard.huggingface_model_wrapper import (
     HFActivationConfig,
     HuggingFaceModelWrapper,
+)
+from sae_dashboard.neuronpedia.legacy_json_cpu import (
+    sae_vis_runner as legacy_json_cpu_sae_vis_runner,
+)
+from sae_dashboard.neuronpedia.legacy_json_cpu.runner import (
+    is_preserved_legacy_json_cpu_path,
+)
+from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
+    LegacyJSONCPUSequenceDataGenerator,
 )
 from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import (
@@ -183,6 +192,10 @@ class SaeVisRunner:
     @property
     def _columnar_enabled(self) -> bool:
         return self.cfg.dashboard_output_format == "columnar"
+
+    @property
+    def _preserved_legacy_json_cpu_enabled(self) -> bool:
+        return is_preserved_legacy_json_cpu_path(self.cfg)
 
     @property
     def _columnar_suffix(self) -> str:
@@ -1261,7 +1274,12 @@ class SaeVisRunner:
             if self.cfg.use_huggingface
             else _resolve_unembed_matrix(model)
         )
-        sequence_data_generator = SequenceDataGenerator(
+        sequence_data_generator_cls = (
+            LegacyJSONCPUSequenceDataGenerator
+            if self._preserved_legacy_json_cpu_enabled
+            else SequenceDataGenerator
+        )
+        sequence_data_generator = sequence_data_generator_cls(
             cfg=self.cfg,
             tokens=tokens,
             W_U=unembed_matrix,
@@ -1292,20 +1310,43 @@ class SaeVisRunner:
                         torch.cuda.empty_cache()
                 continue
 
-            sae_vis_data.update(
-                self._run_object_feature_batch(
-                    feature_batch_index=feature_batch_index,
-                    features=features,
-                    tokens=tokens,
-                    model=model,
-                    encoder=encoder,
-                    unembed_matrix=unembed_matrix,
-                    feature_data_generator=feature_data_generator,
-                    sequence_data_generator=sequence_data_generator,
-                    progress=progress,
-                    all_consolidated_dfa_results=all_consolidated_dfa_results,
+            if self._preserved_legacy_json_cpu_enabled:
+                sae_vis_data.update(
+                    legacy_json_cpu_sae_vis_runner.run_object_feature_batch(
+                        self,
+                        feature_batch_index=feature_batch_index,
+                        features=features,
+                        tokens=tokens,
+                        model=cast(HookedSAETransformer, model),
+                        encoder=encoder,
+                        unembed_matrix=unembed_matrix,
+                        feature_data_generator=feature_data_generator,
+                        sequence_data_generator=cast(
+                            LegacyJSONCPUSequenceDataGenerator,
+                            sequence_data_generator,
+                        ),
+                        progress=progress,
+                        all_consolidated_dfa_results=all_consolidated_dfa_results,
+                    )
                 )
-            )
+            else:
+                sae_vis_data.update(
+                    self._run_object_feature_batch(
+                        feature_batch_index=feature_batch_index,
+                        features=features,
+                        tokens=tokens,
+                        model=cast(HookedSAETransformer, model),
+                        encoder=encoder,
+                        unembed_matrix=unembed_matrix,
+                        feature_data_generator=feature_data_generator,
+                        sequence_data_generator=cast(
+                            SequenceDataGenerator,
+                            sequence_data_generator,
+                        ),
+                        progress=progress,
+                        all_consolidated_dfa_results=all_consolidated_dfa_results,
+                    )
+                )
 
             if self.cfg.cleanup_each_minibatch:
                 gc.collect()

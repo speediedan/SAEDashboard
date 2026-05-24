@@ -18,7 +18,12 @@ from sae_dashboard.components import (
 )
 from sae_dashboard.components_config import SequencesConfig
 from sae_dashboard.sae_vis_data import SaeVisConfig
-from sae_dashboard.utils_fns import TopK, sample_unique_indices
+from sae_dashboard.utils_fns import (
+    TopK,
+    k_largest_indices,
+    random_range_indices,
+    sample_unique_indices,
+)
 from sae_dashboard.vector_vis_data import VectorVisConfig
 
 SequenceSelectionBackend = Literal["legacy_json_cpu", "lazy_gpu"]
@@ -863,6 +868,31 @@ class SequenceDataGenerator:
             )
         raise ValueError(f"Unsupported sequence selection backend: {selection_backend}")
 
+    def _get_legacy_selection_views(
+        self,
+        feat_acts: Float[Tensor, "batch seq"],
+        buffer: tuple[int, int] | None,
+        selection_mask: Int[Tensor, "batch seq"] | None = None,
+    ) -> tuple[Tensor, Tensor | None, int]:
+        if buffer is None:
+            feat_acts_view = feat_acts
+            selection_mask_view = selection_mask
+            col_offset = 0
+        else:
+            feat_acts_view = feat_acts[:, buffer[0] : buffer[1]]
+            selection_mask_view = (
+                None if selection_mask is None else selection_mask[:, buffer[0] : buffer[1]]
+            )
+            col_offset = buffer[0]
+
+        if selection_mask_view is not None:
+            selection_mask_view = selection_mask_view.to(
+                device=feat_acts_view.device,
+                dtype=torch.bool,
+            )
+
+        return feat_acts_view, selection_mask_view, col_offset
+
     def get_indices_dict_legacy_json_cpu(
         self,
         buffer: tuple[int, int] | None,
@@ -873,7 +903,7 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices, candidate_flat_indices = (
+        candidate_mask, _, candidate_flat_indices = (
             self._get_candidate_mask_and_indices(
                 feat_acts,
                 buffer,
@@ -906,17 +936,47 @@ class SequenceDataGenerator:
                 candidate_token_count - candidate_positive_count - candidate_zero_count
             )
 
+        feat_acts_view, selection_mask_view, col_offset = self._get_legacy_selection_views(
+            feat_acts,
+            buffer,
+            selection_mask=selection_mask,
+        )
+
         # Get the top-activating tokens
         topk_start = perf_counter() if profile_enabled else 0.0
         if candidate_values.numel() > 0:
             top_k = min(self.seq_cfg.top_acts_group_size, candidate_values.numel())
-            top_indices = candidate_indices[
-                candidate_values.topk(k=top_k, largest=True).indices
-            ].cpu()
+            if selection_mask_view is None:
+                top_indices = k_largest_indices(
+                    feat_acts,
+                    k=top_k,
+                    buffer=buffer,
+                ).cpu()
+            else:
+                masked_feat_acts = feat_acts_view.masked_fill(
+                    ~selection_mask_view,
+                    float("-inf"),
+                )
+                flat_top_indices = masked_feat_acts.flatten().topk(
+                    k=top_k,
+                    largest=True,
+                ).indices
+                top_indices = torch.stack(
+                    (
+                        flat_top_indices // masked_feat_acts.size(1),
+                        flat_top_indices % masked_feat_acts.size(1) + col_offset,
+                    ),
+                    dim=1,
+                ).cpu()
         else:
             top_indices = torch.zeros((0, 2), dtype=torch.long)
         topk_wall_s = perf_counter() - topk_start if profile_enabled else 0.0
-        indices_dict = {f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}": top_indices}
+        top_group_max = (
+            float(feat_acts.max().item()) if selection_mask is None else feat_max
+        )
+        indices_dict = {
+            f"TOP ACTIVATIONS<br>MAX = {top_group_max:.3f}": top_indices
+        }
 
         # Get all possible indices. Note, we need to be able to look 1 back (feature activation on prev token is needed for
         # computing loss effect on this token)
@@ -930,38 +990,84 @@ class SequenceDataGenerator:
         sampled_index_count = top_indices.shape[0]
         if self.seq_cfg.n_quantiles > 0:
             interval_scan_start = perf_counter() if profile_enabled else 0.0
-            quantiles = self._build_interval_quantiles(
-                feat_max, candidate_values.device
-            )
-            candidate_values_for_intervals = candidate_values.to(dtype=quantiles.dtype)
+            quantile_max = top_group_max
+            quantiles = self._build_interval_quantiles(quantile_max, feat_acts.device)
+            feat_acts_view_for_intervals = feat_acts_view.to(dtype=quantiles.dtype)
             valid_token_count = max(1, candidate_token_count)
+            full_feat_acts_for_intervals = feat_acts.to(dtype=quantiles.dtype)
             for i in range(self.seq_cfg.n_quantiles - 1, -1, -1):
                 lower = float(quantiles[i].item())
                 upper = float(quantiles[i + 1].item())
                 interval_where_start = perf_counter() if profile_enabled else 0.0
-                interval_member_mask = (candidate_values_for_intervals >= lower) & (
-                    candidate_values_for_intervals <= upper
+                interval_member_mask = (feat_acts_view_for_intervals >= lower) & (
+                    feat_acts_view_for_intervals <= upper
                 )
-                pct = interval_member_mask.sum().item() / valid_token_count
-                indices = candidate_indices[interval_member_mask]
-                if profile_enabled:
-                    interval_where_wall_s += perf_counter() - interval_where_start
-                    interval_count = int(indices.shape[0])
-                    interval_candidate_count += interval_count
-                    largest_interval_count = max(largest_interval_count, interval_count)
-                    if i == 0:
-                        lowest_interval_count = interval_count
-                    if interval_count > 0:
-                        nonempty_interval_group_count += 1
-                if len(indices) > self.seq_cfg.quantile_group_size:
-                    interval_sample_start = perf_counter() if profile_enabled else 0.0
-                    indices = indices[
-                        sample_unique_indices(
-                            len(indices), self.seq_cfg.quantile_group_size
-                        ).to(indices.device)
-                    ]
+                if selection_mask_view is not None:
+                    interval_member_mask &= selection_mask_view
+                interval_count = int(interval_member_mask.sum().item())
+                if selection_mask is None:
+                    pct = float(
+                        (
+                            (full_feat_acts_for_intervals >= lower)
+                            & (full_feat_acts_for_intervals <= upper)
+                        )
+                        .float()
+                        .mean()
+                        .item()
+                    )
                     if profile_enabled:
-                        interval_sample_wall_s += perf_counter() - interval_sample_start
+                        interval_where_wall_s += perf_counter() - interval_where_start
+                        interval_candidate_count += interval_count
+                        largest_interval_count = max(
+                            largest_interval_count, interval_count
+                        )
+                        if i == 0:
+                            lowest_interval_count = interval_count
+                        if interval_count > 0:
+                            nonempty_interval_group_count += 1
+                    interval_sample_start = perf_counter() if profile_enabled else 0.0
+                    indices = random_range_indices(
+                        feat_acts,
+                        k=self.seq_cfg.quantile_group_size,
+                        bounds=(lower, upper),
+                        buffer=buffer,
+                    ).cpu()
+                    if profile_enabled:
+                        interval_sample_wall_s += (
+                            perf_counter() - interval_sample_start
+                        )
+                else:
+                    pct = interval_count / valid_token_count
+                    indices = torch.stack(torch.where(interval_member_mask), dim=-1)
+                    if indices.numel() > 0 and col_offset != 0:
+                        indices = indices + torch.tensor(
+                            [0, col_offset],
+                            device=indices.device,
+                        )
+                    if profile_enabled:
+                        interval_where_wall_s += (
+                            perf_counter() - interval_where_start
+                        )
+                        interval_candidate_count += interval_count
+                        largest_interval_count = max(
+                            largest_interval_count, interval_count
+                        )
+                        if i == 0:
+                            lowest_interval_count = interval_count
+                        if interval_count > 0:
+                            nonempty_interval_group_count += 1
+                    if interval_count > self.seq_cfg.quantile_group_size:
+                        interval_sample_start = perf_counter() if profile_enabled else 0.0
+                        indices = indices[
+                            sample_unique_indices(
+                                interval_count,
+                                self.seq_cfg.quantile_group_size,
+                            ).to(indices.device)
+                        ]
+                        if profile_enabled:
+                            interval_sample_wall_s += (
+                                perf_counter() - interval_sample_start
+                            )
                 sampled_index_count += int(indices.shape[0])
                 indices_dict[
                     f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"

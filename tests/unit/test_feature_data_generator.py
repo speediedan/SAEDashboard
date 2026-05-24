@@ -137,3 +137,39 @@ def test_pad_sequence_tensor_zero_fills_trimmed_tail() -> None:
     assert tuple(padded.shape) == (1, 5, 1)
     assert padded[:, :3].tolist() == sequence_tensor.tolist()
     assert padded[:, 3:].tolist() == [[[0.0], [0.0]]]
+
+
+def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_precision() -> None:
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+    )
+
+    feature_acts = torch.tensor([5091.77587890625], dtype=torch.float32)
+
+    transferred = generator._transfer_feature_acts_for_output(feature_acts)
+
+    assert transferred.device.type == "cpu"
+    assert transferred.dtype == torch.float32
+    assert transferred.tolist() == pytest.approx(feature_acts.tolist())
+
+
+def test_transfer_feature_acts_for_output_downcasts_non_legacy_paths() -> None:
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="columnar",
+        sequence_selection_backend="lazy_gpu",
+    )
+
+    feature_acts = torch.tensor([5091.77587890625], dtype=torch.float32)
+
+    transferred = generator._transfer_feature_acts_for_output(feature_acts)
+
+    assert transferred.device.type == "cpu"
+    assert transferred.dtype == torch.bfloat16
+    assert transferred.to(torch.float32).tolist() == pytest.approx([5088.0])

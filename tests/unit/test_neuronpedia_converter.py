@@ -13,30 +13,7 @@ from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunne
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    raise TypeError(f"Unsupported test value: {type(value)!r}")
-
-
-class _FakeMsgspecEncoder:
-    def __init__(self) -> None:
-        self.encode_calls = 0
-
-    def encode(self, value: Any) -> bytes:
-        self.encode_calls += 1
-        return json.dumps(
-            value,
-            default=converter_module._msgspec_json_enc_hook,
-            separators=(",", ":"),
-        ).encode("utf-8")
-
-
-def test_convert_to_np_json_fast_path_matches_fallback(
+def test_convert_to_np_json_matches_reference_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     feature = NeuronpediaDashboardFeature(
@@ -74,26 +51,16 @@ def test_convert_to_np_json_fast_path_matches_fallback(
         staticmethod(lambda *_args, **_kwargs: [feature]),
     )
     fake_vis_data = cast(Any, SimpleNamespace(feature_data_dict={7: object()}))
-
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", None)
-    fallback_payload = converter_module.NeuronpediaConverter.convert_to_np_json(
+    payload = converter_module.NeuronpediaConverter.convert_to_np_json(
         model=None,
         vis_data=fake_vis_data,
         np_cfg=runner_cfg,
         vocab_dict={},
     )
 
-    fake_msgspec_encoder = _FakeMsgspecEncoder()
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
-    msgspec_payload = converter_module.NeuronpediaConverter.convert_to_np_json(
-        model=None,
-        vis_data=fake_vis_data,
-        np_cfg=runner_cfg,
-        vocab_dict={},
+    assert payload == (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
+        encoding="utf-8"
     )
-
-    assert json.loads(msgspec_payload) == json.loads(fallback_payload)
-    assert fake_msgspec_encoder.encode_calls == 1
 
 
 def test_convert_to_np_json_deterministic_matches_reference_batch(
@@ -134,8 +101,6 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
         staticmethod(lambda *_args, **_kwargs: [feature]),
     )
     fake_vis_data = cast(Any, SimpleNamespace(feature_data_dict={7: object()}))
-    fake_msgspec_encoder = _FakeMsgspecEncoder()
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
 
     payload = converter_module.NeuronpediaConverter.convert_to_np_json(
         model=None,
@@ -148,18 +113,14 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
     assert payload == (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
         encoding="utf-8"
     )
-    assert fake_msgspec_encoder.encode_calls == 0
 
 
 def test_encode_batch_payload_deterministic_matches_reference_batch(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture_text = (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
         encoding="utf-8"
     )
     batch_payload = json.loads(fixture_text)
-    fake_msgspec_encoder = _FakeMsgspecEncoder()
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
 
     payload = converter_module.NeuronpediaConverter.encode_batch_payload(
         batch_payload,
@@ -167,29 +128,17 @@ def test_encode_batch_payload_deterministic_matches_reference_batch(
     )
 
     assert payload == fixture_text
-    assert fake_msgspec_encoder.encode_calls == 0
 
 
-def test_encode_batch_payload_fast_path_matches_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    batch_payload = json.loads(
-        (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(encoding="utf-8")
+def test_encode_batch_payload_matches_reference_batch() -> None:
+    fixture_text = (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
+        encoding="utf-8"
     )
+    batch_payload = json.loads(fixture_text)
 
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", None)
-    fallback_payload = converter_module.NeuronpediaConverter.encode_batch_payload(
-        batch_payload
-    )
+    payload = converter_module.NeuronpediaConverter.encode_batch_payload(batch_payload)
 
-    fake_msgspec_encoder = _FakeMsgspecEncoder()
-    monkeypatch.setattr(converter_module, "_MSGSPEC_JSON_ENCODER", fake_msgspec_encoder)
-    msgspec_payload = converter_module.NeuronpediaConverter.encode_batch_payload(
-        batch_payload
-    )
-
-    assert json.loads(msgspec_payload) == json.loads(fallback_payload)
-    assert fake_msgspec_encoder.encode_calls == 1
+    assert payload == fixture_text
 
 
 def test_convert_preserved_snapshot_to_np_json_reuses_full_converter(
@@ -287,3 +236,43 @@ def test_create_activation_trims_trailing_pad_tokens() -> None:
     assert activation.dfa_values == [0.25, 0.75]
     assert activation.dfa_maxValue == 0.75
     assert activation.dfa_targetIndex == 1
+
+
+def test_create_activation_can_preserve_trailing_pad_tokens() -> None:
+    fake_model = cast(
+        Any,
+        SimpleNamespace(
+            cfg=SimpleNamespace(d_vocab=8),
+            tokenizer=SimpleNamespace(pad_token_id=0),
+        ),
+    )
+    sequence = SimpleNamespace(
+        original_index=5,
+        token_ids=[1, 2, 0, 0],
+        feat_acts=[0.125, 0.875, 0.0, 0.0],
+        qualifying_token_index=2,
+    )
+    feature_data = SimpleNamespace(
+        dfa_data={
+            5: {
+                "dfaValues": [0.0, 0.25, 0.75, 0.0, 0.0],
+                "dfaTargetIndex": 2,
+            }
+        }
+    )
+
+    activation = converter_module.NeuronpediaConverter._create_activation(
+        sequence,
+        0.0,
+        1.0,
+        0.5,
+        feature_data,
+        fake_model,
+        {0: "<pad>", 1: "Alpha", 2: "Beta"},
+        feature_index=7,
+        trim_trailing_pad_tokens=False,
+    )
+
+    assert activation.tokens == ["Alpha", "Beta", "<pad>", "<pad>"]
+    assert activation.values == [0.125, 0.875, 0.0, 0.0]
+    assert activation.dfa_values == [0.25, 0.75, 0.0, 0.0]

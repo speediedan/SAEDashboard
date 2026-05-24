@@ -1,16 +1,26 @@
+# pyright: reportMissingTypeStubs=false
+
 import random
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
 import torch
-from transformer_lens import HookedTransformer
+from transformer_lens import (
+    HookedTransformer,  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
+)
 
+from sae_dashboard.components_config import SequencesConfig
+from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
+    LegacyJSONCPUSequenceDataGenerator,
+)
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.sequence_data_generator import (
     SequenceCoordinateTable,
     SequenceDataGenerator,
 )
+from sae_dashboard.utils_fns import k_largest_indices, random_range_indices
 from tests.helpers import build_sae_vis_cfg
 
 
@@ -550,6 +560,171 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selectio
     assert torch.equal(lazy_indices_bold, legacy_indices_bold)
     for group_name, legacy_indices in legacy_indices_dict.items():
         assert torch.equal(lazy_indices_dict[group_name], legacy_indices)
+
+
+def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_selection_mask() -> (
+    None
+):
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    seq_cfg = cast(SequencesConfig, cfg.feature_centric_layout.seq_cfg)
+    seq_cfg.buffer = None
+    seq_cfg.top_acts_group_size = 4
+    seq_cfg.n_quantiles = 4
+    seq_cfg.quantile_group_size = 16
+
+    tokens = torch.arange(18, dtype=torch.long).reshape(3, 6)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts = torch.tensor(
+        [
+            [0.0, 0.25, 0.5, 0.75, 1.0, 0.0],
+            [0.0, 1.25, 1.5, 1.75, 2.0, 0.0],
+            [0.0, 0.4, 0.8, 1.2, 1.6, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    random.seed(12345)
+    legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
+        generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
+    )
+
+    random.seed(12345)
+    expected_indices_dict = {
+        f"TOP ACTIVATIONS<br>MAX = {feat_acts.max():.3f}": k_largest_indices(
+            feat_acts,
+            k=seq_cfg.top_acts_group_size,
+            buffer=generator.buffer,
+        ).cpu()
+    }
+    quantiles = torch.linspace(
+        0,
+        feat_acts.max().item(),
+        seq_cfg.n_quantiles + 1,
+    )
+    for i in range(seq_cfg.n_quantiles - 1, -1, -1):
+        lower, upper = quantiles[i : i + 2].tolist()
+        pct = ((feat_acts >= lower) & (feat_acts <= upper)).float().mean()
+        expected_indices_dict[
+            f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
+        ] = random_range_indices(
+            feat_acts,
+            k=seq_cfg.quantile_group_size,
+            bounds=(lower, upper),
+            buffer=generator.buffer,
+        ).cpu()
+
+    expected_indices_bold = torch.concat(list(expected_indices_dict.values())).cpu()
+
+    assert list(legacy_indices_dict) == list(expected_indices_dict)
+    assert legacy_n_bold == expected_indices_bold.shape[0]
+    assert torch.equal(legacy_indices_bold, expected_indices_bold)
+    for group_name, expected_indices in expected_indices_dict.items():
+        assert torch.equal(legacy_indices_dict[group_name], expected_indices)
+
+
+def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_with_buffer_without_selection_mask() -> (
+    None
+):
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    seq_cfg = cast(SequencesConfig, cfg.feature_centric_layout.seq_cfg)
+    seq_cfg.buffer = (1, 1)
+    seq_cfg.top_acts_group_size = 4
+    seq_cfg.n_quantiles = 4
+    seq_cfg.quantile_group_size = 16
+
+    tokens = torch.arange(18, dtype=torch.long).reshape(3, 6)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts = torch.tensor(
+        [
+            [9.0, 0.25, 0.5, 0.75, 1.0, 8.0],
+            [7.0, 1.25, 1.5, 1.75, 2.0, 6.0],
+            [5.0, 0.4, 0.8, 1.2, 1.6, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    random.seed(12345)
+    legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
+        generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
+    )
+
+    random.seed(12345)
+    expected_indices_dict = {
+        f"TOP ACTIVATIONS<br>MAX = {feat_acts.max():.3f}": k_largest_indices(
+            feat_acts,
+            k=seq_cfg.top_acts_group_size,
+            buffer=generator.buffer,
+        ).cpu()
+    }
+    quantiles = torch.linspace(
+        0,
+        feat_acts.max().item(),
+        seq_cfg.n_quantiles + 1,
+    )
+    for i in range(seq_cfg.n_quantiles - 1, -1, -1):
+        lower, upper = quantiles[i : i + 2].tolist()
+        pct = ((feat_acts >= lower) & (feat_acts <= upper)).float().mean()
+        expected_indices_dict[
+            f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
+        ] = random_range_indices(
+            feat_acts,
+            k=seq_cfg.quantile_group_size,
+            bounds=(lower, upper),
+            buffer=generator.buffer,
+        ).cpu()
+
+    expected_indices_bold = torch.concat(list(expected_indices_dict.values())).cpu()
+
+    assert list(legacy_indices_dict) == list(expected_indices_dict)
+    assert legacy_n_bold == expected_indices_bold.shape[0]
+    assert torch.equal(legacy_indices_bold, expected_indices_bold)
+    for group_name, expected_indices in expected_indices_dict.items():
+        assert torch.equal(legacy_indices_dict[group_name], expected_indices)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Legacy all-zero top-k tie order is only distinguishable on CUDA.",
+)
+def test_legacy_json_cpu_sequence_generator_preserves_cuda_zero_tie_order() -> None:
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.device = "cuda"
+    cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 20  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.n_quantiles = 0  # type: ignore
+
+    tokens = torch.arange(128, dtype=torch.long).repeat(2488, 1)
+    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.zeros(4, 128))
+    sequence_data = generator.get_sequences_data(
+        feat_acts=torch.zeros_like(tokens, dtype=torch.float32),
+        feat_logits=torch.zeros(128, dtype=torch.float32),
+        resid_post=torch.empty(0),
+        feature_resid_dir=torch.empty(0),
+    )
+
+    top_group = sequence_data.seq_group_data[0].seq_data
+    assert [sequence.qualifying_token_index - 1 for sequence in top_group] == [
+        18,
+        17,
+        15,
+        16,
+        0,
+        -1,
+        1,
+        2,
+        10,
+        9,
+        7,
+        8,
+        12,
+        11,
+        13,
+        14,
+        6,
+        5,
+        3,
+        4,
+    ]
 
 
 def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_for_bfloat16_interval_boundaries() -> (

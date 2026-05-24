@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 
 from sae_dashboard.components import FeatureTablesData, LogitsTableData
-from sae_dashboard.sae_vis_data import SaeVisConfig
+from sae_dashboard.feature_data import FeatureData
+from sae_dashboard.sae_vis_data import SaeVisConfig, SaeVisData
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 
 
@@ -40,7 +42,9 @@ class _FakeEncoder:
         return None
 
 
-def test_feature_statistics_ignore_mask_excludes_ignored_tokens(monkeypatch) -> None:
+def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
+    monkeypatch,
+) -> None:
     cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
@@ -62,7 +66,17 @@ def test_feature_statistics_ignore_mask_excludes_ignored_tokens(monkeypatch) -> 
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
         "sae_dashboard.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_features_table_data",
         lambda **kwargs: {
             name: [value] for name, value in FeatureTablesData().__dict__.items()
         },
@@ -71,17 +85,82 @@ def test_feature_statistics_ignore_mask_excludes_ignored_tokens(monkeypatch) -> 
         "sae_dashboard.sae_vis_runner.get_logits_table_data",
         lambda **kwargs: LogitsTableData(),
     )
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_logits_table_data",
+        lambda **kwargs: LogitsTableData(),
+    )
 
     fake_model = SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32))
     fake_encoder = _FakeEncoder()
 
-    sae_vis_data = SaeVisRunner(cfg).run(
-        encoder=fake_encoder, model=fake_model, tokens=tokens
+    sae_vis_data = cast(
+        SaeVisData,
+        SaeVisRunner(cfg).run(
+            encoder=fake_encoder,
+            model=fake_model,
+            tokens=tokens,
+        ),
     )
 
     assert sae_vis_data.feature_stats.max == [1.0]
     assert sae_vis_data.feature_stats.frac_nonzero == [1.0]
     assert (
         sae_vis_data.feature_data_dict[0].acts_histogram_data.title
-        == "ACTIVATIONS<br>DENSITY = 100.000%"
+        == "ACTIVATIONS<br>DENSITY = 50.000%"
     )
+
+
+def test_SaeVisRunner_routes_legacy_json_cpu_through_compatibility_module(
+    monkeypatch,
+) -> None:
+    cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        minibatch_size_features=1,
+        minibatch_size_tokens=1,
+        quantile_feature_batch_size=1,
+        device="cpu",
+        dtype="float32",
+    )
+    tokens = torch.tensor([[7, 0]], dtype=torch.long)
+    fake_model = SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32))
+    fake_encoder = _FakeEncoder()
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.FeatureDataGeneratorFactory.create",
+        lambda cfg, model, encoder, tokens: object(),
+    )
+
+    class _FakeLegacySequenceDataGenerator:
+        def __init__(self, cfg, tokens, W_U) -> None:
+            del cfg, tokens, W_U
+
+    def _fake_run_legacy_json_cpu_object_feature_batch(runner, **kwargs):
+        calls.append(kwargs["sequence_data_generator"])
+        return SaeVisData(
+            cfg=runner.cfg,
+            feature_data_dict={99: FeatureData()},
+        )
+
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        _FakeLegacySequenceDataGenerator,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.run_object_feature_batch",
+        _fake_run_legacy_json_cpu_object_feature_batch,
+    )
+
+    sae_vis_data = cast(
+        SaeVisData,
+        SaeVisRunner(cfg).run(
+            encoder=fake_encoder,
+            model=fake_model,
+            tokens=tokens,
+        ),
+    )
+
+    assert list(sae_vis_data.feature_data_dict) == [99]
+    assert len(calls) == 1
+    assert isinstance(calls[0], _FakeLegacySequenceDataGenerator)

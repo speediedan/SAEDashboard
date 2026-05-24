@@ -9,6 +9,7 @@ from datasets import Dataset
 from transformer_lens import HookedTransformer
 
 import sae_dashboard.neuronpedia.neuronpedia_runner as neuronpedia_runner_module
+from sae_dashboard.neuronpedia.legacy_json_cpu import runner as legacy_json_cpu_runner
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     NeuronpediaRunnerConfig,
@@ -77,6 +78,40 @@ def test_get_tokens_no_duplicates(
     tokens_cpu = tokens.cpu()
     assert (
         len(torch.unique(tokens_cpu, dim=0)) == neuronpedia_runner.cfg.n_prompts_total
+    )
+
+
+def test_legacy_json_cpu_get_tokens_uses_explicit_shared_tokens_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shared_tokens = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
+    shared_tokens_file = tmp_path / "shared_tokens.pt"
+    torch.save(shared_tokens, shared_tokens_file)
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir=str(tmp_path / "outputs"),
+        n_prompts_total=2,
+        n_tokens_in_prompt=3,
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+        shared_tokens_file=str(shared_tokens_file),
+    )
+    runner._log_token_snapshot = lambda *_args, **_kwargs: None
+
+    def fail_generate_tokens(*_args: Any, **_kwargs: Any) -> torch.Tensor:
+        raise AssertionError("legacy explicit shared tokens should be staged before generation")
+
+    monkeypatch.setattr(runner, "generate_tokens", fail_generate_tokens)
+
+    tokens = runner.get_tokens()
+
+    assert torch.equal(tokens, shared_tokens)
+    assert torch.equal(
+        torch.load(tmp_path / "outputs" / "tokens_2.pt", map_location="cpu"),
+        shared_tokens,
     )
 
 
@@ -360,10 +395,150 @@ def test_prepare_shared_tokens_from_tokenized_load_dataset_uses_sidecar_metadata
     runner._prepare_shared_tokens_from_prompt_dataset(target_tokens_file)
 
     tokens = torch.load(target_tokens_file)
-    effective_lengths = torch.load(target_tokens_file.with_suffix(".effective_lengths.pt"))
+    effective_lengths = torch.load(
+        target_tokens_file.with_suffix(".effective_lengths.pt")
+    )
 
-    assert torch.equal(tokens, torch.tensor([[1, 2, 0, 0], [3, 4, 5, 0]], dtype=torch.long))
-    assert torch.equal(effective_lengths, torch.tensor([2, 3], dtype=torch.int32))
+    assert torch.equal(
+        tokens,
+        torch.tensor([[1, 2, 0, 0], [3, 4, 5, 0]], dtype=torch.long),
+    )
+    assert torch.equal(
+        effective_lengths,
+        torch.tensor([2, 3], dtype=torch.int32),
+    )
+
+
+def _make_legacy_runner_stub(tmp_path: Path) -> NeuronpediaRunner:
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gpt2-small-res-jb",
+        sae_path="blocks.5.hook_resid_pre",
+        outputs_dir=str(tmp_path),
+        n_prompts_total=1,
+        n_tokens_in_prompt=4,
+        n_prompts_in_forward_pass=2,
+        n_features_at_a_time=2,
+        quantile_feature_batch_size=3,
+        prompt_dataset_mode="legacy_jsonl",
+        prompt_dataset_path=str(tmp_path / "train.jsonl"),
+        prompt_dataset_split="train",
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+        use_wandb=False,
+        output_neuronpedia_exports=False,
+        use_cached_activations=False,
+        primary_acts_batch_size=17,
+    )
+    runner.sae = SimpleNamespace(
+        cfg=SimpleNamespace(
+            d_sae=4,
+            to_dict=lambda: {},
+            metadata=SimpleNamespace(),
+        )
+    )
+    runner.model = SimpleNamespace()
+    runner.tokenizer = SimpleNamespace(pad_token_id=0, bos_token_id=1, eos_token_id=2)
+    runner.model_id = "google/gemma-3-1b-it"
+    runner.hook_name = "blocks.5.hook_resid_pre"
+    runner.layer = 5
+    runner.vocab_dict = {0: "<pad>"}
+    runner.cached_activations_dir = tmp_path / "cached_activations"
+    runner.record_skipped_features = lambda: None
+    runner.get_feature_batches = lambda: [[0, 1]]
+    runner.get_tokens = lambda: torch.tensor([[1, 2, 3, 0]], dtype=torch.long)
+    runner.add_prefix_suffix_to_tokens = lambda tokens: tokens
+    runner._run_neuronpedia_export = lambda: None
+    runner._log_resource_snapshot = lambda *_args, **_kwargs: None
+    runner._log_batch_boundary_snapshot = lambda *_args, **_kwargs: None
+    runner._log_token_snapshot = lambda *_args, **_kwargs: None
+    runner._write_converter_input_artifact = lambda *_args, **_kwargs: None
+    runner._release_unused_host_memory = lambda: None
+    runner.activations_store = object()
+    return runner
+
+
+def test_run_routes_legacy_json_cpu_through_compatibility_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_legacy_runner_stub(tmp_path)
+    calls: dict[str, Any] = {}
+
+    def fail_schedule(_tokens: torch.Tensor) -> None:
+        raise AssertionError("legacy runner should bypass prompt bucket scheduling")
+
+    def fake_run_legacy_json_cpu_batch_loop(
+        runner_arg: NeuronpediaRunner,
+        *,
+        feature_idx: list[list[int]],
+        tokens: torch.Tensor,
+    ) -> None:
+        calls["runner"] = runner_arg
+        calls["feature_idx"] = feature_idx
+        calls["tokens"] = tokens.clone()
+
+    runner._load_prompt_bucket_schedule = fail_schedule
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.neuronpedia_runner.legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop",
+        fake_run_legacy_json_cpu_batch_loop,
+    )
+
+    runner.run()
+
+    assert calls["runner"] is runner
+    assert calls["feature_idx"] == [[0, 1]]
+    assert torch.equal(
+        calls["tokens"],
+        torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+    )
+    assert (tmp_path / "run_settings.json").is_file()
+
+
+def test_legacy_json_cpu_batch_loop_uses_compatibility_vis_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_legacy_runner_stub(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run_feature_batch_with_optional_profile(
+        feature_vis_config_gpt: Any,
+        tokens: torch.Tensor,
+        feature_batch_count: int,
+    ) -> object:
+        captured["config"] = feature_vis_config_gpt
+        captured["tokens"] = tokens.clone()
+        captured["batch"] = feature_batch_count
+        return object()
+
+    monkeypatch.setattr(
+        "sae_dashboard.neuronpedia.legacy_json_cpu.runner.NeuronpediaConverter.convert_to_np_json",
+        lambda *args, **kwargs: '{"ok": true}',
+    )
+    runner._run_feature_batch_with_optional_profile = (
+        fake_run_feature_batch_with_optional_profile
+    )
+
+    legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop(
+        runner,
+        feature_idx=[[0, 1]],
+        tokens=torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+    )
+
+    feature_vis_config = captured["config"]
+    assert feature_vis_config.prompt_minibatch_schedule is None
+    assert feature_vis_config.primary_acts_batch_size is None
+    assert feature_vis_config.correlation_accumulation_device == "cpu"
+    assert feature_vis_config.sequence_selection_backend == "legacy_json_cpu"
+    assert feature_vis_config.dashboard_output_format == "legacy_json"
+    assert feature_vis_config.cache_dir is None
+    assert captured["batch"] == 0
+    assert torch.equal(
+        captured["tokens"],
+        torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+    )
+    assert (tmp_path / "batch-0.json").read_text(encoding="utf-8") == '{"ok": true}'
 
 
 def test_create_output_directory_sanitizes_model_id(tmp_path: Path) -> None:
@@ -436,6 +611,8 @@ def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> Non
         outputs_dir=str(tmp_path / "layer_10"),
         n_prompts_total=2,
         shared_tokens_file=str(shared_tokens_file),
+        dashboard_output_format="columnar",
+        sequence_selection_backend="lazy_gpu",
     )
     runner.model_id = "google/gemma-3-1b-it"
     runner.hook_name = "blocks.10.hook_mlp_in"
@@ -446,6 +623,47 @@ def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> Non
 
     assert torch.equal(tokens, expected_tokens)
     assert Path(runner.cfg.outputs_dir, "tokens_2.pt").exists()
+
+
+def test_legacy_json_cpu_get_tokens_without_shared_sidecar_generates_tokens(
+    tmp_path: Path,
+) -> None:
+    generated_tokens = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
+
+    runner = NeuronpediaRunner.__new__(NeuronpediaRunner)
+    runner.cfg = NeuronpediaRunnerConfig(
+        sae_set="gemma-scope-2-1b-it-transcoders-all",
+        sae_path="layer_10_width_262k_l0_small_affine",
+        outputs_dir=str(tmp_path / "layer_10"),
+        n_prompts_total=2,
+        n_tokens_in_prompt=3,
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+    )
+    runner.model_id = "google/gemma-3-1b-it"
+    runner.hook_name = "blocks.10.hook_mlp_in"
+    runner.sae = SimpleNamespace(cfg=SimpleNamespace(d_sae=262144))
+    runner.activations_store = object()
+    runner._log_token_snapshot = lambda *_args, **_kwargs: None
+    runner._stage_shared_tokens_file = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("default legacy_json_cpu runs should not auto-stage shared token sidecars")
+    )
+
+    def fake_generate_tokens(activations_store: object, n_prompts: int) -> torch.Tensor:
+        assert activations_store is runner.activations_store
+        assert n_prompts == 2
+        return generated_tokens.clone()
+
+    runner.generate_tokens = fake_generate_tokens
+
+    runner._setup_output_directory()
+    tokens_path = Path(runner.cfg.outputs_dir) / "tokens_2.pt"
+    assert not tokens_path.exists()
+
+    tokens = runner.get_tokens()
+
+    assert torch.equal(tokens, generated_tokens)
+    assert torch.equal(torch.load(tokens_path), generated_tokens)
 
 
 def test_load_prompt_bucket_schedule_uses_selected_bucket_configs(

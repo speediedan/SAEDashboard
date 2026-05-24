@@ -32,6 +32,9 @@ from sae_dashboard.components_config import (
 # from sae_dashboard.data_writing_fns import save_feature_centric_vis
 from sae_dashboard.hook_utils import convert_model_name_tl_to_hf
 from sae_dashboard.layout import SaeVisLayoutConfig
+from sae_dashboard.neuronpedia.legacy_json_cpu import (
+    runner as legacy_json_cpu_runner,
+)
 from sae_dashboard.neuronpedia.neuronpedia_converter import NeuronpediaConverter
 from sae_dashboard.neuronpedia.neuronpedia_export import (
     NeuronpediaExportConfig,
@@ -44,6 +47,7 @@ from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
     DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
     NeuronpediaRunnerConfig,
+    is_legacy_dashboard_path,
     warn_if_deprecated_legacy_dashboard_path,
 )
 from sae_dashboard.neuronpedia.prompt_bucketing import derive_prompt_bucket_ceilings
@@ -1013,9 +1017,10 @@ class NeuronpediaRunner:
         if not os.path.exists(self.cfg.outputs_dir):
             os.makedirs(self.cfg.outputs_dir)
         self.cfg.outputs_dir = self.create_output_directory()
-        self._stage_shared_tokens_file(
-            require_effective_lengths=self._schedule_requires_effective_lengths()
-        )
+        if not is_legacy_dashboard_path(self.cfg):
+            self._stage_shared_tokens_file(
+                require_effective_lengths=self._schedule_requires_effective_lengths()
+            )
 
     def create_output_directory(self) -> str:
         """
@@ -1780,7 +1785,12 @@ class NeuronpediaRunner:
     def get_tokens(self):
         tokens_file = self._tokens_file_path()
         self._log_token_snapshot("before_get_tokens")
-        if not tokens_file.is_file():
+        should_stage_shared_tokens = (
+            not is_legacy_dashboard_path(self.cfg)
+            or self.cfg.shared_tokens_file is not None
+            or self._schedule_requires_effective_lengths()
+        )
+        if not tokens_file.is_file() and should_stage_shared_tokens:
             self._stage_shared_tokens_file(
                 require_effective_lengths=self._schedule_requires_effective_lengths()
             )
@@ -1869,244 +1879,252 @@ class NeuronpediaRunner:
         self.record_skipped_features()
         tokens = self.get_tokens()
         tokens = self.add_prefix_suffix_to_tokens(tokens)
-        prompt_minibatch_schedule = self._load_prompt_bucket_schedule(tokens)
-        self._log_token_snapshot("tokens_ready_for_batches", tokens)
 
         del self.activations_store
 
-        with torch.no_grad():
-            for feature_batch_count, features_to_process in tqdm(
-                enumerate(feature_idx)
-            ):
-                if feature_batch_count < self.cfg.start_batch:
-                    feature_batch_count = feature_batch_count + 1
-                    continue
-                if (
-                    self.cfg.end_batch is not None
-                    and feature_batch_count > self.cfg.end_batch
+        if legacy_json_cpu_runner.is_preserved_legacy_json_cpu_path(self.cfg):
+            legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop(
+                self,
+                feature_idx=feature_idx,
+                tokens=tokens,
+            )
+        else:
+            prompt_minibatch_schedule = self._load_prompt_bucket_schedule(tokens)
+            self._log_token_snapshot("tokens_ready_for_batches", tokens)
+
+            with torch.no_grad():
+                for feature_batch_count, features_to_process in tqdm(
+                    enumerate(feature_idx)
                 ):
-                    feature_batch_count = feature_batch_count + 1
-                    continue
+                    if feature_batch_count < self.cfg.start_batch:
+                        feature_batch_count = feature_batch_count + 1
+                        continue
+                    if (
+                        self.cfg.end_batch is not None
+                        and feature_batch_count > self.cfg.end_batch
+                    ):
+                        feature_batch_count = feature_batch_count + 1
+                        continue
 
-                if self.cfg.dashboard_output_format == "columnar":
-                    output_root = (
-                        Path(self.cfg.outputs_dir)
-                        / f"batch-{feature_batch_count}.columnar"
-                    )
-                    output_file = str(output_root / "manifest.json")
-                    if output_root.exists() and not Path(output_file).is_file():
-                        shutil.rmtree(output_root)
-                else:
-                    output_root = None
-                    output_file = (
-                        f"{self.cfg.outputs_dir}/batch-{feature_batch_count}.json"
-                    )
-
-                if Path(output_file).is_file():
-                    logline = (
-                        f"\n++++++++++ Skipping Batch #{feature_batch_count} output. "
-                        f"File exists: {output_file} ++++++++++\n"
-                    )
-                    print(logline)
-                    continue
-
-                print(f"========== Running Batch #{feature_batch_count} ==========")
-                self._log_resource_snapshot(f"pre_batch_{feature_batch_count}")
-
-                layout = SaeVisLayoutConfig(
-                    columns=[
-                        Column(
-                            SequencesConfig(
-                                stack_mode="stack-all",
-                                buffer=None,  # type: ignore
-                                compute_buffer=True,
-                                n_quantiles=self.cfg.n_quantiles,
-                                top_acts_group_size=self.cfg.top_acts_group_size,
-                                quantile_group_size=self.cfg.quantile_group_size,
-                            ),
-                            ActsHistogramConfig(),
-                            LogitsHistogramConfig(),
-                            LogitsTableConfig(),
-                            FeatureTablesConfig(n_rows=3),
+                    if self.cfg.dashboard_output_format == "columnar":
+                        output_root = (
+                            Path(self.cfg.outputs_dir)
+                            / f"batch-{feature_batch_count}.columnar"
                         )
-                    ]
-                )
-
-                feature_vis_config_gpt = SaeVisConfig(
-                    hook_point=self.hook_name,  # type: ignore
-                    features=features_to_process,
-                    minibatch_size_features=self.cfg.n_features_at_a_time,
-                    minibatch_size_tokens=self.cfg.n_prompts_in_forward_pass,
-                    primary_acts_batch_size=self.cfg.primary_acts_batch_size,
-                    quantile_feature_batch_size=self.cfg.quantile_feature_batch_size,
-                    verbose=True,
-                    log_performance=self.cfg.log_performance,
-                    cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
-                    torch_profile=self.cfg.torch_profile,
-                    torch_profile_dir=(
-                        Path(self.cfg.torch_profile_dir)
-                        if self.cfg.torch_profile_dir
-                        else None
-                    ),
-                    device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,
-                    feature_centric_layout=layout,
-                    perform_ablation_experiments=False,
-                    dtype=self.cfg.sae_dtype,
-                    prompt_minibatch_schedule=prompt_minibatch_schedule,
-                    cache_dir=(
-                        self.cached_activations_dir
-                        if self.cfg.use_cached_activations
-                        else None
-                    ),
-                    ignore_tokens={
-                        tok_id
-                        for tok_id in (
-                            self.tokenizer.pad_token_id,  # type: ignore
-                            self.tokenizer.bos_token_id,  # type: ignore
-                            self.tokenizer.eos_token_id,  # type: ignore
+                        output_file = str(output_root / "manifest.json")
+                        if output_root.exists() and not Path(output_file).is_file():
+                            shutil.rmtree(output_root)
+                    else:
+                        output_root = None
+                        output_file = (
+                            f"{self.cfg.outputs_dir}/batch-{feature_batch_count}.json"
                         )
-                        if tok_id is not None
-                    },
-                    ignore_positions=self.cfg.ignore_positions or [],
-                    ignore_high_activation_norm_multiple=self.cfg.ignore_high_activation_norm_multiple,
-                    use_dfa=self.cfg.use_dfa,
-                    use_huggingface=self.cfg.use_huggingface,
-                    sequence_replay_artifact_dir=(
-                        Path(self.cfg.sequence_replay_artifact_dir)
-                        if self.cfg.sequence_replay_artifact_dir
-                        else None
-                    ),
-                    correlation_accumulation_device=self.cfg.correlation_accumulation_device,
-                    feature_statistics_backend=self.cfg.feature_statistics_backend,
-                    logits_histogram_backend=self.cfg.logits_histogram_backend,
-                    activation_histogram_backend=self.cfg.activation_histogram_backend,
-                    defer_component_construction=self.cfg.defer_component_construction,
-                    sequence_selection_backend=self.cfg.sequence_selection_backend,
-                    dashboard_output_format=self.cfg.dashboard_output_format,
-                    columnar_artifact_dir=output_root,
-                    columnar_artifact_format=self.cfg.columnar_artifact_format,
-                    columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
-                    columnar_emit_activation_rows=self.cfg.columnar_emit_activation_rows,
-                    columnar_emit_activation_copy_rows=self.cfg.columnar_emit_activation_copy_rows,
-                    columnar_activation_copy_model_id=(
-                        self.cfg.columnar_activation_copy_model_id or self.model_id
-                    ),
-                    columnar_activation_copy_layer=self._resolved_columnar_activation_copy_layer(),
-                    columnar_activation_copy_creator_id=(
-                        os.getenv("DEFAULT_CREATOR_ID") or ""
-                    ),
-                    columnar_activation_copy_created_at=datetime.now(timezone.utc)
-                    .replace(tzinfo=None)
-                    .isoformat(),
-                    columnar_activation_copy_id_prefix=self._resolved_columnar_activation_copy_id_prefix(),
-                )
 
-                self._log_token_snapshot(
-                    f"before_feature_run_{feature_batch_count}", tokens
-                )
-                batch_start_time = time.perf_counter()
-                batch_start_io = process_io_snapshot()
-                self._log_batch_boundary_snapshot(
-                    "pre_batch", feature_batch_count, batch_start_io
-                )
-                feature_data = self._run_feature_batch_with_optional_profile(
-                    feature_vis_config_gpt,
-                    tokens,
-                    feature_batch_count,
-                )
-                self._log_resource_snapshot(f"after_feature_run_{feature_batch_count}")
+                    if Path(output_file).is_file():
+                        logline = (
+                            f"\n++++++++++ Skipping Batch #{feature_batch_count} output. "
+                            f"File exists: {output_file} ++++++++++\n"
+                        )
+                        print(logline)
+                        continue
 
-                converter_input_artifact = None
-                if self.cfg.dashboard_output_format != "columnar":
-                    converter_input_artifact = self._write_converter_input_artifact(
-                        feature_data,
+                    print(f"========== Running Batch #{feature_batch_count} ==========")
+                    self._log_resource_snapshot(f"pre_batch_{feature_batch_count}")
+
+                    layout = SaeVisLayoutConfig(
+                        columns=[
+                            Column(
+                                SequencesConfig(
+                                    stack_mode="stack-all",
+                                    buffer=None,  # type: ignore
+                                    compute_buffer=True,
+                                    n_quantiles=self.cfg.n_quantiles,
+                                    top_acts_group_size=self.cfg.top_acts_group_size,
+                                    quantile_group_size=self.cfg.quantile_group_size,
+                                ),
+                                ActsHistogramConfig(),
+                                LogitsHistogramConfig(),
+                                LogitsTableConfig(),
+                                FeatureTablesConfig(n_rows=3),
+                            )
+                        ]
+                    )
+
+                    feature_vis_config_gpt = SaeVisConfig(
+                        hook_point=self.hook_name,  # type: ignore
+                        features=features_to_process,
+                        minibatch_size_features=self.cfg.n_features_at_a_time,
+                        minibatch_size_tokens=self.cfg.n_prompts_in_forward_pass,
+                        primary_acts_batch_size=self.cfg.primary_acts_batch_size,
+                        quantile_feature_batch_size=self.cfg.quantile_feature_batch_size,
+                        verbose=True,
+                        log_performance=self.cfg.log_performance,
+                        cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
+                        torch_profile=self.cfg.torch_profile,
+                        torch_profile_dir=(
+                            Path(self.cfg.torch_profile_dir)
+                            if self.cfg.torch_profile_dir
+                            else None
+                        ),
+                        device=self.cfg.sae_device or DEFAULT_FALLBACK_DEVICE,
+                        feature_centric_layout=layout,
+                        perform_ablation_experiments=False,
+                        dtype=self.cfg.sae_dtype,
+                        prompt_minibatch_schedule=prompt_minibatch_schedule,
+                        cache_dir=(
+                            self.cached_activations_dir
+                            if self.cfg.use_cached_activations
+                            else None
+                        ),
+                        ignore_tokens={
+                            tok_id
+                            for tok_id in (
+                                self.tokenizer.pad_token_id,  # type: ignore
+                                self.tokenizer.bos_token_id,  # type: ignore
+                                self.tokenizer.eos_token_id,  # type: ignore
+                            )
+                            if tok_id is not None
+                        },
+                        ignore_positions=self.cfg.ignore_positions or [],
+                        ignore_high_activation_norm_multiple=self.cfg.ignore_high_activation_norm_multiple,
+                        use_dfa=self.cfg.use_dfa,
+                        use_huggingface=self.cfg.use_huggingface,
+                        sequence_replay_artifact_dir=(
+                            Path(self.cfg.sequence_replay_artifact_dir)
+                            if self.cfg.sequence_replay_artifact_dir
+                            else None
+                        ),
+                        correlation_accumulation_device=self.cfg.correlation_accumulation_device,
+                        feature_statistics_backend=self.cfg.feature_statistics_backend,
+                        logits_histogram_backend=self.cfg.logits_histogram_backend,
+                        activation_histogram_backend=self.cfg.activation_histogram_backend,
+                        defer_component_construction=self.cfg.defer_component_construction,
+                        sequence_selection_backend=self.cfg.sequence_selection_backend,
+                        dashboard_output_format=self.cfg.dashboard_output_format,
+                        columnar_artifact_dir=output_root,
+                        columnar_artifact_format=self.cfg.columnar_artifact_format,
+                        columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
+                        columnar_emit_activation_rows=self.cfg.columnar_emit_activation_rows,
+                        columnar_emit_activation_copy_rows=self.cfg.columnar_emit_activation_copy_rows,
+                        columnar_activation_copy_model_id=(
+                            self.cfg.columnar_activation_copy_model_id or self.model_id
+                        ),
+                        columnar_activation_copy_layer=self._resolved_columnar_activation_copy_layer(),
+                        columnar_activation_copy_creator_id=(
+                            os.getenv("DEFAULT_CREATOR_ID") or ""
+                        ),
+                        columnar_activation_copy_created_at=datetime.now(timezone.utc)
+                        .replace(tzinfo=None)
+                        .isoformat(),
+                        columnar_activation_copy_id_prefix=self._resolved_columnar_activation_copy_id_prefix(),
+                    )
+
+                    self._log_token_snapshot(
+                        f"before_feature_run_{feature_batch_count}", tokens
+                    )
+                    batch_start_time = time.perf_counter()
+                    batch_start_io = process_io_snapshot()
+                    self._log_batch_boundary_snapshot(
+                        "pre_batch", feature_batch_count, batch_start_io
+                    )
+                    feature_data = self._run_feature_batch_with_optional_profile(
+                        feature_vis_config_gpt,
+                        tokens,
                         feature_batch_count,
                     )
+                    self._log_resource_snapshot(f"after_feature_run_{feature_batch_count}")
 
-                self.cfg.model_id = self.model_id
-                self.cfg.layer = self.layer
-                if self.cfg.dashboard_output_format == "columnar":
-                    if not isinstance(feature_data, SaeVisColumnarData):
-                        raise TypeError(
-                            "Columnar dashboard output requires SaeVisRunner to return SaeVisColumnarData."
+                    converter_input_artifact = None
+                    if self.cfg.dashboard_output_format != "columnar":
+                        converter_input_artifact = self._write_converter_input_artifact(
+                            feature_data,
+                            feature_batch_count,
                         )
-                    if self.cfg.log_performance:
-                        log_perf_event(
-                            "columnar_output_summary",
+
+                    self.cfg.model_id = self.model_id
+                    self.cfg.layer = self.layer
+                    if self.cfg.dashboard_output_format == "columnar":
+                        if not isinstance(feature_data, SaeVisColumnarData):
+                            raise TypeError(
+                                "Columnar dashboard output requires SaeVisRunner to return SaeVisColumnarData."
+                            )
+                        if self.cfg.log_performance:
+                            log_perf_event(
+                                "columnar_output_summary",
+                                batch=feature_batch_count,
+                                feature_count=len(features_to_process),
+                                artifact_dir=str(feature_data.artifact_dir),
+                                manifest_path=str(feature_data.manifest_path),
+                                row_counts={
+                                    batch.feature_batch_index: batch.row_counts
+                                    for batch in feature_data.batches
+                                },
+                            )
+                        print(f"Columnar output written to {feature_data.manifest_path}")
+                    else:
+                        with timed_stage(
+                            self.cfg.log_performance,
+                            "neuronpedia_conversion_and_json_serialization",
                             batch=feature_batch_count,
                             feature_count=len(features_to_process),
-                            artifact_dir=str(feature_data.artifact_dir),
-                            manifest_path=str(feature_data.manifest_path),
-                            row_counts={
-                                batch.feature_batch_index: batch.row_counts
-                                for batch in feature_data.batches
-                            },
-                        )
-                    print(f"Columnar output written to {feature_data.manifest_path}")
-                else:
-                    with timed_stage(
-                        self.cfg.log_performance,
-                        "neuronpedia_conversion_and_json_serialization",
-                        batch=feature_batch_count,
-                        feature_count=len(features_to_process),
-                    ):
-                        json_object = NeuronpediaConverter.convert_to_np_json(
-                            self.model, feature_data, self.cfg, self.vocab_dict
-                        )
-                    write_start_io = process_io_snapshot()
-                    with elapsed_timer() as write_timing:
-                        with open(
-                            output_file,
-                            "w",
-                        ) as f:
-                            f.write(json_object)
-                    write_end_io = process_io_snapshot()
-                    if self.cfg.log_performance:
-                        output_bytes = len(json_object.encode("utf-8"))
-                        write_wall_s = max(write_timing.get("wall_s", 0.0), 1e-9)
-                        log_perf_event(
-                            "disk_write",
-                            batch=feature_batch_count,
-                            path=output_file,
-                            output_bytes=output_bytes,
-                            wall_s=write_wall_s,
-                            output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
-                            process_io_delta=io_delta(write_start_io, write_end_io),
-                        )
-                        if converter_input_artifact is not None:
-                            log_perf_event(
-                                "converter_input_artifact",
-                                batch=feature_batch_count,
-                                path=str(converter_input_artifact),
-                                size_bytes=converter_input_artifact.stat().st_size,
+                        ):
+                            json_object = NeuronpediaConverter.convert_to_np_json(
+                                self.model, feature_data, self.cfg, self.vocab_dict
                             )
-                    print(f"Output written to {output_file}")
-                batch_end_io = process_io_snapshot()
-                if self.cfg.log_performance:
-                    log_perf_event(
-                        "batch_total",
-                        batch=feature_batch_count,
-                        wall_s=time.perf_counter() - batch_start_time,
-                        process_io_delta=io_delta(batch_start_io, batch_end_io),
+                        write_start_io = process_io_snapshot()
+                        with elapsed_timer() as write_timing:
+                            with open(
+                                output_file,
+                                "w",
+                            ) as f:
+                                f.write(json_object)
+                        write_end_io = process_io_snapshot()
+                        if self.cfg.log_performance:
+                            output_bytes = len(json_object.encode("utf-8"))
+                            write_wall_s = max(write_timing.get("wall_s", 0.0), 1e-9)
+                            log_perf_event(
+                                "disk_write",
+                                batch=feature_batch_count,
+                                path=output_file,
+                                output_bytes=output_bytes,
+                                wall_s=write_wall_s,
+                                output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
+                                process_io_delta=io_delta(write_start_io, write_end_io),
+                            )
+                            if converter_input_artifact is not None:
+                                log_perf_event(
+                                    "converter_input_artifact",
+                                    batch=feature_batch_count,
+                                    path=str(converter_input_artifact),
+                                    size_bytes=converter_input_artifact.stat().st_size,
+                                )
+                        print(f"Output written to {output_file}")
+                    batch_end_io = process_io_snapshot()
+                    if self.cfg.log_performance:
+                        log_perf_event(
+                            "batch_total",
+                            batch=feature_batch_count,
+                            wall_s=time.perf_counter() - batch_start_time,
+                            process_io_delta=io_delta(batch_start_io, batch_end_io),
+                        )
+                    self._log_batch_boundary_snapshot(
+                        "post_batch", feature_batch_count, batch_end_io
                     )
-                self._log_batch_boundary_snapshot(
-                    "post_batch", feature_batch_count, batch_end_io
-                )
-                self._log_resource_snapshot(f"post_batch_{feature_batch_count}")
+                    self._log_resource_snapshot(f"post_batch_{feature_batch_count}")
 
-                logline = f"\n========== Completed Batch #{feature_batch_count} output: {output_file} ==========\n"
-                if self.cfg.use_wandb:
-                    wandb.log(
-                        {"batch": feature_batch_count},
-                        step=feature_batch_count,
-                    )
-                # Clean up after each batch
-                del feature_data
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                self._release_unused_host_memory()
-                self._log_resource_snapshot(f"post_batch_cleanup_{feature_batch_count}")
+                    logline = f"\n========== Completed Batch #{feature_batch_count} output: {output_file} ==========\n"
+                    if self.cfg.use_wandb:
+                        wandb.log(
+                            {"batch": feature_batch_count},
+                            step=feature_batch_count,
+                        )
+                    # Clean up after each batch
+                    del feature_data
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    self._release_unused_host_memory()
+                    self._log_resource_snapshot(f"post_batch_cleanup_{feature_batch_count}")
         if self.cfg.use_wandb:
             wandb.sdk.finish()
 
@@ -2366,6 +2384,12 @@ def main():
     )
     parser.add_argument(
         "--use-wandb", action="store_true", help="Use Weights & Biases for logging"
+    )
+    parser.add_argument(
+        "--no-shuffle-tokens",
+        action="store_false",
+        dest="shuffle_tokens",
+        help="Don't shuffle tokens",
     )
     parser.add_argument(
         "--from-local-sae", action="store_true", help="Load SAE from local path"
@@ -2801,6 +2825,7 @@ def main():
         start_batch=args.start_batch,
         end_batch=args.end_batch,
         use_wandb=args.use_wandb,
+        shuffle_tokens=args.shuffle_tokens,
         hf_model_path=args.hf_model_path,
         model_wrapper=args.model_wrapper,
         bridge_enable_compatibility_mode=args.bridge_enable_compatibility_mode,
