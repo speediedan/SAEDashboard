@@ -32,6 +32,7 @@ def test_get_feature_data_uses_configured_correlation_device(
             with_self: bool = False,
             dtype: torch.dtype = torch.float32,
             device: torch.device = torch.device("cpu"),
+            **_: object,
         ) -> None:
             captured_devices.append(device)
 
@@ -152,9 +153,53 @@ def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_precision() 
 
     transferred = generator._transfer_feature_acts_for_output(feature_acts)
 
-    assert transferred.device.type == "cpu"
+    assert transferred.device == feature_acts.device
     assert transferred.dtype == torch.float32
     assert transferred.tolist() == pytest.approx(feature_acts.tolist())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA to verify legacy device preservation.")
+def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_cuda_device() -> None:
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+        device="cuda",
+    )
+
+    feature_acts = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+
+    transferred = generator._transfer_feature_acts_for_output(feature_acts)
+
+    assert transferred.device == feature_acts.device
+    assert transferred.dtype == feature_acts.dtype
+    assert transferred.tolist() == pytest.approx(feature_acts.tolist())
+
+
+def test_preserved_legacy_json_cpu_uses_device_concat() -> None:
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy_json_cpu",
+    )
+
+    assert generator._uses_preserved_legacy_feature_act_concat()
+
+    chunks = [
+        torch.tensor([[[1.0], [0.0]]], dtype=torch.float32),
+        torch.tensor([[[2.0], [3.0]]], dtype=torch.float32),
+    ]
+
+    concatenated = generator._concat_feature_act_chunks(chunks)
+
+    assert concatenated.device.type == "cpu"
+    assert concatenated.dtype == torch.float32
+    assert concatenated.tolist() == [[[1.0], [0.0]], [[2.0], [3.0]]]
+    assert chunks == []
 
 
 def test_transfer_feature_acts_for_output_downcasts_non_legacy_paths() -> None:

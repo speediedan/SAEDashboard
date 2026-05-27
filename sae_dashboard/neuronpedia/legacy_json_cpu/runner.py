@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import gc
-import json
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -70,6 +68,12 @@ def _build_legacy_json_cpu_vis_config(
     *,
     features_to_process: list[int],
 ) -> SaeVisConfig:
+    cache_dir = runner.cached_activations_dir
+    if not runner.cfg.use_cached_activations:
+        # Preserve detached baseline's within-run activation reuse without
+        # reusing caches across runs.
+        cache_dir = Path(runner.cfg.outputs_dir) / "_activation_cache"
+
     return SaeVisConfig(
         hook_point=runner.hook_name,  # type: ignore[arg-type]
         features=features_to_process,
@@ -89,9 +93,7 @@ def _build_legacy_json_cpu_vis_config(
         feature_centric_layout=_build_legacy_json_cpu_layout(runner),
         perform_ablation_experiments=False,
         dtype=runner.cfg.sae_dtype,
-        cache_dir=(
-            runner.cached_activations_dir if runner.cfg.use_cached_activations else None
-        ),
+        cache_dir=cache_dir,
         ignore_tokens={
             tok_id
             for tok_id in (
@@ -111,6 +113,8 @@ def _build_legacy_json_cpu_vis_config(
             else None
         ),
         correlation_accumulation_device="cpu",
+        logits_histogram_compatibility=runner.cfg.logits_histogram_compatibility,
+        legacy_json_cpu_compatibility=runner.cfg.legacy_json_cpu_compatibility,
         sequence_selection_backend=runner.cfg.sequence_selection_backend,
         dashboard_output_format=runner.cfg.dashboard_output_format,
     )

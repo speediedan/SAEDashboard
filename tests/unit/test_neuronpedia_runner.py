@@ -532,7 +532,7 @@ def test_legacy_json_cpu_batch_loop_uses_compatibility_vis_config(
     assert feature_vis_config.correlation_accumulation_device == "cpu"
     assert feature_vis_config.sequence_selection_backend == "legacy_json_cpu"
     assert feature_vis_config.dashboard_output_format == "legacy_json"
-    assert feature_vis_config.cache_dir is None
+    assert feature_vis_config.cache_dir == tmp_path / "_activation_cache"
     assert captured["batch"] == 0
     assert torch.equal(
         captured["tokens"],

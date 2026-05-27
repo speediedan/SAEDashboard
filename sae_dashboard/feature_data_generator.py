@@ -117,8 +117,20 @@ class FeatureDataGenerator:
             self.cfg.dashboard_output_format == "legacy_json"
             and self.cfg.sequence_selection_backend == "legacy_json_cpu"
         ):
-            return feature_acts_for_output.to(device="cpu")
+            return feature_acts_for_output
         return feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
+
+    def _uses_preserved_legacy_feature_act_concat(self) -> bool:
+        return (
+            self.cfg.dashboard_output_format == "legacy_json"
+            and self.cfg.sequence_selection_backend == "legacy_json_cpu"
+        )
+
+    def _uses_detached_legacy_json_cpu_compatibility(self) -> bool:
+        return (
+            self._uses_preserved_legacy_feature_act_concat()
+            and self.cfg.legacy_json_cpu_compatibility == "detached_legacy"
+        )
 
     @staticmethod
     def _current_rss_gib() -> float | None:
@@ -453,6 +465,7 @@ class FeatureDataGenerator:
         total_model_forward_passes = 0
         total_forward_wall_s = 0.0
         get_feature_data_start_time = time.perf_counter()
+        profile_feature_data = self.cfg.log_performance
         total_prompt_count = sum(
             int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches
         )
@@ -471,7 +484,10 @@ class FeatureDataGenerator:
         )
         corrcoef_neurons = RollingCorrCoef(device=correlation_device)
         corrcoef_encoder = RollingCorrCoef(
-            indices=feature_indices, with_self=True, device=correlation_device
+            indices=feature_indices,
+            with_self=True,
+            device=correlation_device,
+            duplicate_same_input_for_legacy_compatibility=self._uses_detached_legacy_json_cpu_compatibility(),
         )
 
         # Get encoder & decoder directions
@@ -487,6 +503,10 @@ class FeatureDataGenerator:
                 feature_out_dir, self.model  # type: ignore
             )  # [feats d_model]
         all_feat_acts_tensor: Tensor | None = None
+        all_feat_act_chunks: list[Tensor] = []
+        use_preserved_legacy_feature_act_concat = (
+            self._uses_preserved_legacy_feature_act_concat()
+        )
 
         # ! Compute & concatenate together all feature activations & post-activation function values
         for i, minibatch in enumerate(self.token_minibatches):
@@ -504,7 +524,7 @@ class FeatureDataGenerator:
                 peak_cuda_reserved_gib, capture_stats.peak_cuda_reserved_gib
             )
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "primary_acts_device_transfer",
                 device=self.cfg.device,
                 minibatch_index=i,
@@ -518,7 +538,7 @@ class FeatureDataGenerator:
             all_features_acts = None
 
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "feature_encode",
                 device=self.cfg.device,
                 minibatch_index=i,
@@ -563,7 +583,7 @@ class FeatureDataGenerator:
             )
 
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "rolling_coefficient_update",
                 device=self.cfg.device,
                 minibatch_index=i,
@@ -578,7 +598,7 @@ class FeatureDataGenerator:
                 )
 
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "feature_acts_pad_and_cpu_transfer",
                 device=self.cfg.device,
                 minibatch_index=i,
@@ -591,12 +611,13 @@ class FeatureDataGenerator:
                     target_seq_len=self.full_sequence_length,
                 )
 
-                # Keep the deprecated legacy JSON CPU compatibility lane at the
-                # baseline activation precision while still downcasting newer
-                # paths to control host memory growth.
-                feature_acts_cpu = self._transfer_feature_acts_for_output(
-                    feature_acts_for_output
-                )
+                if use_preserved_legacy_feature_act_concat:
+                    all_feat_act_chunks.append(feature_acts_for_output)
+                    feature_acts_cpu = None
+                else:
+                    feature_acts_cpu = self._transfer_feature_acts_for_output(
+                        feature_acts_for_output
+                    )
 
             peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
                 self._update_resource_peaks(
@@ -606,30 +627,31 @@ class FeatureDataGenerator:
                 )
             )
 
-            with timed_stage(
-                self.cfg.log_performance,
-                "feature_acts_full_prompt_scatter",
-                device=str(feature_acts_cpu.device),
-                minibatch_index=i,
-                feature_count=len(feature_indices),
-                token_shape=tuple(minibatch.tokens.shape),
-                prompt_count=len(minibatch.prompt_indices),
-            ):
-                if all_feat_acts_tensor is None:
-                    all_feat_acts_tensor = torch.empty(
-                        (
-                            total_prompt_count,
-                            self.full_sequence_length,
-                            feature_acts_cpu.shape[-1],
-                        ),
-                        dtype=feature_acts_cpu.dtype,
-                        device=feature_acts_cpu.device,
+            if feature_acts_cpu is not None:
+                with timed_stage(
+                    profile_feature_data,
+                    "feature_acts_full_prompt_scatter",
+                    device=str(feature_acts_cpu.device),
+                    minibatch_index=i,
+                    feature_count=len(feature_indices),
+                    token_shape=tuple(minibatch.tokens.shape),
+                    prompt_count=len(minibatch.prompt_indices),
+                ):
+                    if all_feat_acts_tensor is None:
+                        all_feat_acts_tensor = torch.empty(
+                            (
+                                total_prompt_count,
+                                self.full_sequence_length,
+                                feature_acts_cpu.shape[-1],
+                            ),
+                            dtype=feature_acts_cpu.dtype,
+                            device=feature_acts_cpu.device,
+                        )
+                    self._scatter_feature_act_chunk(
+                        all_feat_acts_tensor,
+                        feature_acts_cpu,
+                        prompt_indices=minibatch.prompt_indices,
                     )
-                self._scatter_feature_act_chunk(
-                    all_feat_acts_tensor,
-                    feature_acts_cpu,
-                    prompt_indices=minibatch.prompt_indices,
-                )
 
             # Calculate DFA
             if self.cfg.use_dfa and self.dfa_calculator:
@@ -660,7 +682,7 @@ class FeatureDataGenerator:
                 progress[0].update(1)
 
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "feature_data_minibatch_cleanup",
                 device=self.cfg.device,
                 minibatch_index=i,
@@ -668,7 +690,8 @@ class FeatureDataGenerator:
                 cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
             ):
                 del feature_acts_for_output
-                del feature_acts_cpu
+                if feature_acts_cpu is not None:
+                    del feature_acts_cpu
                 del feature_acts
                 del primary_acts
                 del model_activation_dict
@@ -679,8 +702,11 @@ class FeatureDataGenerator:
                     if torch.cuda.is_available() and self.cfg.device.startswith("cuda"):
                         torch.cuda.empty_cache()
 
+        if use_preserved_legacy_feature_act_concat:
+            all_feat_acts_tensor = self._concat_feature_act_chunks(all_feat_act_chunks)
+
         with timed_stage(
-            self.cfg.log_performance,
+            profile_feature_data,
             "feature_data_final_cleanup",
             device=self.cfg.device,
             feature_count=len(feature_indices),
@@ -732,27 +758,10 @@ class FeatureDataGenerator:
         if not feature_act_chunks:
             return torch.empty(0)
 
-        first_chunk = feature_act_chunks[0]
-        concat_shape = (
-            sum(chunk.shape[0] for chunk in feature_act_chunks),
-            *first_chunk.shape[1:],
-        )
-        concatenated = torch.empty(
-            concat_shape,
-            dtype=first_chunk.dtype,
-            device=first_chunk.device,
-        )
-
-        offset = 0
-        for index, chunk in enumerate(feature_act_chunks):
-            next_offset = offset + chunk.shape[0]
-            concatenated[offset:next_offset].copy_(chunk)
-            offset = next_offset
-            feature_act_chunks[index] = chunk.new_empty((0,))
-
+        # Match the detached baseline compatibility path rather than rebuilding
+        # the tensor chunk-by-chunk inside get_feature_data().
+        concatenated = torch.cat(feature_act_chunks, dim=0)
         feature_act_chunks.clear()
-        gc.collect()
-
         return concatenated
 
     @torch.inference_mode()
@@ -767,6 +776,7 @@ class FeatureDataGenerator:
         Uses np.memmap for efficient caching.
         """
         capture_stats = ActivationCaptureStats()
+        profile_feature_data = self.cfg.log_performance
         minibatch_tokens = minibatch.tokens
         cache_path: Path | None = None
         if self.cfg.cache_dir is not None:
@@ -776,18 +786,24 @@ class FeatureDataGenerator:
             cache_path = self.cfg.cache_dir / f"{cache_name}.pt"
             if use_cache and cache_path.exists():
                 with timed_stage(
-                    self.cfg.log_performance,
+                    profile_feature_data,
                     "activation_cache_load",
                     device=self.cfg.device,
                     minibatch_index=minibatch_index,
                     token_shape=tuple(minibatch_tokens.shape),
                 ):
-                    activation_dict = load_tensor_dict_torch(
-                        cache_path, self.cfg.device
+                    # Match the detached baseline cache contract: memory-map on
+                    # CPU here, then let primary_acts_device_transfer own the
+                    # explicit move to the encode device.
+                    activation_dict = torch.load(
+                        cache_path,
+                        map_location="cpu",
+                        weights_only=False,
+                        mmap=True,
                     )
             else:
                 with timed_stage(
-                    self.cfg.log_performance,
+                    profile_feature_data,
                     "activation_capture",
                     device=self.cfg.device,
                     minibatch_index=minibatch_index,
@@ -802,7 +818,7 @@ class FeatureDataGenerator:
                 save_tensor_dict_torch(activation_dict, cache_path)
         else:
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "activation_capture",
                 device=self.cfg.device,
                 minibatch_index=minibatch_index,
@@ -819,7 +835,7 @@ class FeatureDataGenerator:
             activation_dict, minibatch_tokens
         ):
             with timed_stage(
-                self.cfg.log_performance,
+                profile_feature_data,
                 "activation_capture_shape_refresh",
                 device=self.cfg.device,
                 minibatch_index=minibatch_index,

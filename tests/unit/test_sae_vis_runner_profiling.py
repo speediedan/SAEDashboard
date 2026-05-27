@@ -170,6 +170,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         ignore_tokens={0},
         log_performance=True,
         cleanup_each_minibatch=True,
+        logits_histogram_compatibility="detached_legacy",
         sequence_replay_artifact_dir=tmp_path / "sequence_replay_artifacts",
     )
     tokens = torch.tensor([[7, 0]], dtype=torch.long)
@@ -178,7 +179,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         encoder=cast(SAE[Any], _FakeEncoder()),
         model=cast(
             HookedSAETransformer,
-            SimpleNamespace(W_U=torch.tensor([[1.0]], dtype=torch.float32)),
+            SimpleNamespace(W_U=torch.tensor([[0.002, -0.002]], dtype=torch.float32)),
         ),
         tokens=tokens,
     )
@@ -207,6 +208,14 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
     )
     assert packaging_summary["valid_token_count"] == 1
     assert packaging_summary["token_shape"] == [1, 2]
+
+    histogram_compatibility_event = next(
+        event
+        for event in perf_events
+        if event.get("event") == "legacy_json_cpu_logits_histogram_compatibility"
+    )
+    assert histogram_compatibility_event["compatibility"] == "detached_legacy"
+    assert len(sae_vis_data.feature_data_dict[0].logits_histogram_data.tick_vals) > 1000
 
     artifact_event = next(
         event

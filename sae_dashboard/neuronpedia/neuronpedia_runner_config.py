@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
@@ -144,6 +144,8 @@ class NeuronpediaRunnerConfig:
     sequence_replay_artifact_dir: Optional[str] = None
     feature_statistics_backend: str = "arrow"
     logits_histogram_backend: str = "arrow"
+    logits_histogram_compatibility: str = "current"
+    legacy_json_cpu_compatibility: Literal["current", "detached_legacy"] = "current"
     activation_histogram_backend: str = "torch"
     defer_component_construction: bool = False
     sequence_selection_backend: str = "legacy_json_cpu"

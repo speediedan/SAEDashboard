@@ -558,8 +558,71 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selectio
     assert list(lazy_indices_dict) == list(legacy_indices_dict)
     assert lazy_n_bold == legacy_n_bold
     assert torch.equal(lazy_indices_bold, legacy_indices_bold)
-    for group_name, legacy_indices in legacy_indices_dict.items():
-        assert torch.equal(lazy_indices_dict[group_name], legacy_indices)
+
+
+def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> None:
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.legacy_json_cpu_compatibility = "detached_legacy"
+    cfg.feature_centric_layout.seq_cfg.buffer = (1, 1)  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 3  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.n_quantiles = 3  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.quantile_group_size = 4  # type: ignore
+
+    tokens = torch.arange(24, dtype=torch.long).reshape(4, 6)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts = torch.tensor(
+        [
+            [0.0, 0.1, 0.5, 1.0, 0.4, 0.0],
+            [0.0, 0.2, 0.7, 0.3, 0.9, 0.0],
+            [0.0, 0.6, 0.8, 0.4, 0.2, 0.0],
+            [0.0, 0.05, 0.15, 0.25, 0.35, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    random.seed(12345)
+    indices_dict, indices_bold, n_bold = generator.get_indices_dict_legacy_json_cpu(
+        generator.buffer,
+        feat_acts,
+        selection_mask=None,
+    )
+
+    random.seed(12345)
+    expected_indices = k_largest_indices(
+        feat_acts,
+        k=cfg.feature_centric_layout.seq_cfg.top_acts_group_size,  # type: ignore[arg-type]
+        buffer=generator.buffer,
+    ).cpu()
+    expected_indices_dict = {
+        f"TOP ACTIVATIONS<br>MAX = {feat_acts.max():.3f}": expected_indices
+    }
+    quantiles = torch.linspace(
+        0,
+        feat_acts.max().item(),
+        cfg.feature_centric_layout.seq_cfg.n_quantiles + 1,  # type: ignore[operator]
+        device=feat_acts.device,
+    )
+    for i in range(cfg.feature_centric_layout.seq_cfg.n_quantiles - 1, -1, -1):  # type: ignore[operator]
+        lower, upper = quantiles[i : i + 2].tolist()
+        pct = float(
+            ((feat_acts >= lower) & (feat_acts <= upper)).float().mean().item()
+        )
+        expected_indices_dict[
+            f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
+        ] = random_range_indices(
+            feat_acts,
+            k=cfg.feature_centric_layout.seq_cfg.quantile_group_size,  # type: ignore[arg-type]
+            bounds=(lower, upper),
+            buffer=generator.buffer,
+        ).cpu()
+
+    expected_indices_bold = torch.concat(list(expected_indices_dict.values())).cpu()
+
+    assert list(indices_dict) == list(expected_indices_dict)
+    for group_name, expected in expected_indices_dict.items():
+        assert torch.equal(indices_dict[group_name], expected)
+    assert torch.equal(indices_bold, expected_indices_bold)
+    assert n_bold == int(expected_indices_bold.shape[0])
 
 
 def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_selection_mask() -> (
@@ -680,6 +743,36 @@ def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_with_buffer_
     assert torch.equal(legacy_indices_bold, expected_indices_bold)
     for group_name, expected_indices in expected_indices_dict.items():
         assert torch.equal(legacy_indices_dict[group_name], expected_indices)
+
+
+def test_get_indices_dict_legacy_json_cpu_skips_candidate_mask_without_selection_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    seq_cfg = cast(SequencesConfig, cfg.feature_centric_layout.seq_cfg)
+    seq_cfg.buffer = None
+    seq_cfg.top_acts_group_size = 4
+    seq_cfg.n_quantiles = 4
+    seq_cfg.quantile_group_size = 16
+
+    tokens = torch.arange(18, dtype=torch.long).reshape(3, 6)
+    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    feat_acts = torch.tensor(
+        [
+            [0.0, 0.25, 0.5, 0.75, 1.0, 0.0],
+            [0.0, 1.25, 1.5, 1.75, 2.0, 0.0],
+            [0.0, 0.4, 0.8, 1.2, 1.6, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    def _fail_candidate_mask(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("candidate mask path should not run without a selection mask")
+
+    monkeypatch.setattr(generator, "_get_candidate_mask_and_indices", _fail_candidate_mask)
+
+    generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
 
 
 @pytest.mark.skipif(

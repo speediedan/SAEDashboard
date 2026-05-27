@@ -2,10 +2,14 @@ import json
 import os
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterator
 
 import torch
+
+
+_TIMED_STAGE_DEPTH: ContextVar[int] = ContextVar("timed_stage_depth", default=0)
 
 
 def _format_perf_value(value: Any) -> str:
@@ -84,8 +88,12 @@ def timed_stage(
         yield
         return
 
+    stage_depth = _TIMED_STAGE_DEPTH.get()
+    token = _TIMED_STAGE_DEPTH.set(stage_depth + 1)
     torch_device = torch.device(device) if device is not None else None
     use_cuda_events = (
+        stage_depth == 0
+        and
         torch_device is not None
         and torch_device.type == "cuda"
         and torch.cuda.is_available()
@@ -103,19 +111,22 @@ def timed_stage(
         with torch.profiler.record_function(stage):
             yield
     finally:
-        wall_seconds = time.perf_counter() - start_time
-        cuda_ms: float | None = None
-        if use_cuda_events and start_event is not None and end_event is not None:
-            end_event.record(torch.cuda.current_stream(torch_device))
-            torch.cuda.synchronize(torch_device)
-            cuda_ms = float(start_event.elapsed_time(end_event))
-        if torch.cuda.is_available():
-            torch.cuda.nvtx.range_pop()
-        log_fields = dict(fields)
-        log_fields.update({"stage": stage, "wall_s": wall_seconds})
-        if cuda_ms is not None:
-            log_fields["cuda_ms"] = cuda_ms
-        log_perf_event("stage_timing", **log_fields)
+        try:
+            wall_seconds = time.perf_counter() - start_time
+            cuda_ms: float | None = None
+            if use_cuda_events and start_event is not None and end_event is not None:
+                end_event.record(torch.cuda.current_stream(torch_device))
+                torch.cuda.synchronize(torch_device)
+                cuda_ms = float(start_event.elapsed_time(end_event))
+            if torch.cuda.is_available():
+                torch.cuda.nvtx.range_pop()
+            log_fields = dict(fields)
+            log_fields.update({"stage": stage, "wall_s": wall_seconds})
+            if cuda_ms is not None:
+                log_fields["cuda_ms"] = cuda_ms
+            log_perf_event("stage_timing", **log_fields)
+        finally:
+            _TIMED_STAGE_DEPTH.reset(token)
 
 
 @contextmanager

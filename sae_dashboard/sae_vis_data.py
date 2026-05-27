@@ -35,6 +35,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     correlation_accumulation_device="Policy for where correlation accumulators should live during packaging.",
     feature_statistics_backend="Backend used to build columnar feature statistics when dashboard_output_format is columnar.",
     logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
+    legacy_json_cpu_compatibility="Compatibility mode for preserved legacy JSON CPU dashboard generation.",
     activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
     defer_component_construction="Whether columnar/dashboard callers should avoid rebuilding the legacy nested component graph when not needed.",
     sequence_selection_backend="Candidate-selection backend for sequence packaging.",
@@ -102,6 +103,8 @@ class SaeVisConfig:
     correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
     feature_statistics_backend: Literal["object", "arrow"] = "object"
     logits_histogram_backend: Literal["object", "arrow"] = "object"
+    logits_histogram_compatibility: Literal["current", "detached_legacy"] = "current"
+    legacy_json_cpu_compatibility: Literal["current", "detached_legacy"] = "current"
     activation_histogram_backend: Literal["torch", "polars"] = "torch"
     defer_component_construction: bool = False
     sequence_selection_backend: Literal["legacy_json_cpu", "lazy_gpu"] = "legacy_json_cpu"

@@ -893,37 +893,104 @@ class SequenceDataGenerator:
 
         return feat_acts_view, selection_mask_view, col_offset
 
+    def _get_indices_dict_detached_legacy_unmasked(
+        self,
+        buffer: tuple[int, int] | None,
+        feat_acts: Float[Tensor, "batch seq"],
+    ):
+        indices = k_largest_indices(
+            feat_acts,
+            k=self.seq_cfg.top_acts_group_size,
+            buffer=buffer,
+        ).cpu()
+        indices_dict = {f"TOP ACTIVATIONS<br>MAX = {feat_acts.max():.3f}": indices}
+
+        if self.seq_cfg.n_quantiles > 0:
+            quantiles = torch.linspace(
+                0,
+                feat_acts.max().item(),
+                self.seq_cfg.n_quantiles + 1,
+                device=feat_acts.device,
+            )
+            for i in range(self.seq_cfg.n_quantiles - 1, -1, -1):
+                lower, upper = quantiles[i : i + 2].tolist()
+                pct = float(
+                    ((feat_acts >= lower) & (feat_acts <= upper))
+                    .float()
+                    .mean()
+                    .item()
+                )
+                indices = random_range_indices(
+                    feat_acts,
+                    k=self.seq_cfg.quantile_group_size,
+                    bounds=(lower, upper),
+                    buffer=buffer,
+                ).cpu()
+                indices_dict[
+                    f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
+                ] = indices
+
+        indices_bold = torch.concat(list(indices_dict.values())).cpu()
+        n_bold = indices_bold.shape[0]
+        return indices_dict, indices_bold, n_bold
+
     def get_indices_dict_legacy_json_cpu(
         self,
         buffer: tuple[int, int] | None,
         feat_acts: Float[Tensor, "batch seq"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
     ):
+        if (
+            selection_mask is None
+            and getattr(self.cfg, "legacy_json_cpu_compatibility", "current")
+            == "detached_legacy"
+        ):
+            # Keep the detached-legacy comparison lane on the original unmasked
+            # selector path instead of paying for the richer current helper.
+            return self._get_indices_dict_detached_legacy_unmasked(
+                buffer,
+                feat_acts,
+            )
+
         profile_enabled = bool(getattr(self.cfg, "log_performance", False))
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
-        mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, _, candidate_flat_indices = (
-            self._get_candidate_mask_and_indices(
+        feat_acts_view, selection_mask_view, col_offset = self._get_legacy_selection_views(
+            feat_acts,
+            buffer,
+            selection_mask=selection_mask,
+        )
+
+        mask_setup_wall_s = 0.0
+        candidate_extract_wall_s = 0.0
+        if selection_mask is None:
+            candidate_values = feat_acts_view.reshape(-1)
+            feat_max = (
+                float(feat_acts.max().item())
+                if feat_acts.numel() > 0
+                else 0.0
+            )
+        else:
+            mask_setup_start = perf_counter() if profile_enabled else 0.0
+            _, _, candidate_flat_indices = self._get_candidate_mask_and_indices(
                 feat_acts,
                 buffer,
                 selection_mask,
             )
-        )
-        mask_setup_wall_s = (
-            perf_counter() - mask_setup_start if profile_enabled else 0.0
-        )
+            mask_setup_wall_s = (
+                perf_counter() - mask_setup_start if profile_enabled else 0.0
+            )
 
-        candidate_extract_start = perf_counter() if profile_enabled else 0.0
-        candidate_values = feat_acts.reshape(-1)[candidate_flat_indices]
-        feat_max = (
-            float(candidate_values.max().item())
-            if candidate_values.numel() > 0
-            else 0.0
-        )
-        candidate_extract_wall_s = (
-            perf_counter() - candidate_extract_start if profile_enabled else 0.0
-        )
+            candidate_extract_start = perf_counter() if profile_enabled else 0.0
+            candidate_values = feat_acts.reshape(-1)[candidate_flat_indices]
+            feat_max = (
+                float(candidate_values.max().item())
+                if candidate_values.numel() > 0
+                else 0.0
+            )
+            candidate_extract_wall_s = (
+                perf_counter() - candidate_extract_start if profile_enabled else 0.0
+            )
 
         candidate_token_count = int(candidate_values.numel())
         candidate_positive_count = 0
@@ -935,12 +1002,6 @@ class SequenceDataGenerator:
             candidate_negative_count = (
                 candidate_token_count - candidate_positive_count - candidate_zero_count
             )
-
-        feat_acts_view, selection_mask_view, col_offset = self._get_legacy_selection_views(
-            feat_acts,
-            buffer,
-            selection_mask=selection_mask,
-        )
 
         # Get the top-activating tokens
         topk_start = perf_counter() if profile_enabled else 0.0
@@ -1670,6 +1731,18 @@ class SequenceDataGenerator:
         top_contribution_to_logits: TopK | None = None,
         bottom_contribution_to_logits: TopK | None = None,
     ):
+        if getattr(self.cfg, "legacy_json_cpu_compatibility", "current") == "detached_legacy":
+            return self._package_sequences_data_detached_legacy(
+                token_ids=token_ids,
+                feat_acts_coloring=feat_acts_coloring,
+                feat_logits=feat_logits,
+                indices_dict=indices_dict,
+                indices_bold=indices_bold,
+                loss_contribution=loss_contribution,
+                top_contribution_to_logits=top_contribution_to_logits,
+                bottom_contribution_to_logits=bottom_contribution_to_logits,
+            )
+
         if self.cfg.perform_ablation_experiments:
             raise NotImplementedError(
                 "We are not supporting ablation experiments for now."
@@ -1705,6 +1778,51 @@ class SequenceDataGenerator:
             indices_bold=indices_bold,
         )
         return sequence_coordinate_table.to_sequence_multi_group_data()
+
+    def _package_sequences_data_detached_legacy(
+        self,
+        token_ids: Int[Tensor, "n_bold buf"],
+        feat_acts_coloring: Float[Tensor, "n_bold buf"],
+        feat_logits: Float[Tensor, "d_vocab"],
+        indices_dict: dict[str, Int[Tensor, "n_bold 2"]],
+        indices_bold: Int[Tensor, "n_bold"],
+        loss_contribution: Float[Tensor, "n_bold 1"] | None = None,
+        top_contribution_to_logits: TopK | None = None,
+        bottom_contribution_to_logits: TopK | None = None,
+    ) -> SequenceMultiGroupData:
+        del loss_contribution, top_contribution_to_logits, bottom_contribution_to_logits
+
+        sequence_groups_data = []
+        group_sizes_cumsum = np.cumsum(
+            [0] + [len(indices) for indices in indices_dict.values()]
+        ).tolist()
+
+        feat_logits = feat_logits.cpu()
+        feat_acts_coloring = feat_acts_coloring.cpu()
+        token_ids = token_ids.cpu()
+        indices_bold = indices_bold.cpu()
+
+        if self.cfg.perform_ablation_experiments:
+            raise NotImplementedError(
+                "We are not supporting ablation experiments for now."
+            )
+
+        for group_idx, group_name in enumerate(indices_dict.keys()):
+            seq_data = [
+                SequenceData(
+                    original_index=int(indices_bold[i, 0].item()),
+                    token_ids=token_ids[i].tolist(),
+                    feat_acts=[round(f, 4) for f in feat_acts_coloring[i].tolist()],
+                    token_logits=feat_logits[token_ids[i]].tolist(),
+                    qualifying_token_index=int(indices_bold[i, 1].item()),
+                )
+                for i in range(
+                    group_sizes_cumsum[group_idx], group_sizes_cumsum[group_idx + 1]
+                )
+            ]
+            sequence_groups_data.append(SequenceGroupData(group_name, seq_data))
+
+        return SequenceMultiGroupData(sequence_groups_data)
 
     def build_sequence_coordinate_table(
         self,

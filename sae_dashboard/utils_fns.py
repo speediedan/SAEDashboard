@@ -1341,6 +1341,7 @@ class RollingCorrCoef:
         with_self: bool = False,
         dtype: torch.dtype = torch.float32,
         device: torch.device = torch.device("cpu"),
+        duplicate_same_input_for_legacy_compatibility: bool = False,
     ) -> None:
         """
         Args:
@@ -1358,6 +1359,7 @@ class RollingCorrCoef:
         self.with_self = with_self
         self.dtype = dtype
         self.device = device
+        self.duplicate_same_input_for_legacy_compatibility = duplicate_same_input_for_legacy_compatibility
 
     def update(self, x: Float[Tensor, "X N"], y: Float[Tensor, "Y N"]) -> None:
         # Get values of x and y, and check for consistency with each other & with previous values
@@ -1380,7 +1382,7 @@ class RollingCorrCoef:
         self.X = X
         self.Y = Y
 
-        same_input = x is y
+        same_input = x is y and not self.duplicate_same_input_for_legacy_compatibility
         x = x.to(dtype=self.dtype, device=self.device)
         y = x if same_input else y.to(dtype=self.dtype, device=self.device)
 
