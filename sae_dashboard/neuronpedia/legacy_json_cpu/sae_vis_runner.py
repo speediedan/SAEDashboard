@@ -24,7 +24,7 @@ from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
 )
 from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import SaeVisData
-from sae_dashboard.utils_fns import FeatureStatistics
+from sae_dashboard.utils_fns import FeatureStatistics, merge_lists
 
 if TYPE_CHECKING:
     from sae_dashboard.sae_vis_runner import SaeVisRunner
@@ -71,11 +71,11 @@ def _detached_legacy_tick_values(
         num_negative_ticks = 3
         num_positive_ticks = int(max_value / tickrange)
 
-    tick_vals = [
-        *reversed([-tickrange * i for i in range(1, 1 + num_negative_ticks)]),
-        0,
-        *[tickrange * i for i in range(1, 1 + num_positive_ticks)],
-    ]
+    tick_vals = merge_lists(
+        reversed([-tickrange * i for i in range(1, 1 + num_negative_ticks)]),
+        [0],
+        [tickrange * i for i in range(1, 1 + num_positive_ticks)],
+    )
     return [round(tick_value, 1) for tick_value in tick_vals]
 
 

@@ -3,13 +3,17 @@ import os
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 import torch
 
-
 _TIMED_STAGE_DEPTH: ContextVar[int] = ContextVar("timed_stage_depth", default=0)
+
+
+def _local_log_timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
 
 
 def _format_perf_value(value: Any) -> str:
@@ -23,7 +27,7 @@ def _format_perf_value(value: Any) -> str:
 def log_perf_event(event: str, **fields: Any) -> None:
     payload = {"event": event, **fields}
     print(
-        "[runner_perf] "
+        f"{_local_log_timestamp()} [runner_perf] "
         + " ".join(
             f"{key}={_format_perf_value(value)}" for key, value in payload.items()
         ),

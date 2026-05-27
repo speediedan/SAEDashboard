@@ -1,6 +1,18 @@
+import re
 from contextlib import nullcontext
 
 import sae_dashboard.perf_logging as perf_logging
+
+
+def test_log_perf_event_prefixes_local_timestamp(capsys) -> None:
+    perf_logging.log_perf_event("batch_total", batch=3, wall_s=1.25)
+
+    captured = capsys.readouterr().out.strip()
+
+    assert re.match(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[runner_perf\] event=batch_total batch=3 wall_s=1\.250000$",
+        captured,
+    )
 
 
 def test_timed_stage_skips_nested_cuda_synchronization(
