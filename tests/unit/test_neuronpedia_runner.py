@@ -115,6 +115,33 @@ def test_legacy_json_cpu_get_tokens_uses_explicit_shared_tokens_file(
     )
 
 
+def test_legacy_json_cpu_vis_config_forces_cpu_correlation_accumulation(
+    runner_config: NeuronpediaRunnerConfig, tmp_path: Path
+) -> None:
+    runner_config.dashboard_output_format = "legacy_json"
+    runner_config.sequence_selection_backend = "legacy_json_cpu"
+    runner_config.outputs_dir = str(tmp_path / "outputs")
+    runner_config.correlation_accumulation_device = "cuda"
+
+    runner = SimpleNamespace(
+        cfg=runner_config,
+        cached_activations_dir=tmp_path / "cached_activations",
+        hook_name="blocks.5.hook_resid_pre",
+        tokenizer=SimpleNamespace(
+            pad_token_id=None,
+            bos_token_id=1,
+            eos_token_id=2,
+        ),
+    )
+
+    vis_cfg = legacy_json_cpu_runner._build_legacy_json_cpu_vis_config(
+        runner,
+        features_to_process=[0, 1],
+    )
+
+    assert vis_cfg.correlation_accumulation_device == "cpu"
+
+
 def test_materialize_pretokenized_dataset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

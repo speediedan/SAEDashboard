@@ -18,6 +18,7 @@ from typing import (
 
 import numpy as np
 import torch
+import einops
 from dataclasses_json import dataclass_json
 from eindex import eindex
 from jaxtyping import Bool, Float, Int
@@ -1342,6 +1343,7 @@ class RollingCorrCoef:
         dtype: torch.dtype = torch.float32,
         device: torch.device = torch.device("cpu"),
         duplicate_same_input_for_legacy_compatibility: bool = False,
+        use_legacy_cpu_update_for_compatibility: bool = False,
     ) -> None:
         """
         Args:
@@ -1360,6 +1362,19 @@ class RollingCorrCoef:
         self.dtype = dtype
         self.device = device
         self.duplicate_same_input_for_legacy_compatibility = duplicate_same_input_for_legacy_compatibility
+        self.use_legacy_cpu_update_for_compatibility = use_legacy_cpu_update_for_compatibility
+
+    def _update_sums_with_preserved_legacy_cpu_behavior(
+        self,
+        x: Float[Tensor, "X N"],
+        y: Float[Tensor, "Y N"],
+    ) -> None:
+        self.x_sum += einops.reduce(x, "X N -> X", "sum")
+        self.xy_sum += einops.einsum(x, y, "X N, Y N -> X Y")
+        self.x2_sum += einops.reduce(x**2, "X N -> X", "sum")
+        if not self.with_self:
+            self.y_sum += einops.reduce(y, "Y N -> Y", "sum")
+            self.y2_sum += einops.reduce(y**2, "Y N -> Y", "sum")
 
     def update(self, x: Float[Tensor, "X N"], y: Float[Tensor, "Y N"]) -> None:
         # Get values of x and y, and check for consistency with each other & with previous values
@@ -1397,6 +1412,10 @@ class RollingCorrCoef:
 
         # Next, update the sums
         self.n += x.shape[-1]
+        if self.use_legacy_cpu_update_for_compatibility and self.device.type == "cpu":
+            self._update_sums_with_preserved_legacy_cpu_behavior(x, y)
+            return
+
         self.x_sum += x.sum(dim=-1)
         self.xy_sum.addmm_(x, y.mT)
         self.x2_sum += (x * x).sum(dim=-1)

@@ -482,12 +482,19 @@ class FeatureDataGenerator:
             self.cfg.device,
             self.cfg.correlation_accumulation_device,
         )
-        corrcoef_neurons = RollingCorrCoef(device=correlation_device)
+        use_detached_legacy_corrcoef_compatibility = (
+            self._uses_detached_legacy_json_cpu_compatibility()
+        )
+        corrcoef_neurons = RollingCorrCoef(
+            device=correlation_device,
+            use_legacy_cpu_update_for_compatibility=use_detached_legacy_corrcoef_compatibility,
+        )
         corrcoef_encoder = RollingCorrCoef(
             indices=feature_indices,
             with_self=True,
             device=correlation_device,
-            duplicate_same_input_for_legacy_compatibility=self._uses_detached_legacy_json_cpu_compatibility(),
+            duplicate_same_input_for_legacy_compatibility=use_detached_legacy_corrcoef_compatibility,
+            use_legacy_cpu_update_for_compatibility=use_detached_legacy_corrcoef_compatibility,
         )
 
         # Get encoder & decoder directions
