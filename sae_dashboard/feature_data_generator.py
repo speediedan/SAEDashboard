@@ -113,23 +113,31 @@ class FeatureDataGenerator:
         self,
         feature_acts_for_output: Tensor,
     ) -> Tensor:
-        if (
-            self.cfg.dashboard_output_format == "legacy_json"
-            and self.cfg.sequence_selection_backend == "legacy_json_cpu"
-        ):
-            return feature_acts_for_output
         return feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
 
     def _uses_preserved_legacy_feature_act_concat(self) -> bool:
-        return (
-            self.cfg.dashboard_output_format == "legacy_json"
-            and self.cfg.sequence_selection_backend == "legacy_json_cpu"
-        )
+        return False
 
     def _uses_detached_legacy_json_cpu_compatibility(self) -> bool:
-        return (
-            self._uses_preserved_legacy_feature_act_concat()
-            and self.cfg.legacy_json_cpu_compatibility == "detached_legacy"
+        return False
+
+    def _create_corrcoef_neurons(
+        self,
+        *,
+        correlation_device: torch.device,
+    ) -> RollingCorrCoef:
+        return RollingCorrCoef(device=correlation_device)
+
+    def _create_corrcoef_encoder(
+        self,
+        *,
+        feature_indices: list[int],
+        correlation_device: torch.device,
+    ) -> RollingCorrCoef:
+        return RollingCorrCoef(
+            indices=feature_indices,
+            with_self=True,
+            device=correlation_device,
         )
 
     @staticmethod
@@ -482,19 +490,12 @@ class FeatureDataGenerator:
             self.cfg.device,
             self.cfg.correlation_accumulation_device,
         )
-        use_detached_legacy_corrcoef_compatibility = (
-            self._uses_detached_legacy_json_cpu_compatibility()
+        corrcoef_neurons = self._create_corrcoef_neurons(
+            correlation_device=correlation_device,
         )
-        corrcoef_neurons = RollingCorrCoef(
-            device=correlation_device,
-            use_legacy_cpu_update_for_compatibility=use_detached_legacy_corrcoef_compatibility,
-        )
-        corrcoef_encoder = RollingCorrCoef(
-            indices=feature_indices,
-            with_self=True,
-            device=correlation_device,
-            duplicate_same_input_for_legacy_compatibility=use_detached_legacy_corrcoef_compatibility,
-            use_legacy_cpu_update_for_compatibility=use_detached_legacy_corrcoef_compatibility,
+        corrcoef_encoder = self._create_corrcoef_encoder(
+            feature_indices=feature_indices,
+            correlation_device=correlation_device,
         )
 
         # Get encoder & decoder directions

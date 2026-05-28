@@ -38,6 +38,7 @@ from sae_dashboard.huggingface_model_wrapper import (
     HuggingFaceModelWrapper,
 )
 from sae_dashboard.neuronpedia.legacy_json_cpu import (
+    feature_data_generator as legacy_json_cpu_feature_data_generator,
     sae_vis_runner as legacy_json_cpu_sae_vis_runner,
 )
 from sae_dashboard.neuronpedia.legacy_json_cpu.runner import (
@@ -101,6 +102,16 @@ def _build_ignore_tokens_mask(
 
 class FeatureDataGeneratorFactory:
     @staticmethod
+    def resolve_feature_data_generator_cls(
+        cfg: SaeVisConfig,
+    ) -> type[FeatureDataGenerator]:
+        if is_preserved_legacy_json_cpu_path(cfg):
+            return (
+                legacy_json_cpu_feature_data_generator.LegacyJSONCPUFeatureDataGenerator
+            )
+        return FeatureDataGenerator
+
+    @staticmethod
     def create(
         cfg: SaeVisConfig,
         model: Union[HookedSAETransformer, AutoModelForCausalLM],
@@ -157,7 +168,10 @@ class FeatureDataGeneratorFactory:
             )
             wrapped_model = TransformerLensWrapper(model, activation_config)  # type: ignore
 
-        return FeatureDataGenerator(
+        feature_data_generator_cls = (
+            FeatureDataGeneratorFactory.resolve_feature_data_generator_cls(cfg)
+        )
+        return feature_data_generator_cls(
             cfg=cfg,
             model=wrapped_model,
             encoder=encoder,

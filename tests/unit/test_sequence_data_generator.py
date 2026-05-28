@@ -569,7 +569,7 @@ def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> N
     cfg.feature_centric_layout.seq_cfg.quantile_group_size = 4  # type: ignore
 
     tokens = torch.arange(24, dtype=torch.long).reshape(4, 6)
-    generator = SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
     feat_acts = torch.tensor(
         [
             [0.0, 0.1, 0.5, 1.0, 0.4, 0.0],
@@ -623,6 +623,51 @@ def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> N
         assert torch.equal(indices_dict[group_name], expected)
     assert torch.equal(indices_bold, expected_indices_bold)
     assert n_bold == int(expected_indices_bold.shape[0])
+
+
+def test_legacy_json_cpu_detached_legacy_packaging_stays_in_legacy_subclass() -> None:
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.legacy_json_cpu_compatibility = "detached_legacy"
+
+    tokens = torch.arange(6, dtype=torch.long).reshape(2, 3)
+    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+
+    token_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    feat_acts_coloring = torch.tensor(
+        [[0.12344, 0.12345, -1.23456], [2.34561, -0.44444, 0.0]]
+    )
+    feat_logits = torch.linspace(-1.0, 1.0, 10)
+    indices_dict = {
+        "Group1": torch.tensor([[10, 1]]),
+        "Group2": torch.tensor([[11, 2]]),
+    }
+    indices_bold = torch.tensor([[10, 1], [11, 2]])
+
+    sequence_multi_group_data = generator.package_sequences_data(
+        token_ids=token_ids,
+        feat_acts_coloring=feat_acts_coloring,
+        feat_logits=feat_logits,
+        indices_dict=indices_dict,
+        indices_bold=indices_bold,
+    )
+
+    assert [group.title for group in sequence_multi_group_data.seq_group_data] == [
+        "Group1",
+        "Group2",
+    ]
+    first_sequence = sequence_multi_group_data.seq_group_data[0].seq_data[0]
+    second_sequence = sequence_multi_group_data.seq_group_data[1].seq_data[0]
+
+    assert first_sequence.original_index == 10
+    assert first_sequence.qualifying_token_index == 1
+    assert first_sequence.token_ids == [1, 2, 3]
+    assert first_sequence.feat_acts == [0.1234, 0.1235, -1.2346]
+    assert first_sequence.token_logits == feat_logits[token_ids[0]].tolist()
+    assert second_sequence.original_index == 11
+    assert second_sequence.qualifying_token_index == 2
+    assert second_sequence.token_ids == [4, 5, 6]
+    assert second_sequence.feat_acts == [2.3456, -0.4444, 0.0]
+    assert second_sequence.token_logits == feat_logits[token_ids[1]].tolist()
 
 
 def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_selection_mask() -> (

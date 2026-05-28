@@ -13,6 +13,9 @@ import torch
 from sae_lens import SAE, SkipTranscoder
 
 from sae_dashboard.feature_data_generator import FeatureMaskingContext
+from sae_dashboard.neuronpedia.legacy_json_cpu.utils_fns import (
+    RollingCorrCoef as LegacyRollingCorrCoef,
+)
 from sae_dashboard.utils_fns import RollingCorrCoef
 
 DETACHED_SLOW_ROOT_ENV = "SAE_DASHBOARD_DETACHED_SLOW_REPLAY_ROOT"
@@ -199,28 +202,25 @@ def _load_replay_inputs(spec: ReplayRunSpec) -> list[ReplayInputs]:
     return replay_inputs
 
 
-def _measure_current_update_ms(
+def _measure_update_ms(
     replay_input: ReplayInputs,
     *,
     repeats: int,
-    use_legacy_cpu_update_for_compatibility: bool,
+    corrcoef_cls: type[Any],
 ) -> tuple[float, ...]:
     timings_ms: list[float] = []
     feature_indices = list(range(replay_input.feature_acts.shape[-1]))
 
     for _ in range(repeats):
-        corrcoef_neurons = RollingCorrCoef(
+        corrcoef_neurons = corrcoef_cls(
             dtype=torch.float32,
             device=torch.device("cpu"),
-            use_legacy_cpu_update_for_compatibility=use_legacy_cpu_update_for_compatibility,
         )
-        corrcoef_encoder = RollingCorrCoef(
+        corrcoef_encoder = corrcoef_cls(
             indices=feature_indices,
             with_self=True,
             dtype=torch.float32,
             device=torch.device("cpu"),
-            duplicate_same_input_for_legacy_compatibility=True,
-            use_legacy_cpu_update_for_compatibility=use_legacy_cpu_update_for_compatibility,
         )
         start_time = time.perf_counter()
         feature_acts_by_feature = einops.rearrange(
@@ -297,20 +297,20 @@ def _summarize_timings(
 ) -> TimingSummary:
     current_iteration_medians_ms = tuple(
         statistics.median(
-            _measure_current_update_ms(
+            _measure_update_ms(
                 replay_input,
                 repeats=REPLAY_REPEATS,
-                use_legacy_cpu_update_for_compatibility=False,
+                corrcoef_cls=RollingCorrCoef,
             )
         )
         for replay_input in replay_inputs
     )
     compat_iteration_medians_ms = tuple(
         statistics.median(
-            _measure_current_update_ms(
+            _measure_update_ms(
                 replay_input,
                 repeats=REPLAY_REPEATS,
-                use_legacy_cpu_update_for_compatibility=True,
+                corrcoef_cls=LegacyRollingCorrCoef,
             )
         )
         for replay_input in replay_inputs

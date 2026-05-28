@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import einops
 import torch
@@ -11,7 +11,6 @@ from torch import Tensor
 from sae_dashboard.components import (
     ActsHistogramData,
     FeatureTablesData,
-    LogitsHistogramData,
 )
 from sae_dashboard.data_parsing_fns import (
     get_features_table_data,
@@ -19,12 +18,13 @@ from sae_dashboard.data_parsing_fns import (
 )
 from sae_dashboard.feature_data import FeatureData
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
+from sae_dashboard.neuronpedia.legacy_json_cpu import utils_fns as legacy_utils_fns
 from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
     LegacyJSONCPUSequenceDataGenerator,
 )
 from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import SaeVisData
-from sae_dashboard.utils_fns import FeatureStatistics, merge_lists
+from sae_dashboard.utils_fns import FeatureStatistics
 
 if TYPE_CHECKING:
     from sae_dashboard.sae_vis_runner import SaeVisRunner
@@ -50,69 +50,6 @@ def _build_ignore_tokens_mask(
         ignore_positions_mask[:, cfg.ignore_positions] = False
         ignore_tokens_mask &= ignore_positions_mask
     return ignore_tokens_mask.to(target_device)
-
-
-def _detached_legacy_tick_values(
-    max_value: float,
-    min_value: float,
-    tickmode: Literal["ints", "5 ticks"],
-) -> list[float]:
-    assert tickmode in ["ints", "5 ticks"]
-    if tickmode == "ints":
-        top_tickval = int(max_value)
-        return torch.arange(0, top_tickval + 1, 1).tolist()
-
-    if max_value > -min_value:
-        tickrange = 0.1 * int(1e-4 + max_value / (3 * 0.1)) + 1e-6
-        num_positive_ticks = 3
-        num_negative_ticks = int(-min_value / tickrange)
-    else:
-        tickrange = 0.1 * int(1e-4 + -min_value / (3 * 0.1)) + 1e-6
-        num_negative_ticks = 3
-        num_positive_ticks = int(max_value / tickrange)
-
-    tick_vals = merge_lists(
-        reversed([-tickrange * i for i in range(1, 1 + num_negative_ticks)]),
-        [0],
-        [tickrange * i for i in range(1, 1 + num_positive_ticks)],
-    )
-    return [round(tick_value, 1) for tick_value in tick_vals]
-
-
-def _logits_histogram_from_data(
-    *,
-    data: Tensor,
-    n_bins: int,
-    tickmode: Literal["ints", "5 ticks"],
-    title: str | None,
-    compatibility: str,
-) -> LogitsHistogramData:
-    if compatibility != "detached_legacy":
-        return LogitsHistogramData.from_data(
-            data=data,
-            n_bins=n_bins,
-            tickmode=tickmode,
-            title=title,
-        )
-
-    if data.numel() == 0:
-        return LogitsHistogramData()
-
-    max_value = data.max().item()
-    min_value = data.min().item()
-    bin_size = (max_value - min_value) / n_bins
-    bin_edges = torch.linspace(min_value, max_value, n_bins + 1)
-    bar_heights = torch.histc(data, bins=n_bins).int().tolist()
-    bar_values = [round(x, 5) for x in (bin_edges[:-1] + bin_size / 2).tolist()]
-    tick_vals = _detached_legacy_tick_values(max_value, min_value, tickmode)
-
-    return LogitsHistogramData(
-        bar_heights=bar_heights,
-        bar_values=bar_values,
-        tick_vals=tick_vals,
-        title=title,
-    )
-
 
 def run_object_feature_batch(
     runner: SaeVisRunner,
@@ -237,7 +174,7 @@ def run_object_feature_batch(
             )
         for feat, logit_vector in zip(features, logits):
             feature_data_dict[feat].logits_histogram_data = (
-                _logits_histogram_from_data(
+                legacy_utils_fns.logits_histogram_from_data(
                     data=logit_vector.to(torch.float32),
                     n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
                     tickmode="5 ticks",
