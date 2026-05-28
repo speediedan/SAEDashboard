@@ -4,10 +4,12 @@ from typing import Literal
 
 import einops
 import torch
+from eindex import eindex
 from jaxtyping import Float
 from torch import Tensor
 
 from sae_dashboard.components import LogitsHistogramData
+from sae_dashboard.utils_fns import TopK
 
 
 class RollingCorrCoef:
@@ -58,6 +60,51 @@ class RollingCorrCoef:
         if not self.with_self:
             self.y_sum += einops.reduce(y, "Y N -> Y", "sum")
             self.y2_sum += einops.reduce(y**2, "Y N -> Y", "sum")
+
+    def corrcoef(
+        self,
+    ) -> tuple[Float[Tensor, "X Y"], Float[Tensor, "X Y"]]:
+        if self.with_self:
+            self.y_sum = self.x_sum
+            self.y2_sum = self.x2_sum
+
+        cossim_numer = self.xy_sum
+        cossim_denom = torch.sqrt(torch.outer(self.x2_sum, self.y2_sum)) + 1e-6
+        cossim = cossim_numer / cossim_denom
+
+        pearson_numer = self.n * self.xy_sum - torch.outer(self.x_sum, self.y_sum)
+        pearson_denom = (
+            torch.sqrt(
+                torch.outer(
+                    self.n * self.x2_sum - self.x_sum**2,
+                    self.n * self.y2_sum - self.y_sum**2,
+                )
+            )
+            + 1e-6
+        )
+        pearson = pearson_numer / pearson_denom
+
+        if self.with_self:
+            d = cossim.shape[0]
+            cossim[range(d), range(d)] = 0.0
+            pearson[range(d), range(d)] = 0.0
+
+        return pearson, cossim
+
+    def topk_pearson(
+        self,
+        k: int,
+        largest: bool = True,
+    ) -> tuple[list[list[int]], list[list[float]], list[list[float]]]:
+        pearson, cossim = self.corrcoef()
+        pearson_topk = TopK(tensor=pearson, k=k, largest=largest)
+        cossim_values = eindex(cossim, pearson_topk.indices, "X [X k]")
+
+        indices = pearson_topk.indices.tolist()
+        if self.indices is not None:
+            indices = [[self.indices[i] for i in row] for row in indices]
+
+        return indices, pearson_topk.values.tolist(), cossim_values.tolist()
 
 
 def detached_legacy_tick_values(

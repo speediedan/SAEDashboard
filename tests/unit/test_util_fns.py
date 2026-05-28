@@ -2,6 +2,9 @@ import numpy as np
 import pytest
 import torch
 
+from sae_dashboard.neuronpedia.legacy_json_cpu.utils_fns import (
+    RollingCorrCoef as LegacyRollingCorrCoef,
+)
 from sae_dashboard.utils_fns import (
     FeatureStatistics,
     HistogramData,
@@ -94,6 +97,34 @@ def test_RollingCorrCoef_corrcoef():
 
     full_corrcoef = torch.corrcoef(torch.cat([xs, ys]))
     assert torch.allclose(pearson, full_corrcoef[:10, 10:], atol=1e-5)
+
+
+def test_legacy_RollingCorrCoef_topk_pearson_matches_shared():
+    xs = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 7.0],
+            [7.0, 5.0, 4.0, 2.5, 2.0, 1.0],
+            [0.5, 1.5, 0.0, 2.0, 1.0, 3.5],
+        ]
+    )
+    ys = torch.tensor(
+        [
+            [1.0, 2.1, 3.2, 4.1, 5.2, 7.1],
+            [6.8, 5.2, 3.9, 2.4, 2.1, 1.1],
+            [0.6, 1.4, 0.2, 2.2, 0.8, 3.4],
+            [2.0, 0.0, 1.0, 0.5, 4.0, 1.0],
+        ]
+    )
+
+    shared = RollingCorrCoef()
+    legacy = LegacyRollingCorrCoef()
+    for start, end in ((0, 2), (2, 5), (5, 6)):
+        shared.update(xs[:, start:end], ys[:, start:end])
+        legacy.update(xs[:, start:end], ys[:, start:end])
+
+    assert torch.allclose(shared.corrcoef()[0], legacy.corrcoef()[0], atol=1e-5)
+    assert torch.allclose(shared.corrcoef()[1], legacy.corrcoef()[1], atol=1e-5)
+    assert legacy.topk_pearson(k=2) == shared.topk_pearson(k=2)
 
 
 def test_TopK_without_mask():
