@@ -243,6 +243,38 @@ def test_legacy_feature_data_generator_routes_detached_corrcoef_to_legacy_utils(
     assert isinstance(corrcoef_encoder, legacy_utils_fns.RollingCorrCoef)
 
 
+def test_detached_legacy_feature_encode_path_matches_baseline_architecture_rule() -> None:
+    class FakeEncoderConfig:
+        @staticmethod
+        def architecture() -> str:
+            return "skip_transcoder"
+
+    fake_encoder = type(
+        "FakeEncoder",
+        (),
+        {
+            "cfg": FakeEncoderConfig(),
+            "activation_fn": feature_data_generator.TopK(k=1),
+        },
+    )()
+
+    current_generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    setattr(current_generator, "encoder", fake_encoder)
+
+    detached_generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
+    setattr(detached_generator, "encoder", fake_encoder)
+    detached_generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy",
+        legacy_compatibility="detached_legacy",
+    )
+
+    assert current_generator._uses_full_feature_encode_path()
+    assert not detached_generator._uses_full_feature_encode_path()
+
+
 def test_legacy_feature_data_generator_uses_shared_corrcoef_for_current_compatibility() -> None:
     generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(

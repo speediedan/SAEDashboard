@@ -20,6 +20,11 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
     def _uses_detached_legacy_compatibility(self) -> bool:
         return getattr(self.cfg, "legacy_compatibility", "current") == "detached_legacy"
 
+    def _uses_full_feature_encode_path(self) -> bool:
+        if self._uses_detached_legacy_compatibility():
+            return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]
+        return super()._uses_full_feature_encode_path()
+
     def _create_corrcoef_neurons(
         self,
         *,

@@ -121,6 +121,11 @@ class FeatureDataGenerator:
     def _uses_detached_legacy_compatibility(self) -> bool:
         return False
 
+    def _uses_full_feature_encode_path(self) -> bool:
+        return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
+            self.encoder.activation_fn, TopK
+        )
+
     def _create_corrcoef_neurons(
         self,
         *,
@@ -554,9 +559,7 @@ class FeatureDataGenerator:
                 token_shape=tuple(minibatch.tokens.shape),
             ):
                 # For TopK, compute all activations first, then select features
-                if self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
-                    self.encoder.activation_fn, TopK
-                ):
+                if self._uses_full_feature_encode_path():
                     # Get all features' activations
                     all_features_acts = self.encoder.encode(primary_acts)
                     feature_acts = all_features_acts[:, :, feature_indices].to(
