@@ -112,7 +112,7 @@ def _build_legacy_vis_config(
             if runner.cfg.sequence_replay_artifact_dir
             else None
         ),
-        correlation_accumulation_device=runner.cfg.correlation_accumulation_device,
+        correlation_accumulation_device="cpu",
         sequence_selection_backend=runner.cfg.sequence_selection_backend,
         dashboard_output_format=runner.cfg.dashboard_output_format,
     )

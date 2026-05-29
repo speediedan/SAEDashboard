@@ -115,7 +115,7 @@ def test_legacy_get_tokens_uses_explicit_shared_tokens_file(
     )
 
 
-def test_legacy_vis_config_preserves_correlation_accumulation_device(
+def test_legacy_vis_config_forces_cpu_correlation_accumulation(
     runner_config: NeuronpediaRunnerConfig, tmp_path: Path
 ) -> None:
     runner_config.dashboard_output_format = "legacy_json"
@@ -139,7 +139,7 @@ def test_legacy_vis_config_preserves_correlation_accumulation_device(
         features_to_process=[0, 1],
     )
 
-    assert vis_cfg.correlation_accumulation_device == "cuda"
+    assert vis_cfg.correlation_accumulation_device == "cpu"
 
 
 def test_materialize_pretokenized_dataset(
@@ -556,7 +556,7 @@ def test_legacy_batch_loop_uses_compatibility_vis_config(
     feature_vis_config = captured["config"]
     assert feature_vis_config.prompt_minibatch_schedule is None
     assert feature_vis_config.primary_acts_batch_size is None
-    assert feature_vis_config.correlation_accumulation_device == runner.cfg.correlation_accumulation_device
+    assert feature_vis_config.correlation_accumulation_device == "cpu"
     assert feature_vis_config.sequence_selection_backend == "legacy"
     assert feature_vis_config.dashboard_output_format == "legacy_json"
     assert feature_vis_config.cache_dir == tmp_path / "_activation_cache"
