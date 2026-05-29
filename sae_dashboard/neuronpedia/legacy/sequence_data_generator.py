@@ -8,7 +8,11 @@ from eindex import (
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from sae_dashboard.components import SequenceData, SequenceGroupData, SequenceMultiGroupData
+from sae_dashboard.components import (
+    SequenceData,
+    SequenceGroupData,
+    SequenceMultiGroupData,
+)
 from sae_dashboard.sequence_data_generator import (
     SequenceCoordinateTable,
     SequenceDataGenerator,
@@ -17,7 +21,7 @@ from sae_dashboard.sequence_data_generator import (
 from sae_dashboard.utils_fns import TopK, k_largest_indices, random_range_indices
 
 
-class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
+class LegacySequenceDataGenerator(SequenceDataGenerator):
     def _selection_feat_acts(
         self,
         feat_acts: Float[Tensor, "batch seq"],
@@ -68,7 +72,7 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
         n_bold = indices_bold.shape[0]
         return indices_dict, indices_bold, n_bold
 
-    def get_indices_dict_legacy_json_cpu(
+    def get_indices_dict_legacy(
         self,
         buffer: tuple[int, int] | None,
         feat_acts: Float[Tensor, "batch seq"],
@@ -76,13 +80,13 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
     ):
         if (
             selection_mask is None
-            and getattr(self.cfg, "legacy_json_cpu_compatibility", "current")
+            and getattr(self.cfg, "legacy_compatibility", "current")
             == "detached_legacy"
         ):
             # Keep detached-only selector semantics inside the preserved legacy package.
             return self._get_indices_dict_detached_legacy_unmasked(buffer, feat_acts)
 
-        return super().get_indices_dict_legacy_json_cpu(
+        return super().get_indices_dict_legacy(
             buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -144,7 +148,7 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
         top_contribution_to_logits: TopK | None = None,
         bottom_contribution_to_logits: TopK | None = None,
     ):
-        if getattr(self.cfg, "legacy_json_cpu_compatibility", "current") == "detached_legacy":
+        if getattr(self.cfg, "legacy_compatibility", "current") == "detached_legacy":
             return self._package_sequences_data_detached_legacy(
                 token_ids=token_ids,
                 feat_acts_coloring=feat_acts_coloring,
@@ -175,7 +179,7 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
         resid_post: Float[Tensor, "batch seq d_model"],
         feature_resid_dir: Float[Tensor, "d_model"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
-        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy",
     ) -> SequenceMultiGroupData:
         del feature_resid_dir, selection_mask, selection_backend
         indices_dict, indices_bold, n_bold = self.get_indices_dict(
@@ -221,7 +225,7 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
         resid_post: Float[Tensor, "batch seq d_model"],
         feature_resid_dir: Float[Tensor, "d_model"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
-        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy",
     ) -> SequenceCoordinateTable:
         del selection_backend
         return SequenceDataGenerator.get_sequence_coordinate_table(
@@ -231,5 +235,5 @@ class LegacyJSONCPUSequenceDataGenerator(SequenceDataGenerator):
             resid_post=resid_post,
             feature_resid_dir=feature_resid_dir,
             selection_mask=selection_mask,
-            selection_backend="legacy_json_cpu",
+            selection_backend="legacy",
         )

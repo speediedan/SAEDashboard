@@ -35,7 +35,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     correlation_accumulation_device="Policy for where correlation accumulators should live during packaging.",
     feature_statistics_backend="Backend used to build columnar feature statistics when dashboard_output_format is columnar.",
     logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
-    legacy_json_cpu_compatibility="Compatibility mode for preserved legacy JSON CPU dashboard generation.",
+    legacy_compatibility="Compatibility mode for preserved legacy dashboard generation.",
     activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
     defer_component_construction="Whether columnar/dashboard callers should avoid rebuilding the legacy nested component graph when not needed.",
     sequence_selection_backend="Candidate-selection backend for sequence packaging.",
@@ -104,10 +104,10 @@ class SaeVisConfig:
     feature_statistics_backend: Literal["object", "arrow"] = "object"
     logits_histogram_backend: Literal["object", "arrow"] = "object"
     logits_histogram_compatibility: Literal["current", "detached_legacy"] = "current"
-    legacy_json_cpu_compatibility: Literal["current", "detached_legacy"] = "current"
+    legacy_compatibility: Literal["current", "detached_legacy"] = "current"
     activation_histogram_backend: Literal["torch", "polars"] = "torch"
     defer_component_construction: bool = False
-    sequence_selection_backend: Literal["legacy_json_cpu", "lazy_gpu"] = "legacy_json_cpu"
+    sequence_selection_backend: Literal["legacy", "lazy_gpu"] = "legacy"
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"

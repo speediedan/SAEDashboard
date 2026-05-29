@@ -9,7 +9,7 @@ from datasets import Dataset
 from transformer_lens import HookedTransformer
 
 import sae_dashboard.neuronpedia.neuronpedia_runner as neuronpedia_runner_module
-from sae_dashboard.neuronpedia.legacy_json_cpu import runner as legacy_json_cpu_runner
+from sae_dashboard.neuronpedia.legacy import runner as legacy_runner
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
     NeuronpediaRunnerConfig,
@@ -81,7 +81,7 @@ def test_get_tokens_no_duplicates(
     )
 
 
-def test_legacy_json_cpu_get_tokens_uses_explicit_shared_tokens_file(
+def test_legacy_get_tokens_uses_explicit_shared_tokens_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     shared_tokens = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
@@ -96,7 +96,7 @@ def test_legacy_json_cpu_get_tokens_uses_explicit_shared_tokens_file(
         n_prompts_total=2,
         n_tokens_in_prompt=3,
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
         shared_tokens_file=str(shared_tokens_file),
     )
     runner._log_token_snapshot = lambda *_args, **_kwargs: None
@@ -115,11 +115,11 @@ def test_legacy_json_cpu_get_tokens_uses_explicit_shared_tokens_file(
     )
 
 
-def test_legacy_json_cpu_vis_config_forces_cpu_correlation_accumulation(
+def test_legacy_vis_config_forces_cpu_correlation_accumulation(
     runner_config: NeuronpediaRunnerConfig, tmp_path: Path
 ) -> None:
     runner_config.dashboard_output_format = "legacy_json"
-    runner_config.sequence_selection_backend = "legacy_json_cpu"
+    runner_config.sequence_selection_backend = "legacy"
     runner_config.outputs_dir = str(tmp_path / "outputs")
     runner_config.correlation_accumulation_device = "cuda"
 
@@ -134,7 +134,7 @@ def test_legacy_json_cpu_vis_config_forces_cpu_correlation_accumulation(
         ),
     )
 
-    vis_cfg = legacy_json_cpu_runner._build_legacy_json_cpu_vis_config(
+    vis_cfg = legacy_runner._build_legacy_vis_config(
         runner,
         features_to_process=[0, 1],
     )
@@ -451,7 +451,7 @@ def _make_legacy_runner_stub(tmp_path: Path) -> NeuronpediaRunner:
         prompt_dataset_path=str(tmp_path / "train.jsonl"),
         prompt_dataset_split="train",
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
         use_wandb=False,
         output_neuronpedia_exports=False,
         use_cached_activations=False,
@@ -485,7 +485,7 @@ def _make_legacy_runner_stub(tmp_path: Path) -> NeuronpediaRunner:
     return runner
 
 
-def test_run_routes_legacy_json_cpu_through_compatibility_module(
+def test_run_routes_legacy_through_compatibility_module(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -495,7 +495,7 @@ def test_run_routes_legacy_json_cpu_through_compatibility_module(
     def fail_schedule(_tokens: torch.Tensor) -> None:
         raise AssertionError("legacy runner should bypass prompt bucket scheduling")
 
-    def fake_run_legacy_json_cpu_batch_loop(
+    def fake_run_legacy_batch_loop(
         runner_arg: NeuronpediaRunner,
         *,
         feature_idx: list[list[int]],
@@ -507,8 +507,8 @@ def test_run_routes_legacy_json_cpu_through_compatibility_module(
 
     runner._load_prompt_bucket_schedule = fail_schedule
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.neuronpedia_runner.legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop",
-        fake_run_legacy_json_cpu_batch_loop,
+        "sae_dashboard.neuronpedia.neuronpedia_runner.legacy_runner.run_legacy_batch_loop",
+        fake_run_legacy_batch_loop,
     )
 
     runner.run()
@@ -522,7 +522,7 @@ def test_run_routes_legacy_json_cpu_through_compatibility_module(
     assert (tmp_path / "run_settings.json").is_file()
 
 
-def test_legacy_json_cpu_batch_loop_uses_compatibility_vis_config(
+def test_legacy_batch_loop_uses_compatibility_vis_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -540,14 +540,14 @@ def test_legacy_json_cpu_batch_loop_uses_compatibility_vis_config(
         return object()
 
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.runner.NeuronpediaConverter.convert_to_np_json",
+        "sae_dashboard.neuronpedia.legacy.runner.NeuronpediaConverter.convert_to_np_json",
         lambda *args, **kwargs: '{"ok": true}',
     )
     runner._run_feature_batch_with_optional_profile = (
         fake_run_feature_batch_with_optional_profile
     )
 
-    legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop(
+    legacy_runner.run_legacy_batch_loop(
         runner,
         feature_idx=[[0, 1]],
         tokens=torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
@@ -557,7 +557,7 @@ def test_legacy_json_cpu_batch_loop_uses_compatibility_vis_config(
     assert feature_vis_config.prompt_minibatch_schedule is None
     assert feature_vis_config.primary_acts_batch_size is None
     assert feature_vis_config.correlation_accumulation_device == "cpu"
-    assert feature_vis_config.sequence_selection_backend == "legacy_json_cpu"
+    assert feature_vis_config.sequence_selection_backend == "legacy"
     assert feature_vis_config.dashboard_output_format == "legacy_json"
     assert feature_vis_config.cache_dir == tmp_path / "_activation_cache"
     assert captured["batch"] == 0
@@ -652,7 +652,7 @@ def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> Non
     assert Path(runner.cfg.outputs_dir, "tokens_2.pt").exists()
 
 
-def test_legacy_json_cpu_get_tokens_without_shared_sidecar_generates_tokens(
+def test_legacy_get_tokens_without_shared_sidecar_generates_tokens(
     tmp_path: Path,
 ) -> None:
     generated_tokens = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
@@ -665,7 +665,7 @@ def test_legacy_json_cpu_get_tokens_without_shared_sidecar_generates_tokens(
         n_prompts_total=2,
         n_tokens_in_prompt=3,
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
     )
     runner.model_id = "google/gemma-3-1b-it"
     runner.hook_name = "blocks.10.hook_mlp_in"
@@ -673,7 +673,7 @@ def test_legacy_json_cpu_get_tokens_without_shared_sidecar_generates_tokens(
     runner.activations_store = object()
     runner._log_token_snapshot = lambda *_args, **_kwargs: None
     runner._stage_shared_tokens_file = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("default legacy_json_cpu runs should not auto-stage shared token sidecars")
+        AssertionError("default legacy runs should not auto-stage shared token sidecars")
     )
 
     def fake_generate_tokens(activations_store: object, n_prompts: int) -> torch.Tensor:

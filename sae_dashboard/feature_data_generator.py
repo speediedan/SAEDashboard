@@ -118,7 +118,7 @@ class FeatureDataGenerator:
     def _uses_preserved_legacy_feature_act_concat(self) -> bool:
         return False
 
-    def _uses_detached_legacy_json_cpu_compatibility(self) -> bool:
+    def _uses_detached_legacy_compatibility(self) -> bool:
         return False
 
     def _create_corrcoef_neurons(

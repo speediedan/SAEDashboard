@@ -2,10 +2,10 @@ import pytest
 import torch
 
 import sae_dashboard.feature_data_generator as feature_data_generator
-from sae_dashboard.neuronpedia.legacy_json_cpu import utils_fns as legacy_utils_fns
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
-from sae_dashboard.neuronpedia.legacy_json_cpu.feature_data_generator import (
-    LegacyJSONCPUFeatureDataGenerator,
+from sae_dashboard.neuronpedia.legacy import utils_fns as legacy_utils_fns
+from sae_dashboard.neuronpedia.legacy.feature_data_generator import (
+    LegacyFeatureDataGenerator,
 )
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.sae_vis_runner import FeatureDataGeneratorFactory
@@ -145,15 +145,13 @@ def test_pad_sequence_tensor_zero_fills_trimmed_tail() -> None:
     assert padded[:, 3:].tolist() == [[[0.0], [0.0]]]
 
 
-def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_precision() -> None:
-    generator = LegacyJSONCPUFeatureDataGenerator.__new__(
-        LegacyJSONCPUFeatureDataGenerator
-    )
+def test_transfer_feature_acts_for_output_preserves_legacy_precision() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
     )
 
     feature_acts = torch.tensor([5091.77587890625], dtype=torch.float32)
@@ -166,15 +164,13 @@ def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_precision() 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA to verify legacy device preservation.")
-def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_cuda_device() -> None:
-    generator = LegacyJSONCPUFeatureDataGenerator.__new__(
-        LegacyJSONCPUFeatureDataGenerator
-    )
+def test_transfer_feature_acts_for_output_preserves_legacy_cuda_device() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
         device="cuda",
     )
 
@@ -187,29 +183,27 @@ def test_transfer_feature_acts_for_output_preserves_legacy_json_cpu_cuda_device(
     assert transferred.tolist() == pytest.approx(feature_acts.tolist())
 
 
-def test_feature_data_generator_factory_routes_legacy_json_cpu_to_legacy_subclass() -> None:
+def test_feature_data_generator_factory_routes_legacy_to_legacy_subclass() -> None:
     cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
     )
 
     assert (
         FeatureDataGeneratorFactory.resolve_feature_data_generator_cls(cfg)
-        is LegacyJSONCPUFeatureDataGenerator
+        is LegacyFeatureDataGenerator
     )
 
 
-def test_preserved_legacy_json_cpu_uses_device_concat() -> None:
-    generator = LegacyJSONCPUFeatureDataGenerator.__new__(
-        LegacyJSONCPUFeatureDataGenerator
-    )
+def test_preserved_legacy_uses_device_concat() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
+        sequence_selection_backend="legacy",
     )
 
     assert generator._uses_preserved_legacy_feature_act_concat()
@@ -227,16 +221,14 @@ def test_preserved_legacy_json_cpu_uses_device_concat() -> None:
     assert chunks == []
 
 
-def test_legacy_json_cpu_feature_data_generator_routes_detached_corrcoef_to_legacy_utils() -> None:
-    generator = LegacyJSONCPUFeatureDataGenerator.__new__(
-        LegacyJSONCPUFeatureDataGenerator
-    )
+def test_legacy_feature_data_generator_routes_detached_corrcoef_to_legacy_utils() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
-        legacy_json_cpu_compatibility="detached_legacy",
+        sequence_selection_backend="legacy",
+        legacy_compatibility="detached_legacy",
     )
 
     corrcoef_neurons = generator._create_corrcoef_neurons(
@@ -251,16 +243,14 @@ def test_legacy_json_cpu_feature_data_generator_routes_detached_corrcoef_to_lega
     assert isinstance(corrcoef_encoder, legacy_utils_fns.RollingCorrCoef)
 
 
-def test_legacy_json_cpu_feature_data_generator_uses_shared_corrcoef_for_current_compatibility() -> None:
-    generator = LegacyJSONCPUFeatureDataGenerator.__new__(
-        LegacyJSONCPUFeatureDataGenerator
-    )
+def test_legacy_feature_data_generator_uses_shared_corrcoef_for_current_compatibility() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy_json_cpu",
-        legacy_json_cpu_compatibility="current",
+        sequence_selection_backend="legacy",
+        legacy_compatibility="current",
     )
 
     corrcoef_neurons = generator._create_corrcoef_neurons(

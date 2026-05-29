@@ -212,7 +212,7 @@ class NeuronpediaConverter:
                 trim_trailing_pad_tokens=not (
                     getattr(np_cfg, "dashboard_output_format", None) == "legacy_json"
                     and getattr(np_cfg, "sequence_selection_backend", None)
-                    == "legacy_json_cpu"
+                    == "legacy"
                 ),
             )
             NeuronpediaConverter._process_feature_decoder_weight_dist(

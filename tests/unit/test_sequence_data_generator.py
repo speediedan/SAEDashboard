@@ -12,8 +12,8 @@ from transformer_lens import (
 )
 
 from sae_dashboard.components_config import SequencesConfig
-from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
-    LegacyJSONCPUSequenceDataGenerator,
+from sae_dashboard.neuronpedia.legacy.sequence_data_generator import (
+    LegacySequenceDataGenerator,
 )
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.sequence_data_generator import (
@@ -409,7 +409,7 @@ def test_get_sequence_coordinate_table_matches_get_sequences_data(
     assert nested_from_table == nested_direct
 
 
-def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy_json_cpu() -> None:
+def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 4  # type: ignore
@@ -447,7 +447,7 @@ def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy_json_cp
         resid_post=resid_post,
         feature_resid_dir=feature_resid_dir,
         selection_mask=selection_mask,
-        selection_backend="legacy_json_cpu",
+        selection_backend="legacy",
     )
     lazy_table = generator.get_sequence_coordinate_table(
         feat_acts=feat_acts,
@@ -511,7 +511,7 @@ def test_get_sequences_data_selection_mask_excludes_ignored_padding_positions() 
     )
 
 
-def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selection_mask() -> (
+def test_get_indices_dict_lazy_gpu_matches_legacy_indices_with_selection_mask() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -540,7 +540,7 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selectio
 
     random.seed(12345)
     legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
-        generator.get_indices_dict_legacy_json_cpu(
+        generator.get_indices_dict_legacy(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -562,14 +562,14 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_indices_with_selectio
 
 def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
-    cfg.legacy_json_cpu_compatibility = "detached_legacy"
+    cfg.legacy_compatibility = "detached_legacy"
     cfg.feature_centric_layout.seq_cfg.buffer = (1, 1)  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 3  # type: ignore
     cfg.feature_centric_layout.seq_cfg.n_quantiles = 3  # type: ignore
     cfg.feature_centric_layout.seq_cfg.quantile_group_size = 4  # type: ignore
 
     tokens = torch.arange(24, dtype=torch.long).reshape(4, 6)
-    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    generator = LegacySequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
     feat_acts = torch.tensor(
         [
             [0.0, 0.1, 0.5, 1.0, 0.4, 0.0],
@@ -581,7 +581,7 @@ def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> N
     )
 
     random.seed(12345)
-    indices_dict, indices_bold, n_bold = generator.get_indices_dict_legacy_json_cpu(
+    indices_dict, indices_bold, n_bold = generator.get_indices_dict_legacy(
         generator.buffer,
         feat_acts,
         selection_mask=None,
@@ -625,12 +625,12 @@ def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> N
     assert n_bold == int(expected_indices_bold.shape[0])
 
 
-def test_legacy_json_cpu_detached_legacy_packaging_stays_in_legacy_subclass() -> None:
+def test_legacy_detached_legacy_packaging_stays_in_legacy_subclass() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
-    cfg.legacy_json_cpu_compatibility = "detached_legacy"
+    cfg.legacy_compatibility = "detached_legacy"
 
     tokens = torch.arange(6, dtype=torch.long).reshape(2, 3)
-    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+    generator = LegacySequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
 
     token_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
     feat_acts_coloring = torch.tensor(
@@ -670,7 +670,7 @@ def test_legacy_json_cpu_detached_legacy_packaging_stays_in_legacy_subclass() ->
     assert second_sequence.token_logits == feat_logits[token_ids[1]].tolist()
 
 
-def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_selection_mask() -> (
+def test_get_indices_dict_legacy_matches_baseline_selector_without_selection_mask() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -693,7 +693,7 @@ def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_sele
 
     random.seed(12345)
     legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
-        generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
+        generator.get_indices_dict_legacy(generator.buffer, feat_acts)
     )
 
     random.seed(12345)
@@ -730,7 +730,7 @@ def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_without_sele
         assert torch.equal(legacy_indices_dict[group_name], expected_indices)
 
 
-def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_with_buffer_without_selection_mask() -> (
+def test_get_indices_dict_legacy_matches_baseline_selector_with_buffer_without_selection_mask() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -753,7 +753,7 @@ def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_with_buffer_
 
     random.seed(12345)
     legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
-        generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
+        generator.get_indices_dict_legacy(generator.buffer, feat_acts)
     )
 
     random.seed(12345)
@@ -790,7 +790,7 @@ def test_get_indices_dict_legacy_json_cpu_matches_baseline_selector_with_buffer_
         assert torch.equal(legacy_indices_dict[group_name], expected_indices)
 
 
-def test_get_indices_dict_legacy_json_cpu_skips_candidate_mask_without_selection_mask(
+def test_get_indices_dict_legacy_skips_candidate_mask_without_selection_mask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -817,14 +817,14 @@ def test_get_indices_dict_legacy_json_cpu_skips_candidate_mask_without_selection
 
     monkeypatch.setattr(generator, "_get_candidate_mask_and_indices", _fail_candidate_mask)
 
-    generator.get_indices_dict_legacy_json_cpu(generator.buffer, feat_acts)
+    generator.get_indices_dict_legacy(generator.buffer, feat_acts)
 
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Legacy all-zero top-k tie order is only distinguishable on CUDA.",
 )
-def test_legacy_json_cpu_sequence_generator_preserves_cuda_zero_tie_order() -> None:
+def test_legacy_sequence_generator_preserves_cuda_zero_tie_order() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
     cfg.device = "cuda"
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
@@ -832,7 +832,7 @@ def test_legacy_json_cpu_sequence_generator_preserves_cuda_zero_tie_order() -> N
     cfg.feature_centric_layout.seq_cfg.n_quantiles = 0  # type: ignore
 
     tokens = torch.arange(128, dtype=torch.long).repeat(2488, 1)
-    generator = LegacyJSONCPUSequenceDataGenerator(cfg, tokens, torch.zeros(4, 128))
+    generator = LegacySequenceDataGenerator(cfg, tokens, torch.zeros(4, 128))
     sequence_data = generator.get_sequences_data(
         feat_acts=torch.zeros_like(tokens, dtype=torch.float32),
         feat_logits=torch.zeros(128, dtype=torch.float32),
@@ -865,7 +865,7 @@ def test_legacy_json_cpu_sequence_generator_preserves_cuda_zero_tie_order() -> N
     ]
 
 
-def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_for_bfloat16_interval_boundaries() -> (
+def test_get_indices_dict_lazy_gpu_matches_legacy_for_bfloat16_interval_boundaries() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -887,7 +887,7 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_json_cpu_for_bfloat16_interval
 
     random.seed(12345)
     legacy_indices_dict, legacy_indices_bold, legacy_n_bold = (
-        generator.get_indices_dict_legacy_json_cpu(
+        generator.get_indices_dict_legacy(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -930,7 +930,7 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
         dtype=torch.bool,
     )
 
-    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy_json_cpu(
+    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy(
         generator.buffer,
         feat_acts_float32,
         selection_mask=selection_mask,
@@ -988,7 +988,7 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
     )
 
     random.seed(12345)
-    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy_json_cpu(
+    legacy_indices_dict, _, _ = generator.get_indices_dict_legacy(
         generator.buffer,
         feat_acts,
         selection_mask=selection_mask,

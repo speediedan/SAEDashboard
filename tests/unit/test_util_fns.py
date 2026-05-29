@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from sae_dashboard.neuronpedia.legacy_json_cpu.utils_fns import (
+from sae_dashboard.neuronpedia.legacy.utils_fns import (
     RollingCorrCoef as LegacyRollingCorrCoef,
 )
 from sae_dashboard.utils_fns import (

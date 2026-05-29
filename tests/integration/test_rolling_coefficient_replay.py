@@ -13,7 +13,7 @@ import torch
 from sae_lens import SAE, SkipTranscoder
 
 from sae_dashboard.feature_data_generator import FeatureMaskingContext
-from sae_dashboard.neuronpedia.legacy_json_cpu.utils_fns import (
+from sae_dashboard.neuronpedia.legacy.utils_fns import (
     RollingCorrCoef as LegacyRollingCorrCoef,
 )
 from sae_dashboard.utils_fns import RollingCorrCoef

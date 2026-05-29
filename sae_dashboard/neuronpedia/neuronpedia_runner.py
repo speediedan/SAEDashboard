@@ -32,8 +32,8 @@ from sae_dashboard.components_config import (
 # from sae_dashboard.data_writing_fns import save_feature_centric_vis
 from sae_dashboard.hook_utils import convert_model_name_tl_to_hf
 from sae_dashboard.layout import SaeVisLayoutConfig
-from sae_dashboard.neuronpedia.legacy_json_cpu import (
-    runner as legacy_json_cpu_runner,
+from sae_dashboard.neuronpedia.legacy import (
+    runner as legacy_runner,
 )
 from sae_dashboard.neuronpedia.neuronpedia_converter import NeuronpediaConverter
 from sae_dashboard.neuronpedia.neuronpedia_export import (
@@ -1882,8 +1882,8 @@ class NeuronpediaRunner:
 
         del self.activations_store
 
-        if legacy_json_cpu_runner.is_preserved_legacy_json_cpu_path(self.cfg):
-            legacy_json_cpu_runner.run_legacy_json_cpu_batch_loop(
+        if legacy_runner.is_preserved_legacy_path(self.cfg):
+            legacy_runner.run_legacy_batch_loop(
                 self,
                 feature_idx=feature_idx,
                 tokens=tokens,
@@ -1998,7 +1998,7 @@ class NeuronpediaRunner:
                         feature_statistics_backend=self.cfg.feature_statistics_backend,
                         logits_histogram_backend=self.cfg.logits_histogram_backend,
                         logits_histogram_compatibility=self.cfg.logits_histogram_compatibility,
-                        legacy_json_cpu_compatibility=self.cfg.legacy_json_cpu_compatibility,
+                        legacy_compatibility=self.cfg.legacy_compatibility,
                         activation_histogram_backend=self.cfg.activation_histogram_backend,
                         defer_component_construction=self.cfg.defer_component_construction,
                         sequence_selection_backend=self.cfg.sequence_selection_backend,
@@ -2485,11 +2485,11 @@ def main():
         help="Compatibility mode for logits histogram object packaging.",
     )
     parser.add_argument(
-        "--legacy-json-cpu-compatibility",
+        "--legacy-compatibility",
         choices=("current", "detached_legacy"),
         default="current",
         help=(
-            "Compatibility mode for preserved legacy JSON CPU dashboard generation. "
+            "Compatibility mode for preserved legacy dashboard generation. "
             "Use 'detached_legacy' only for baseline timing comparisons."
         ),
     )
@@ -2507,8 +2507,8 @@ def main():
     )
     parser.add_argument(
         "--sequence-selection-backend",
-        choices=("legacy_json_cpu", "lazy_gpu"),
-        default="legacy_json_cpu",
+        choices=("legacy", "lazy_gpu"),
+        default="legacy",
         help="Sequence candidate-selection backend.",
     )
     parser.add_argument(
@@ -2861,7 +2861,7 @@ def main():
         feature_statistics_backend=args.feature_statistics_backend,
         logits_histogram_backend=args.logits_histogram_backend,
         logits_histogram_compatibility=args.logits_histogram_compatibility,
-        legacy_json_cpu_compatibility=args.legacy_json_cpu_compatibility,
+        legacy_compatibility=args.legacy_compatibility,
         activation_histogram_backend=args.activation_histogram_backend,
         defer_component_construction=args.defer_component_construction,
         sequence_selection_backend=args.sequence_selection_backend,

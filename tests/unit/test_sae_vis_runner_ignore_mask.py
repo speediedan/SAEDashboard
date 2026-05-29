@@ -42,7 +42,7 @@ class _FakeEncoder:
         return None
 
 
-def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
+def test_legacy_ignore_mask_preserves_baseline_histogram_density(
     monkeypatch,
 ) -> None:
     cfg = SaeVisConfig(
@@ -66,7 +66,7 @@ def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
-        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        "sae_dashboard.sae_vis_runner.LegacySequenceDataGenerator",
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
@@ -76,7 +76,7 @@ def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
         },
     )
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_features_table_data",
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.get_features_table_data",
         lambda **kwargs: {
             name: [value] for name, value in FeatureTablesData().__dict__.items()
         },
@@ -86,7 +86,7 @@ def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
         lambda **kwargs: LogitsTableData(),
     )
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_logits_table_data",
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.get_logits_table_data",
         lambda **kwargs: LogitsTableData(),
     )
 
@@ -110,7 +110,7 @@ def test_legacy_json_cpu_ignore_mask_preserves_baseline_histogram_density(
     )
 
 
-def test_SaeVisRunner_routes_legacy_json_cpu_through_compatibility_module(
+def test_SaeVisRunner_routes_legacy_through_compatibility_module(
     monkeypatch,
 ) -> None:
     cfg = SaeVisConfig(
@@ -136,7 +136,7 @@ def test_SaeVisRunner_routes_legacy_json_cpu_through_compatibility_module(
         def __init__(self, cfg, tokens, W_U) -> None:
             del cfg, tokens, W_U
 
-    def _fake_run_legacy_json_cpu_object_feature_batch(runner, **kwargs):
+    def _fake_run_legacy_object_feature_batch(runner, **kwargs):
         calls.append(kwargs["sequence_data_generator"])
         return SaeVisData(
             cfg=runner.cfg,
@@ -144,12 +144,12 @@ def test_SaeVisRunner_routes_legacy_json_cpu_through_compatibility_module(
         )
 
     monkeypatch.setattr(
-        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        "sae_dashboard.sae_vis_runner.LegacySequenceDataGenerator",
         _FakeLegacySequenceDataGenerator,
     )
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.run_object_feature_batch",
-        _fake_run_legacy_json_cpu_object_feature_batch,
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.run_object_feature_batch",
+        _fake_run_legacy_object_feature_batch,
     )
 
     sae_vis_data = cast(

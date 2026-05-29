@@ -45,7 +45,7 @@ class _FakeSequenceDataGenerator:
         resid_post: Tensor | None,
         feature_resid_dir: Tensor,
         selection_mask: Tensor | None = None,
-        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy",
     ) -> list[Any]:
         del (
             feat_acts,
@@ -64,7 +64,7 @@ class _FakeSequenceDataGenerator:
         resid_post: Tensor | None,
         feature_resid_dir: Tensor,
         selection_mask: Tensor | None = None,
-        selection_backend: SequenceSelectionBackend = "legacy_json_cpu",
+        selection_backend: SequenceSelectionBackend = "legacy",
     ) -> SequenceCoordinateTable:
         del (
             feat_acts,
@@ -103,7 +103,7 @@ def _capture_perf_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, obje
     monkeypatch.setattr(perf_logging, "log_perf_event", _record)
     monkeypatch.setattr(sae_vis_runner_module, "log_perf_event", _record)
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.log_perf_event",
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.log_perf_event",
         _record,
     )
     return perf_events
@@ -121,7 +121,7 @@ def _read_columnar_table(table_path: Path) -> Any:
     raise AssertionError(f"Unsupported columnar table suffix: {table_path.suffix}")
 
 
-def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artifacts(
+def test_SaeVisRunner_legacy_profiling_surfaces_stage_timings_and_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -135,7 +135,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
-        "sae_dashboard.sae_vis_runner.LegacyJSONCPUSequenceDataGenerator",
+        "sae_dashboard.sae_vis_runner.LegacySequenceDataGenerator",
         _FakeSequenceDataGenerator,
     )
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         },
     )
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_features_table_data",
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.get_features_table_data",
         lambda **kwargs: {
             name: [value] for name, value in FeatureTablesData().__dict__.items()
         },
@@ -155,7 +155,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
         lambda **kwargs: LogitsTableData(),
     )
     monkeypatch.setattr(
-        "sae_dashboard.neuronpedia.legacy_json_cpu.sae_vis_runner.get_logits_table_data",
+        "sae_dashboard.neuronpedia.legacy.sae_vis_runner.get_logits_table_data",
         lambda **kwargs: LogitsTableData(),
     )
 
@@ -212,7 +212,7 @@ def test_SaeVisRunner_legacy_json_cpu_profiling_surfaces_stage_timings_and_artif
     histogram_compatibility_event = next(
         event
         for event in perf_events
-        if event.get("event") == "legacy_json_cpu_logits_histogram_compatibility"
+        if event.get("event") == "legacy_logits_histogram_compatibility"
     )
     assert histogram_compatibility_event["compatibility"] == "detached_legacy"
     assert len(sae_vis_data.feature_data_dict[0].logits_histogram_data.tick_vals) > 1000

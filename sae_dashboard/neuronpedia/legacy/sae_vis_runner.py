@@ -18,9 +18,9 @@ from sae_dashboard.data_parsing_fns import (
 )
 from sae_dashboard.feature_data import FeatureData
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
-from sae_dashboard.neuronpedia.legacy_json_cpu import utils_fns as legacy_utils_fns
-from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
-    LegacyJSONCPUSequenceDataGenerator,
+from sae_dashboard.neuronpedia.legacy import utils_fns as legacy_utils_fns
+from sae_dashboard.neuronpedia.legacy.sequence_data_generator import (
+    LegacySequenceDataGenerator,
 )
 from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import SaeVisData
@@ -61,7 +61,7 @@ def run_object_feature_batch(
     encoder: SAE[Any],
     unembed_matrix: Tensor,
     feature_data_generator: FeatureDataGenerator,
-    sequence_data_generator: LegacyJSONCPUSequenceDataGenerator,
+    sequence_data_generator: LegacySequenceDataGenerator,
     progress: Any,
     all_consolidated_dfa_results: dict[int, dict[Any, Any]],
 ) -> SaeVisData:
@@ -167,7 +167,7 @@ def run_object_feature_batch(
         logits_histogram_compatibility = runner.cfg.logits_histogram_compatibility
         if logits_histogram_compatibility == "detached_legacy" and runner.cfg.log_performance:
             log_perf_event(
-                "legacy_json_cpu_logits_histogram_compatibility",
+                "legacy_logits_histogram_compatibility",
                 batch=feature_batch_index,
                 feature_count=len(features),
                 compatibility=logits_histogram_compatibility,

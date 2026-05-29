@@ -37,15 +37,15 @@ from sae_dashboard.huggingface_model_wrapper import (
     HFActivationConfig,
     HuggingFaceModelWrapper,
 )
-from sae_dashboard.neuronpedia.legacy_json_cpu import (
-    feature_data_generator as legacy_json_cpu_feature_data_generator,
-    sae_vis_runner as legacy_json_cpu_sae_vis_runner,
+from sae_dashboard.neuronpedia.legacy import (
+    feature_data_generator as legacy_feature_data_generator,
+    sae_vis_runner as legacy_sae_vis_runner,
 )
-from sae_dashboard.neuronpedia.legacy_json_cpu.runner import (
-    is_preserved_legacy_json_cpu_path,
+from sae_dashboard.neuronpedia.legacy.runner import (
+    is_preserved_legacy_path,
 )
-from sae_dashboard.neuronpedia.legacy_json_cpu.sequence_data_generator import (
-    LegacyJSONCPUSequenceDataGenerator,
+from sae_dashboard.neuronpedia.legacy.sequence_data_generator import (
+    LegacySequenceDataGenerator,
 )
 from sae_dashboard.perf_logging import log_perf_event, timed_stage
 from sae_dashboard.sae_vis_data import (
@@ -105,10 +105,8 @@ class FeatureDataGeneratorFactory:
     def resolve_feature_data_generator_cls(
         cfg: SaeVisConfig,
     ) -> type[FeatureDataGenerator]:
-        if is_preserved_legacy_json_cpu_path(cfg):
-            return (
-                legacy_json_cpu_feature_data_generator.LegacyJSONCPUFeatureDataGenerator
-            )
+        if is_preserved_legacy_path(cfg):
+            return legacy_feature_data_generator.LegacyFeatureDataGenerator
         return FeatureDataGenerator
 
     @staticmethod
@@ -208,8 +206,8 @@ class SaeVisRunner:
         return self.cfg.dashboard_output_format == "columnar"
 
     @property
-    def _preserved_legacy_json_cpu_enabled(self) -> bool:
-        return is_preserved_legacy_json_cpu_path(self.cfg)
+    def _preserved_legacy_enabled(self) -> bool:
+        return is_preserved_legacy_path(self.cfg)
 
     @property
     def _columnar_suffix(self) -> str:
@@ -1289,8 +1287,8 @@ class SaeVisRunner:
             else _resolve_unembed_matrix(model)
         )
         sequence_data_generator_cls = (
-            LegacyJSONCPUSequenceDataGenerator
-            if self._preserved_legacy_json_cpu_enabled
+            LegacySequenceDataGenerator
+            if self._preserved_legacy_enabled
             else SequenceDataGenerator
         )
         sequence_data_generator = sequence_data_generator_cls(
@@ -1324,9 +1322,9 @@ class SaeVisRunner:
                         torch.cuda.empty_cache()
                 continue
 
-            if self._preserved_legacy_json_cpu_enabled:
+            if self._preserved_legacy_enabled:
                 sae_vis_data.update(
-                    legacy_json_cpu_sae_vis_runner.run_object_feature_batch(
+                    legacy_sae_vis_runner.run_object_feature_batch(
                         self,
                         feature_batch_index=feature_batch_index,
                         features=features,
@@ -1336,7 +1334,7 @@ class SaeVisRunner:
                         unembed_matrix=unembed_matrix,
                         feature_data_generator=feature_data_generator,
                         sequence_data_generator=cast(
-                            LegacyJSONCPUSequenceDataGenerator,
+                            LegacySequenceDataGenerator,
                             sequence_data_generator,
                         ),
                         progress=progress,

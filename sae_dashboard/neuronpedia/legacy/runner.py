@@ -30,19 +30,19 @@ from sae_dashboard.perf_logging import (
 from sae_dashboard.sae_vis_data import SaeVisConfig
 
 
-class LegacyJSONCPUPathConfig(Protocol):
+class LegacyPathConfig(Protocol):
     dashboard_output_format: Literal["legacy_json", "columnar"]
-    sequence_selection_backend: Literal["legacy_json_cpu", "lazy_gpu"]
+    sequence_selection_backend: Literal["legacy", "lazy_gpu"]
 
 
-def is_preserved_legacy_json_cpu_path(cfg: LegacyJSONCPUPathConfig) -> bool:
+def is_preserved_legacy_path(cfg: LegacyPathConfig) -> bool:
     return (
         cfg.dashboard_output_format == "legacy_json"
-        and cfg.sequence_selection_backend == "legacy_json_cpu"
+        and cfg.sequence_selection_backend == "legacy"
     )
 
 
-def _build_legacy_json_cpu_layout(runner: Any) -> SaeVisLayoutConfig:
+def _build_legacy_layout(runner: Any) -> SaeVisLayoutConfig:
     return SaeVisLayoutConfig(
         columns=[
             Column(
@@ -63,7 +63,7 @@ def _build_legacy_json_cpu_layout(runner: Any) -> SaeVisLayoutConfig:
     )
 
 
-def _build_legacy_json_cpu_vis_config(
+def _build_legacy_vis_config(
     runner: Any,
     *,
     features_to_process: list[int],
@@ -90,7 +90,7 @@ def _build_legacy_json_cpu_vis_config(
             else None
         ),
         device=runner.cfg.sae_device or "cpu",
-        feature_centric_layout=_build_legacy_json_cpu_layout(runner),
+        feature_centric_layout=_build_legacy_layout(runner),
         perform_ablation_experiments=False,
         dtype=runner.cfg.sae_dtype,
         cache_dir=cache_dir,
@@ -114,13 +114,13 @@ def _build_legacy_json_cpu_vis_config(
         ),
         correlation_accumulation_device="cpu",
         logits_histogram_compatibility=runner.cfg.logits_histogram_compatibility,
-        legacy_json_cpu_compatibility=runner.cfg.legacy_json_cpu_compatibility,
+        legacy_compatibility=runner.cfg.legacy_compatibility,
         sequence_selection_backend=runner.cfg.sequence_selection_backend,
         dashboard_output_format=runner.cfg.dashboard_output_format,
     )
 
 
-def run_legacy_json_cpu_batch_loop(
+def run_legacy_batch_loop(
     runner: Any,
     *,
     feature_idx: list[list[int]],
@@ -148,7 +148,7 @@ def run_legacy_json_cpu_batch_loop(
             print(f"========== Running Batch #{feature_batch_count} ==========")
             runner._log_resource_snapshot(f"pre_batch_{feature_batch_count}")
 
-            feature_vis_config_gpt = _build_legacy_json_cpu_vis_config(
+            feature_vis_config_gpt = _build_legacy_vis_config(
                 runner,
                 features_to_process=features_to_process,
             )
