@@ -118,9 +118,6 @@ class FeatureDataGenerator:
     def _uses_preserved_legacy_feature_act_concat(self) -> bool:
         return False
 
-    def _uses_detached_legacy_compatibility(self) -> bool:
-        return False
-
     def _uses_full_feature_encode_path(self) -> bool:
         return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
             self.encoder.activation_fn, TopK

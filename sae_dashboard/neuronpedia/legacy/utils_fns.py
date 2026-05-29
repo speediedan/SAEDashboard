@@ -107,7 +107,7 @@ class RollingCorrCoef:
         return indices, pearson_topk.values.tolist(), cossim_values.tolist()
 
 
-def detached_legacy_tick_values(
+def legacy_tick_values(
     max_value: float,
     min_value: float,
     tickmode: Literal["ints", "5 ticks"],
@@ -138,16 +138,7 @@ def logits_histogram_from_data(
     n_bins: int,
     tickmode: Literal["ints", "5 ticks"],
     title: str | None,
-    compatibility: str,
 ) -> LogitsHistogramData:
-    if compatibility != "detached_legacy":
-        return LogitsHistogramData.from_data(
-            data=data,
-            n_bins=n_bins,
-            tickmode=tickmode,
-            title=title,
-        )
-
     if data.numel() == 0:
         return LogitsHistogramData()
 
@@ -157,7 +148,7 @@ def logits_histogram_from_data(
     bin_edges = torch.linspace(min_value, max_value, n_bins + 1)
     bar_heights = torch.histc(data, bins=n_bins).int().tolist()
     bar_values = [round(x, 5) for x in (bin_edges[:-1] + bin_size / 2).tolist()]
-    tick_vals = detached_legacy_tick_values(max_value, min_value, tickmode)
+    tick_vals = legacy_tick_values(max_value, min_value, tickmode)
 
     return LogitsHistogramData(
         bar_heights=bar_heights,

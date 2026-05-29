@@ -17,24 +17,15 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
     def _uses_preserved_legacy_feature_act_concat(self) -> bool:
         return True
 
-    def _uses_detached_legacy_compatibility(self) -> bool:
-        return getattr(self.cfg, "legacy_compatibility", "current") == "detached_legacy"
-
     def _uses_full_feature_encode_path(self) -> bool:
-        if self._uses_detached_legacy_compatibility():
-            return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]
-        return super()._uses_full_feature_encode_path()
+        return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]
 
     def _create_corrcoef_neurons(
         self,
         *,
         correlation_device: torch.device,
     ):
-        if self._uses_detached_legacy_compatibility():
-            return legacy_utils_fns.RollingCorrCoef(device=correlation_device)
-        return super()._create_corrcoef_neurons(
-            correlation_device=correlation_device,
-        )
+        return legacy_utils_fns.RollingCorrCoef(device=correlation_device)
 
     def _create_corrcoef_encoder(
         self,
@@ -42,13 +33,8 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
         feature_indices: list[int],
         correlation_device: torch.device,
     ):
-        if self._uses_detached_legacy_compatibility():
-            return legacy_utils_fns.RollingCorrCoef(
-                indices=feature_indices,
-                with_self=True,
-                device=correlation_device,
-            )
-        return super()._create_corrcoef_encoder(
-            feature_indices=feature_indices,
-            correlation_device=correlation_device,
+        return legacy_utils_fns.RollingCorrCoef(
+            indices=feature_indices,
+            with_self=True,
+            device=correlation_device,
         )

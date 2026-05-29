@@ -31,7 +31,7 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
             return feat_acts
         return feat_acts.to(device=target_device)
 
-    def _get_indices_dict_detached_legacy_unmasked(
+    def _get_indices_dict_legacy_unmasked(
         self,
         buffer: tuple[int, int] | None,
         feat_acts: Float[Tensor, "batch seq"],
@@ -78,13 +78,8 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
         feat_acts: Float[Tensor, "batch seq"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
     ):
-        if (
-            selection_mask is None
-            and getattr(self.cfg, "legacy_compatibility", "current")
-            == "detached_legacy"
-        ):
-            # Keep detached-only selector semantics inside the preserved legacy package.
-            return self._get_indices_dict_detached_legacy_unmasked(buffer, feat_acts)
+        if selection_mask is None:
+            return self._get_indices_dict_legacy_unmasked(buffer, feat_acts)
 
         return super().get_indices_dict_legacy(
             buffer,
@@ -92,7 +87,7 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
             selection_mask=selection_mask,
         )
 
-    def _package_sequences_data_detached_legacy(
+    def _package_sequences_data_legacy(
         self,
         token_ids: Int[Tensor, "n_bold buf"],
         feat_acts_coloring: Float[Tensor, "n_bold buf"],
@@ -148,19 +143,7 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
         top_contribution_to_logits: TopK | None = None,
         bottom_contribution_to_logits: TopK | None = None,
     ):
-        if getattr(self.cfg, "legacy_compatibility", "current") == "detached_legacy":
-            return self._package_sequences_data_detached_legacy(
-                token_ids=token_ids,
-                feat_acts_coloring=feat_acts_coloring,
-                feat_logits=feat_logits,
-                indices_dict=indices_dict,
-                indices_bold=indices_bold,
-                loss_contribution=loss_contribution,
-                top_contribution_to_logits=top_contribution_to_logits,
-                bottom_contribution_to_logits=bottom_contribution_to_logits,
-            )
-
-        return super().package_sequences_data(
+        return self._package_sequences_data_legacy(
             token_ids=token_ids,
             feat_acts_coloring=feat_acts_coloring,
             feat_logits=feat_logits,

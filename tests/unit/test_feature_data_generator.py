@@ -221,14 +221,13 @@ def test_preserved_legacy_uses_device_concat() -> None:
     assert chunks == []
 
 
-def test_legacy_feature_data_generator_routes_detached_corrcoef_to_legacy_utils() -> None:
+def test_legacy_feature_data_generator_uses_legacy_corrcoef() -> None:
     generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
         sequence_selection_backend="legacy",
-        legacy_compatibility="detached_legacy",
     )
 
     corrcoef_neurons = generator._create_corrcoef_neurons(
@@ -243,7 +242,7 @@ def test_legacy_feature_data_generator_routes_detached_corrcoef_to_legacy_utils(
     assert isinstance(corrcoef_encoder, legacy_utils_fns.RollingCorrCoef)
 
 
-def test_detached_legacy_feature_encode_path_matches_baseline_architecture_rule() -> None:
+def test_legacy_feature_encode_path_matches_baseline_architecture_rule() -> None:
     class FakeEncoderConfig:
         @staticmethod
         def architecture() -> str:
@@ -261,35 +260,17 @@ def test_detached_legacy_feature_encode_path_matches_baseline_architecture_rule(
     current_generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
     setattr(current_generator, "encoder", fake_encoder)
 
-    detached_generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
-    setattr(detached_generator, "encoder", fake_encoder)
-    detached_generator.cfg = SaeVisConfig(
+    legacy_generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
+    setattr(legacy_generator, "encoder", fake_encoder)
+    legacy_generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="legacy_json",
         sequence_selection_backend="legacy",
-        legacy_compatibility="detached_legacy",
     )
 
     assert current_generator._uses_full_feature_encode_path()
-    assert not detached_generator._uses_full_feature_encode_path()
-
-
-def test_legacy_feature_data_generator_uses_shared_corrcoef_for_current_compatibility() -> None:
-    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
-    generator.cfg = SaeVisConfig(
-        hook_point="blocks.0.hook_resid_pre",
-        features=[0],
-        dashboard_output_format="legacy_json",
-        sequence_selection_backend="legacy",
-        legacy_compatibility="current",
-    )
-
-    corrcoef_neurons = generator._create_corrcoef_neurons(
-        correlation_device=torch.device("cpu"),
-    )
-
-    assert isinstance(corrcoef_neurons, feature_data_generator.RollingCorrCoef)
+    assert not legacy_generator._uses_full_feature_encode_path()
 
 
 def test_transfer_feature_acts_for_output_downcasts_non_legacy_paths() -> None:

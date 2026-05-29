@@ -164,14 +164,6 @@ def run_object_feature_batch(
         batch=feature_batch_index,
         feature_count=len(features),
     ):
-        logits_histogram_compatibility = runner.cfg.logits_histogram_compatibility
-        if logits_histogram_compatibility == "detached_legacy" and runner.cfg.log_performance:
-            log_perf_event(
-                "legacy_logits_histogram_compatibility",
-                batch=feature_batch_index,
-                feature_count=len(features),
-                compatibility=logits_histogram_compatibility,
-            )
         for feat, logit_vector in zip(features, logits):
             feature_data_dict[feat].logits_histogram_data = (
                 legacy_utils_fns.logits_histogram_from_data(
@@ -179,7 +171,6 @@ def run_object_feature_batch(
                     n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
                     tickmode="5 ticks",
                     title=None,
-                    compatibility=logits_histogram_compatibility,
                 )
             )
 

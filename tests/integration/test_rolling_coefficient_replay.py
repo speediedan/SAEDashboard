@@ -376,7 +376,7 @@ def _compat_matches_baseline_band(summary: TimingSummary) -> bool:
     not torch.cuda.is_available(),
     reason="Replay timing reconstruction requires CUDA for the saved SAE inputs",
 )
-def test_rolling_coefficient_update_replay_restores_detached_legacy_cpu_behavior() -> None:
+def test_rolling_coefficient_update_replay_restores_legacy_cpu_behavior() -> None:
     replay_specs = _resolve_replay_specs()
     baseline_utils_module = _load_baseline_utils_module()
     summaries = [

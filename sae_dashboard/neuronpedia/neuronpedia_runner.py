@@ -1997,8 +1997,6 @@ class NeuronpediaRunner:
                         correlation_accumulation_device=self.cfg.correlation_accumulation_device,
                         feature_statistics_backend=self.cfg.feature_statistics_backend,
                         logits_histogram_backend=self.cfg.logits_histogram_backend,
-                        logits_histogram_compatibility=self.cfg.logits_histogram_compatibility,
-                        legacy_compatibility=self.cfg.legacy_compatibility,
                         activation_histogram_backend=self.cfg.activation_histogram_backend,
                         defer_component_construction=self.cfg.defer_component_construction,
                         sequence_selection_backend=self.cfg.sequence_selection_backend,
@@ -2479,21 +2477,6 @@ def main():
         help="Backend for columnar logits histogram packaging.",
     )
     parser.add_argument(
-        "--logits-histogram-compatibility",
-        choices=("current", "detached_legacy"),
-        default="current",
-        help="Compatibility mode for logits histogram object packaging.",
-    )
-    parser.add_argument(
-        "--legacy-compatibility",
-        choices=("current", "detached_legacy"),
-        default="current",
-        help=(
-            "Compatibility mode for preserved legacy dashboard generation. "
-            "Use 'detached_legacy' only for baseline timing comparisons."
-        ),
-    )
-    parser.add_argument(
         "--activation-histogram-backend",
         choices=("torch", "polars"),
         default="torch",
@@ -2860,8 +2843,6 @@ def main():
         sequence_replay_artifact_dir=args.sequence_replay_artifact_dir,
         feature_statistics_backend=args.feature_statistics_backend,
         logits_histogram_backend=args.logits_histogram_backend,
-        logits_histogram_compatibility=args.logits_histogram_compatibility,
-        legacy_compatibility=args.legacy_compatibility,
         activation_histogram_backend=args.activation_histogram_backend,
         defer_component_construction=args.defer_component_construction,
         sequence_selection_backend=args.sequence_selection_backend,

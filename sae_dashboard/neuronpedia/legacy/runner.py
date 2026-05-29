@@ -113,8 +113,6 @@ def _build_legacy_vis_config(
             else None
         ),
         correlation_accumulation_device="cpu",
-        logits_histogram_compatibility=runner.cfg.logits_histogram_compatibility,
-        legacy_compatibility=runner.cfg.legacy_compatibility,
         sequence_selection_backend=runner.cfg.sequence_selection_backend,
         dashboard_output_format=runner.cfg.dashboard_output_format,
     )

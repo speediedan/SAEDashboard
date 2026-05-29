@@ -144,8 +144,6 @@ class NeuronpediaRunnerConfig:
     sequence_replay_artifact_dir: Optional[str] = None
     feature_statistics_backend: str = "arrow"
     logits_histogram_backend: str = "arrow"
-    logits_histogram_compatibility: str = "current"
-    legacy_compatibility: Literal["current", "detached_legacy"] = "current"
     activation_histogram_backend: str = "torch"
     defer_component_construction: bool = False
     sequence_selection_backend: str = "legacy"

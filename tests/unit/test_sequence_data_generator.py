@@ -560,9 +560,8 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_indices_with_selection_mask() 
     assert torch.equal(lazy_indices_bold, legacy_indices_bold)
 
 
-def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> None:
+def test_get_indices_dict_legacy_unmasked_matches_baseline_logic() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
-    cfg.legacy_compatibility = "detached_legacy"
     cfg.feature_centric_layout.seq_cfg.buffer = (1, 1)  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 3  # type: ignore
     cfg.feature_centric_layout.seq_cfg.n_quantiles = 3  # type: ignore
@@ -625,9 +624,8 @@ def test_get_indices_dict_detached_legacy_unmasked_matches_baseline_logic() -> N
     assert n_bold == int(expected_indices_bold.shape[0])
 
 
-def test_legacy_detached_legacy_packaging_stays_in_legacy_subclass() -> None:
+def test_legacy_packaging_stays_in_legacy_subclass() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
-    cfg.legacy_compatibility = "detached_legacy"
 
     tokens = torch.arange(6, dtype=torch.long).reshape(2, 3)
     generator = LegacySequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
