@@ -173,6 +173,28 @@ def test_legacy_RollingCorrCoef_with_self_reuses_single_cpu_buffer():
     assert torch.allclose(shared.corrcoef()[1], legacy.corrcoef()[1], atol=1e-5)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_legacy_RollingCorrCoef_cuda_inputs_keep_finite_cpu_results():
+    xs = torch.randn(3, 7, device="cuda")
+    ys = torch.randn(4, 7, device="cuda")
+
+    shared = RollingCorrCoef()
+    legacy = LegacyRollingCorrCoef()
+
+    shared.update(xs[:, :4], ys[:, :4])
+    legacy.update(xs[:, :4], ys[:, :4])
+    shared.update(xs[:, 4:], ys[:, 4:])
+    legacy.update(xs[:, 4:], ys[:, 4:])
+
+    legacy_pearson, legacy_cossim = legacy.corrcoef()
+    shared_pearson, shared_cossim = shared.corrcoef()
+
+    assert torch.isfinite(legacy_pearson).all()
+    assert torch.isfinite(legacy_cossim).all()
+    assert torch.allclose(shared_pearson, legacy_pearson, atol=1e-5)
+    assert torch.allclose(shared_cossim, legacy_cossim, atol=1e-5)
+
+
 def test_TopK_without_mask():
     topk = TopK(
         tensor=torch.arange(10) + 1,

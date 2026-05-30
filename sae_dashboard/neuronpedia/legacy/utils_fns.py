@@ -61,18 +61,19 @@ class RollingCorrCoef:
         self.Y = Y
 
         # Benchmark-consistency path for the legacy dashboard's default CPU accumulator.
+        # Keep the original synchronous DtoH semantics while reusing host buffers.
         # x = x.to(dtype=self.dtype, device=self.device)
         # y = y.to(dtype=self.dtype, device=self.device)
         if self.device.type == "cpu":
             x_src = x
             y_src = y
             self._x_buf = self._ensure_cpu_buffer(X, Nx, self._x_buf)
-            x = self._x_buf[:, :Nx].copy_(x_src, non_blocking=True)
+            x = self._x_buf[:, :Nx].copy_(x_src)
             if self.with_self:
                 y = x
             else:
                 self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
-                y = self._y_buf[:, :Ny].copy_(y_src, non_blocking=True)
+                y = self._y_buf[:, :Ny].copy_(y_src)
         else:
             x = x.to(dtype=self.dtype, device=self.device)
             y = y.to(dtype=self.dtype, device=self.device)
