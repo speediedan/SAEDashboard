@@ -1995,6 +1995,7 @@ class NeuronpediaRunner:
                             else None
                         ),
                         correlation_accumulation_device=self.cfg.correlation_accumulation_device,
+                        rolling_coefficient_num_threads=self.cfg.rolling_coefficient_num_threads,
                         feature_statistics_backend=self.cfg.feature_statistics_backend,
                         logits_histogram_backend=self.cfg.logits_histogram_backend,
                         activation_histogram_backend=self.cfg.activation_histogram_backend,
@@ -2465,6 +2466,15 @@ def main():
         help="Policy for correlation accumulator placement.",
     )
     parser.add_argument(
+        "--rolling-coefficient-num-threads",
+        type=int,
+        default=None,
+        help=(
+            "Optional torch intra-op thread count override applied only during rolling correlation updates. "
+            "Leave unset to use the process default."
+        ),
+    )
+    parser.add_argument(
         "--feature-statistics-backend",
         choices=("object", "arrow"),
         default="arrow",
@@ -2839,6 +2849,7 @@ def main():
         log_performance=args.log_performance,
         cleanup_each_minibatch=args.cleanup_each_minibatch,
         correlation_accumulation_device=args.correlation_accumulation_device,
+        rolling_coefficient_num_threads=args.rolling_coefficient_num_threads,
         converter_input_artifact_dir=args.converter_input_artifact_dir,
         sequence_replay_artifact_dir=args.sequence_replay_artifact_dir,
         feature_statistics_backend=args.feature_statistics_backend,

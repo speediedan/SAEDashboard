@@ -26,7 +26,25 @@ class RollingCorrCoef:
         self.indices = indices
         self.with_self = with_self
         self.dtype = dtype
-        self.device = device
+        self.device = torch.device(device)
+        self._x_buf: Tensor | None = None
+        self._y_buf: Tensor | None = None
+
+    def _ensure_cpu_buffer(self, rows: int, cols: int, existing: Tensor | None) -> Tensor:
+        if (
+            existing is None
+            or existing.shape[0] != rows
+            or existing.shape[1] < cols
+            or existing.dtype != self.dtype
+            or existing.device != self.device
+        ):
+            return torch.empty(
+                (rows, cols),
+                dtype=self.dtype,
+                device=self.device,
+                pin_memory=self.device.type == "cpu" and torch.cuda.is_available(),
+            )
+        return existing
 
     def update(self, x: Float[Tensor, "X N"], y: Float[Tensor, "Y N"]) -> None:
         assert x.ndim == 2 and y.ndim == 2, "Both x and y should be 2D"
@@ -42,8 +60,22 @@ class RollingCorrCoef:
         self.X = X
         self.Y = Y
 
-        x = x.to(dtype=self.dtype, device=self.device)
-        y = y.to(dtype=self.dtype, device=self.device)
+        # Benchmark-consistency path for the legacy dashboard's default CPU accumulator.
+        # x = x.to(dtype=self.dtype, device=self.device)
+        # y = y.to(dtype=self.dtype, device=self.device)
+        if self.device.type == "cpu":
+            x_src = x
+            y_src = y
+            self._x_buf = self._ensure_cpu_buffer(X, Nx, self._x_buf)
+            x = self._x_buf[:, :Nx].copy_(x_src, non_blocking=True)
+            if self.with_self:
+                y = x
+            else:
+                self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
+                y = self._y_buf[:, :Ny].copy_(y_src, non_blocking=True)
+        else:
+            x = x.to(dtype=self.dtype, device=self.device)
+            y = y.to(dtype=self.dtype, device=self.device)
 
         if self.n == 0:
             self.x_sum = torch.zeros(X, device=x.device, dtype=self.dtype)

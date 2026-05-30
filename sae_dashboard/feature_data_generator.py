@@ -21,7 +21,11 @@ from sae_dashboard.huggingface_model_wrapper import (
     HuggingFaceModelWrapper,
     to_resid_direction_hf,
 )
-from sae_dashboard.perf_logging import log_perf_event, timed_stage
+from sae_dashboard.perf_logging import (
+    log_perf_event,
+    temporary_torch_num_threads,
+    timed_stage,
+)
 from sae_dashboard.sae_vis_data import SaeVisConfig
 from sae_dashboard.transformer_lens_wrapper import (
     TransformerLensWrapper,
@@ -590,20 +594,24 @@ class FeatureDataGenerator:
                 )
             )
 
-            with timed_stage(
-                profile_feature_data,
-                "rolling_coefficient_update",
-                device=self.cfg.device,
-                minibatch_index=i,
-                feature_count=len(feature_indices),
-                token_shape=tuple(minibatch.tokens.shape),
-            ):
-                self.update_rolling_coefficients(
-                    model_acts=primary_acts,
-                    feature_acts=feature_acts,
-                    corrcoef_neurons=corrcoef_neurons,
-                    corrcoef_encoder=corrcoef_encoder,
-                )
+            with temporary_torch_num_threads(self.cfg.rolling_coefficient_num_threads):
+                with timed_stage(
+                    profile_feature_data,
+                    "rolling_coefficient_update",
+                    device=self.cfg.device,
+                    capture_runtime_metrics=True,
+                    minibatch_index=i,
+                    feature_count=len(feature_indices),
+                    token_shape=tuple(minibatch.tokens.shape),
+                    correlation_accumulation_device=str(correlation_device),
+                    rolling_coefficient_num_threads=self.cfg.rolling_coefficient_num_threads,
+                ):
+                    self.update_rolling_coefficients(
+                        model_acts=primary_acts,
+                        feature_acts=feature_acts,
+                        corrcoef_neurons=corrcoef_neurons,
+                        corrcoef_encoder=corrcoef_encoder,
+                    )
 
             with timed_stage(
                 profile_feature_data,

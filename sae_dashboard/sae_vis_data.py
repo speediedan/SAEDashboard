@@ -33,6 +33,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     torch_profile="Whether the Neuronpedia runner should wrap this run in torch.profiler",
     torch_profile_dir="Optional directory for torch profiler traces",
     correlation_accumulation_device="Policy for where correlation accumulators should live during packaging.",
+    rolling_coefficient_num_threads="Optional torch intra-op thread count override applied only during rolling correlation updates.",
     feature_statistics_backend="Backend used to build columnar feature statistics when dashboard_output_format is columnar.",
     logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
     activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
@@ -100,6 +101,7 @@ class SaeVisConfig:
     torch_profile: bool = False
     torch_profile_dir: Path | None = None
     correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
+    rolling_coefficient_num_threads: int | None = None
     feature_statistics_backend: Literal["object", "arrow"] = "object"
     logits_histogram_backend: Literal["object", "arrow"] = "object"
     activation_histogram_backend: Literal["torch", "polars"] = "torch"

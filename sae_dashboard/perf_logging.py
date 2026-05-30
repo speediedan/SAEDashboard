@@ -9,6 +9,11 @@ from typing import Any, Iterator
 
 import torch
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - non-Unix platforms
+    resource = None
+
 _TIMED_STAGE_DEPTH: ContextVar[int] = ContextVar("timed_stage_depth", default=0)
 
 
@@ -57,6 +62,46 @@ def cpu_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def runtime_snapshot() -> dict[str, Any]:
+    snapshot = cpu_snapshot()
+    snapshot["torch_num_threads"] = torch.get_num_threads()
+    try:
+        snapshot["torch_num_interop_threads"] = torch.get_num_interop_threads()
+    except RuntimeError:
+        pass
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            snapshot["cpu_affinity"] = sorted(os.sched_getaffinity(0))
+        except OSError:
+            pass
+    return snapshot
+
+
+def rusage_snapshot() -> dict[str, float | int]:
+    if resource is None:
+        return {}
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return {
+        "user_cpu_s": usage.ru_utime,
+        "system_cpu_s": usage.ru_stime,
+        "minor_faults": usage.ru_minflt,
+        "major_faults": usage.ru_majflt,
+        "voluntary_context_switches": usage.ru_nvcsw,
+        "involuntary_context_switches": usage.ru_nivcsw,
+    }
+
+
+def rusage_delta(
+    start: dict[str, float | int],
+    end: dict[str, float | int],
+) -> dict[str, float | int]:
+    return {
+        key: end.get(key, 0) - start.get(key, 0)
+        for key in sorted(set(start) | set(end))
+    }
+
+
 def process_io_snapshot() -> dict[str, int]:
     io_path = Path("/proc/self/io")
     if not io_path.exists():
@@ -81,11 +126,32 @@ def io_delta(start: dict[str, int], end: dict[str, int]) -> dict[str, int]:
 
 
 @contextmanager
+def temporary_torch_num_threads(num_threads: int | None) -> Iterator[None]:
+    if num_threads is None:
+        yield
+        return
+    if num_threads < 1:
+        raise ValueError("temporary_torch_num_threads requires num_threads >= 1")
+
+    previous_num_threads = torch.get_num_threads()
+    if num_threads == previous_num_threads:
+        yield
+        return
+
+    torch.set_num_threads(num_threads)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous_num_threads)
+
+
+@contextmanager
 def timed_stage(
     enabled: bool,
     stage: str,
     *,
     device: str | torch.device | None = None,
+    capture_runtime_metrics: bool = False,
     **fields: Any,
 ) -> Iterator[None]:
     if not enabled:
@@ -110,6 +176,10 @@ def timed_stage(
         start_event.record(torch.cuda.current_stream(torch_device))
     if torch.cuda.is_available():
         torch.cuda.nvtx.range_push(stage)
+    start_runtime = runtime_snapshot() if capture_runtime_metrics else None
+    start_io = process_io_snapshot() if capture_runtime_metrics else None
+    start_rusage = rusage_snapshot() if capture_runtime_metrics else None
+    start_process_time = time.process_time() if capture_runtime_metrics else None
     start_time = time.perf_counter()
     try:
         with torch.profiler.record_function(stage):
@@ -128,6 +198,23 @@ def timed_stage(
             log_fields.update({"stage": stage, "wall_s": wall_seconds})
             if cuda_ms is not None:
                 log_fields["cuda_ms"] = cuda_ms
+            if capture_runtime_metrics:
+                end_runtime = runtime_snapshot()
+                end_io = process_io_snapshot()
+                end_rusage = rusage_snapshot()
+                if start_process_time is not None:
+                    log_fields["process_time_s"] = time.process_time() - start_process_time
+                if start_runtime is not None:
+                    log_fields["runtime_start"] = start_runtime
+                log_fields["runtime_end"] = end_runtime
+                if start_rusage is not None:
+                    runtime_rusage_delta = rusage_delta(start_rusage, end_rusage)
+                    if runtime_rusage_delta:
+                        log_fields["rusage_delta"] = runtime_rusage_delta
+                if start_io is not None:
+                    runtime_io_delta = io_delta(start_io, end_io)
+                    if runtime_io_delta:
+                        log_fields["process_io_delta"] = runtime_io_delta
             log_perf_event("stage_timing", **log_fields)
         finally:
             _TIMED_STAGE_DEPTH.reset(token)

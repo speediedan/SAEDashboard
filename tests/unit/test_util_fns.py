@@ -127,6 +127,52 @@ def test_legacy_RollingCorrCoef_topk_pearson_matches_shared():
     assert legacy.topk_pearson(k=2) == shared.topk_pearson(k=2)
 
 
+def test_legacy_RollingCorrCoef_reuses_cpu_buffers_and_matches_shared():
+    xs = torch.randn(3, 7)
+    ys = torch.randn(4, 7)
+
+    shared = RollingCorrCoef()
+    legacy = LegacyRollingCorrCoef()
+
+    shared.update(xs[:, :4], ys[:, :4])
+    legacy.update(xs[:, :4], ys[:, :4])
+    first_x_buf = legacy._x_buf
+    first_y_buf = legacy._y_buf
+
+    shared.update(xs[:, 4:], ys[:, 4:])
+    legacy.update(xs[:, 4:], ys[:, 4:])
+
+    assert legacy._x_buf is first_x_buf
+    assert legacy._y_buf is first_y_buf
+    assert legacy._x_buf is not None
+    assert legacy._y_buf is not None
+    assert legacy._x_buf.shape == (xs.shape[0], 4)
+    assert legacy._y_buf.shape == (ys.shape[0], 4)
+    assert torch.allclose(shared.corrcoef()[0], legacy.corrcoef()[0], atol=1e-5)
+    assert torch.allclose(shared.corrcoef()[1], legacy.corrcoef()[1], atol=1e-5)
+
+
+def test_legacy_RollingCorrCoef_with_self_reuses_single_cpu_buffer():
+    xs = torch.randn(3, 7)
+
+    shared = RollingCorrCoef(with_self=True)
+    legacy = LegacyRollingCorrCoef(with_self=True)
+
+    shared.update(xs[:, :4], xs[:, :4])
+    legacy.update(xs[:, :4], xs[:, :4])
+    first_x_buf = legacy._x_buf
+
+    shared.update(xs[:, 4:], xs[:, 4:])
+    legacy.update(xs[:, 4:], xs[:, 4:])
+
+    assert legacy._x_buf is first_x_buf
+    assert legacy._x_buf is not None
+    assert legacy._y_buf is None
+    assert legacy._x_buf.shape == (xs.shape[0], 4)
+    assert torch.allclose(shared.corrcoef()[0], legacy.corrcoef()[0], atol=1e-5)
+    assert torch.allclose(shared.corrcoef()[1], legacy.corrcoef()[1], atol=1e-5)
+
+
 def test_TopK_without_mask():
     topk = TopK(
         tensor=torch.arange(10) + 1,
