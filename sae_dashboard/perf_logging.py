@@ -77,19 +77,42 @@ def runtime_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def process_memory_snapshot() -> dict[str, int]:
+    statm_path = Path("/proc/self/statm")
+    if not statm_path.exists():
+        return {}
+
+    parts = statm_path.read_text(encoding="utf-8", errors="replace").split()
+    if len(parts) < 7:
+        return {}
+
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    names = ("vsz", "rss", "shared", "text", "lib", "data", "dirty")
+    snapshot = {"page_size_bytes": int(page_size)}
+    for name, raw_value in zip(names, parts):
+        if raw_value.isdigit():
+            pages = int(raw_value)
+            snapshot[f"statm_{name}_pages"] = pages
+            snapshot[f"statm_{name}_bytes"] = pages * int(page_size)
+    return snapshot
+
+
 def rusage_snapshot() -> dict[str, float | int]:
     if resource is None:
         return {}
 
     usage = resource.getrusage(resource.RUSAGE_SELF)
-    return {
+    snapshot = {
         "user_cpu_s": usage.ru_utime,
         "system_cpu_s": usage.ru_stime,
+        "max_rss_kib": usage.ru_maxrss,
         "minor_faults": usage.ru_minflt,
         "major_faults": usage.ru_majflt,
         "voluntary_context_switches": usage.ru_nvcsw,
         "involuntary_context_switches": usage.ru_nivcsw,
     }
+    snapshot.update(process_memory_snapshot())
+    return snapshot
 
 
 def rusage_delta(
@@ -100,6 +123,148 @@ def rusage_delta(
         key: end.get(key, 0) - start.get(key, 0)
         for key in sorted(set(start) | set(end))
     }
+
+
+def _thread_stat_snapshot(tid_path: Path) -> dict[str, int | str]:
+    stat_path = tid_path / "stat"
+    raw_stat = stat_path.read_text(encoding="utf-8", errors="replace")
+    close_paren = raw_stat.rfind(")")
+    if close_paren < 0:
+        return {}
+    prefix = raw_stat[: close_paren + 1]
+    suffix = raw_stat[close_paren + 2 :].split()
+    comm_start = prefix.find("(")
+    comm = prefix[comm_start + 1 : -1] if comm_start >= 0 else ""
+    if len(suffix) < 13:
+        return {"name": comm}
+    return {
+        "name": comm,
+        "minor_faults": int(suffix[7]),
+        "major_faults": int(suffix[9]),
+        "user_ticks": int(suffix[11]),
+        "system_ticks": int(suffix[12]),
+    }
+
+
+def _thread_context_switch_snapshot(tid_path: Path) -> dict[str, int]:
+    status_path = tid_path / "status"
+    if not status_path.exists():
+        return {}
+
+    snapshot: dict[str, int] = {}
+    for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("voluntary_ctxt_switches:") or line.startswith("nonvoluntary_ctxt_switches:"):
+            key, raw_value = line.split(":", 1)
+            raw_value = raw_value.strip()
+            if raw_value.isdigit():
+                snapshot[key] = int(raw_value)
+    return snapshot
+
+
+def thread_fault_snapshot() -> dict[str, dict[str, int | str]]:
+    task_dir = Path("/proc/self/task")
+    if not task_dir.exists():
+        return {}
+
+    snapshot: dict[str, dict[str, int | str]] = {}
+    for tid_path in task_dir.iterdir():
+        if not tid_path.name.isdigit():
+            continue
+        try:
+            thread_snapshot = _thread_stat_snapshot(tid_path)
+            thread_snapshot.update(_thread_context_switch_snapshot(tid_path))
+        except OSError:
+            continue
+        if thread_snapshot:
+            snapshot[tid_path.name] = thread_snapshot
+    return snapshot
+
+
+def thread_fault_delta(
+    start: dict[str, dict[str, int | str]],
+    end: dict[str, dict[str, int | str]],
+) -> dict[str, Any]:
+    active_threads: list[dict[str, int | str]] = []
+    for tid in sorted(set(start) | set(end), key=int):
+        start_values = start.get(tid, {})
+        end_values = end.get(tid, {})
+        delta: dict[str, int | str] = {
+            "tid": int(tid),
+            "name": str(end_values.get("name", start_values.get("name", ""))),
+        }
+        for key in (
+            "minor_faults",
+            "major_faults",
+            "user_ticks",
+            "system_ticks",
+            "voluntary_ctxt_switches",
+            "nonvoluntary_ctxt_switches",
+        ):
+            start_value = start_values.get(key, 0)
+            end_value = end_values.get(key, 0)
+            if isinstance(start_value, int) and isinstance(end_value, int):
+                delta[key] = end_value - start_value
+        if any(isinstance(value, int) and value for key, value in delta.items() if key != "tid"):
+            active_threads.append(delta)
+
+    active_threads.sort(key=lambda item: int(item.get("minor_faults", 0)), reverse=True)
+    total_minor_faults = sum(int(item.get("minor_faults", 0)) for item in active_threads)
+    total_major_faults = sum(int(item.get("major_faults", 0)) for item in active_threads)
+    return {
+        "thread_count_start": len(start),
+        "thread_count_end": len(end),
+        "active_thread_count": len(active_threads),
+        "total_minor_faults": total_minor_faults,
+        "total_major_faults": total_major_faults,
+        "max_thread_minor_faults": int(active_threads[0].get("minor_faults", 0)) if active_threads else 0,
+        "active_threads": active_threads[:64],
+        "active_threads_truncated": len(active_threads) > 64,
+    }
+
+
+def tensor_runtime_metadata(tensor: torch.Tensor) -> dict[str, Any]:
+    storage_nbytes: int | None
+    try:
+        storage_nbytes = tensor.untyped_storage().nbytes()
+    except RuntimeError:
+        storage_nbytes = None
+    return {
+        "shape": tuple(tensor.shape),
+        "stride": tuple(tensor.stride()),
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "layout": str(tensor.layout),
+        "is_contiguous": tensor.is_contiguous(),
+        "storage_offset": tensor.storage_offset(),
+        "numel": tensor.numel(),
+        "element_size": tensor.element_size(),
+        "logical_nbytes": tensor.numel() * tensor.element_size(),
+        "storage_nbytes": storage_nbytes,
+        "data_ptr": tensor.data_ptr() if tensor.device.type == "cpu" else None,
+    }
+
+
+def _flatten_numeric_mapping(prefix: str, value: Any, output: dict[str, int | float]) -> None:
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            nested_prefix = f"{prefix}_{key}" if prefix else str(key)
+            _flatten_numeric_mapping(nested_prefix, nested_value, output)
+    elif isinstance(value, (int, float)):
+        output[prefix] = value
+
+
+def torch_host_allocator_snapshot() -> dict[str, int | float]:
+    host_stats_fn = getattr(torch._C, "_cuda_hostMemoryStats", None)
+    if host_stats_fn is None:
+        return {}
+    try:
+        host_stats = host_stats_fn()
+    except RuntimeError:
+        return {}
+
+    snapshot: dict[str, int | float] = {}
+    _flatten_numeric_mapping("", host_stats, snapshot)
+    return snapshot
 
 
 def process_io_snapshot() -> dict[str, int]:
@@ -179,6 +344,8 @@ def timed_stage(
     start_runtime = runtime_snapshot() if capture_runtime_metrics else None
     start_io = process_io_snapshot() if capture_runtime_metrics else None
     start_rusage = rusage_snapshot() if capture_runtime_metrics else None
+    start_thread_faults = thread_fault_snapshot() if capture_runtime_metrics else None
+    start_torch_host_allocator = torch_host_allocator_snapshot() if capture_runtime_metrics else None
     start_process_time = time.process_time() if capture_runtime_metrics else None
     start_time = time.perf_counter()
     try:
@@ -202,6 +369,8 @@ def timed_stage(
                 end_runtime = runtime_snapshot()
                 end_io = process_io_snapshot()
                 end_rusage = rusage_snapshot()
+                end_thread_faults = thread_fault_snapshot()
+                end_torch_host_allocator = torch_host_allocator_snapshot()
                 if start_process_time is not None:
                     log_fields["process_time_s"] = time.process_time() - start_process_time
                 if start_runtime is not None:
@@ -211,6 +380,14 @@ def timed_stage(
                     runtime_rusage_delta = rusage_delta(start_rusage, end_rusage)
                     if runtime_rusage_delta:
                         log_fields["rusage_delta"] = runtime_rusage_delta
+                if start_thread_faults is not None:
+                    runtime_thread_fault_delta = thread_fault_delta(start_thread_faults, end_thread_faults)
+                    if runtime_thread_fault_delta:
+                        log_fields["thread_fault_delta"] = runtime_thread_fault_delta
+                if start_torch_host_allocator is not None:
+                    runtime_allocator_delta = rusage_delta(start_torch_host_allocator, end_torch_host_allocator)
+                    if runtime_allocator_delta:
+                        log_fields["torch_host_allocator_delta"] = runtime_allocator_delta
                 if start_io is not None:
                     runtime_io_delta = io_delta(start_io, end_io)
                     if runtime_io_delta:

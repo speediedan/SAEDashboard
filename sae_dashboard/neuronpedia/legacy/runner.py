@@ -82,6 +82,7 @@ def _build_legacy_vis_config(
         quantile_feature_batch_size=runner.cfg.quantile_feature_batch_size,
         verbose=True,
         log_performance=runner.cfg.log_performance,
+        profile_rolling_substages=runner.cfg.profile_rolling_substages,
         cleanup_each_minibatch=runner.cfg.cleanup_each_minibatch,
         torch_profile=runner.cfg.torch_profile,
         torch_profile_dir=(

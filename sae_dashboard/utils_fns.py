@@ -28,6 +28,12 @@ from tqdm import tqdm
 from transformer_lens import utils
 from transformers import PreTrainedTokenizerBase
 
+from sae_dashboard.perf_logging import (
+    log_perf_event,
+    tensor_runtime_metadata,
+    timed_stage,
+)
+
 T = TypeVar("T")
 
 # from rich.progress import ProgressColumn, Task # MofNCompleteColumn
@@ -1360,7 +1366,15 @@ class RollingCorrCoef:
         self.dtype = dtype
         self.device = device
 
-    def update(self, x: Float[Tensor, "X N"], y: Float[Tensor, "Y N"]) -> None:
+    def update(
+        self,
+        x: Float[Tensor, "X N"],
+        y: Float[Tensor, "Y N"],
+        *,
+        perf_enabled: bool = False,
+        perf_label: str = "corrcoef",
+        perf_context: dict[str, Any] | None = None,
+    ) -> None:
         # Get values of x and y, and check for consistency with each other & with previous values
         assert x.ndim == 2 and y.ndim == 2, "Both x and y should be 2D"
         X, Nx = x.shape
@@ -1381,27 +1395,112 @@ class RollingCorrCoef:
         self.X = X
         self.Y = Y
 
+        perf_fields = dict(perf_context or {})
+        perf_fields.update(
+            {
+                "corrcoef_label": perf_label,
+                "corrcoef_device": str(self.device),
+                "corrcoef_dtype": str(self.dtype),
+                "corrcoef_with_self": self.with_self,
+                "input_x_layout": tensor_runtime_metadata(x) if perf_enabled else None,
+                "input_y_layout": tensor_runtime_metadata(y) if perf_enabled else None,
+            }
+        )
         same_input = x is y
-        x = x.to(dtype=self.dtype, device=self.device)
-        y = x if same_input else y.to(dtype=self.dtype, device=self.device)
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_materialize_x",
+            device=str(self.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+            same_input=same_input,
+        ):
+            x = x.to(dtype=self.dtype, device=self.device)
+        if same_input:
+            y = x
+        else:
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_materialize_y",
+                device=str(self.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                same_input=same_input,
+            ):
+                y = y.to(dtype=self.dtype, device=self.device)
+
+        if perf_enabled:
+            log_perf_event(
+                "rolling_tensor_layout",
+                stage=f"rolling_{perf_label}_materialized_inputs",
+                **perf_fields,
+                same_input=same_input,
+                materialized_x_layout=tensor_runtime_metadata(x),
+                materialized_y_layout=tensor_runtime_metadata(y),
+            )
 
         # If this is the first update step, then we need to initialise the sums
         if self.n == 0:
-            self.x_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
-            self.xy_sum = torch.zeros(X, Y, device=x.device, dtype=self.dtype)
-            self.x2_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
-            if not self.with_self:
-                self.y_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
-                self.y2_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_init_accumulators",
+                device=str(x.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                x_rows=X,
+                y_rows=Y,
+                n_cols=Nx,
+            ):
+                self.x_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
+                self.xy_sum = torch.zeros(X, Y, device=x.device, dtype=self.dtype)
+                self.x2_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
+                if not self.with_self:
+                    self.y_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
+                    self.y2_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
 
         # Next, update the sums
         self.n += x.shape[-1]
-        self.x_sum += x.sum(dim=-1)
-        self.xy_sum.addmm_(x, y.mT)
-        self.x2_sum += (x * x).sum(dim=-1)
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_x_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.x_sum += x.sum(dim=-1)
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_xy_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.xy_sum.addmm_(x, y.mT)
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_x2_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.x2_sum += (x * x).sum(dim=-1)
         if not self.with_self:
-            self.y_sum += y.sum(dim=-1)
-            self.y2_sum += (y * y).sum(dim=-1)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_y_sum_update",
+                device=str(y.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+            ):
+                self.y_sum += y.sum(dim=-1)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_y2_sum_update",
+                device=str(y.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+            ):
+                self.y2_sum += (y * y).sum(dim=-1)
 
     def corrcoef(
         self,

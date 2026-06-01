@@ -24,6 +24,7 @@ from sae_dashboard.huggingface_model_wrapper import (
 from sae_dashboard.perf_logging import (
     log_perf_event,
     temporary_torch_num_threads,
+    tensor_runtime_metadata,
     timed_stage,
 )
 from sae_dashboard.sae_vis_data import SaeVisConfig
@@ -611,6 +612,9 @@ class FeatureDataGenerator:
                         feature_acts=feature_acts,
                         corrcoef_neurons=corrcoef_neurons,
                         corrcoef_encoder=corrcoef_encoder,
+                        minibatch_index=i,
+                        feature_count=len(feature_indices),
+                        token_shape=tuple(minibatch.tokens.shape),
                     )
 
             with timed_stage(
@@ -876,6 +880,10 @@ class FeatureDataGenerator:
         feature_acts: Float[Tensor, "batch seq feats"],
         corrcoef_neurons: RollingCorrCoef | None,
         corrcoef_encoder: RollingCorrCoef | None,
+        *,
+        minibatch_index: int | None = None,
+        feature_count: int | None = None,
+        token_shape: tuple[int, ...] | None = None,
     ) -> None:
         """
 
@@ -889,22 +897,93 @@ class FeatureDataGenerator:
             corrcoef_encoder: Optional[RollingCorrCoef]
                 The object storing the minimal data necessary to compute corrcoef between pairwise feature activations.
         """
-        # Update the CorrCoef object between feature activation & neurons
-        feature_acts_by_feature = einops.rearrange(
-            feature_acts, "batch seq feats -> feats (batch seq)"
+        profile_feature_data = self.cfg.log_performance
+        profile_rolling_substages = (
+            profile_feature_data and self.cfg.profile_rolling_substages
         )
-        if corrcoef_neurons is not None:
-            corrcoef_neurons.update(
-                feature_acts_by_feature,
-                einops.rearrange(model_acts, "batch seq d_in -> d_in (batch seq)"),
+        perf_context = {
+            "minibatch_index": minibatch_index,
+            "feature_count": feature_count,
+            "token_shape": token_shape,
+        }
+
+        with timed_stage(
+            profile_rolling_substages,
+            "rolling_feature_acts_rearrange",
+            device=self.cfg.device,
+            capture_runtime_metrics=True,
+            **perf_context,
+            input_layout=tensor_runtime_metadata(feature_acts),
+        ):
+            feature_acts_by_feature = einops.rearrange(
+                feature_acts, "batch seq feats -> feats (batch seq)"
             )
+
+        if profile_rolling_substages:
+            log_perf_event(
+                "rolling_tensor_layout",
+                stage="rolling_feature_acts_rearrange",
+                **perf_context,
+                output_layout=tensor_runtime_metadata(feature_acts_by_feature),
+            )
+
+        if corrcoef_neurons is not None:
+            with timed_stage(
+                profile_rolling_substages,
+                "rolling_model_acts_rearrange",
+                device=self.cfg.device,
+                capture_runtime_metrics=True,
+                **perf_context,
+                input_layout=tensor_runtime_metadata(model_acts),
+            ):
+                model_acts_by_neuron = einops.rearrange(
+                    model_acts, "batch seq d_in -> d_in (batch seq)"
+                )
+
+            if profile_rolling_substages:
+                log_perf_event(
+                    "rolling_tensor_layout",
+                    stage="rolling_model_acts_rearrange",
+                    **perf_context,
+                    output_layout=tensor_runtime_metadata(model_acts_by_neuron),
+                )
+
+            with timed_stage(
+                profile_rolling_substages,
+                "rolling_corrcoef_neurons_update",
+                device=self.cfg.device,
+                capture_runtime_metrics=True,
+                **perf_context,
+                x_layout=tensor_runtime_metadata(feature_acts_by_feature),
+                y_layout=tensor_runtime_metadata(model_acts_by_neuron),
+            ):
+                corrcoef_neurons.update(
+                    feature_acts_by_feature,
+                    model_acts_by_neuron,
+                    perf_enabled=profile_rolling_substages,
+                    perf_label="neurons",
+                    perf_context=perf_context,
+                )
 
         # Update the CorrCoef object between pairwise feature activations
         if corrcoef_encoder is not None:
-            corrcoef_encoder.update(
-                feature_acts_by_feature,
-                feature_acts_by_feature,
-            )
+            with timed_stage(
+                profile_rolling_substages,
+                "rolling_corrcoef_encoder_update",
+                device=self.cfg.device,
+                capture_runtime_metrics=True,
+                **perf_context,
+                x_layout=tensor_runtime_metadata(feature_acts_by_feature),
+                y_layout=tensor_runtime_metadata(feature_acts_by_feature),
+                same_input=True,
+            ):
+                corrcoef_encoder.update(
+                    feature_acts_by_feature,
+                    feature_acts_by_feature,
+                    perf_enabled=profile_rolling_substages,
+                    perf_label="encoder",
+                    perf_context=perf_context,
+                )
 
 
 def save_tensor_dict_torch(tensor_dict: Dict[str, torch.Tensor], filename: Path):

@@ -9,6 +9,11 @@ from jaxtyping import Float
 from torch import Tensor
 
 from sae_dashboard.components import LogitsHistogramData
+from sae_dashboard.perf_logging import (
+    log_perf_event,
+    tensor_runtime_metadata,
+    timed_stage,
+)
 from sae_dashboard.utils_fns import TopK
 
 
@@ -46,7 +51,15 @@ class RollingCorrCoef:
             )
         return existing
 
-    def update(self, x: Float[Tensor, "X N"], y: Float[Tensor, "Y N"]) -> None:
+    def update(
+        self,
+        x: Float[Tensor, "X N"],
+        y: Float[Tensor, "Y N"],
+        *,
+        perf_enabled: bool = False,
+        perf_label: str = "corrcoef",
+        perf_context: dict[str, object] | None = None,
+    ) -> None:
         assert x.ndim == 2 and y.ndim == 2, "Both x and y should be 2D"
         X, Nx = x.shape
         Y, Ny = y.shape
@@ -60,6 +73,18 @@ class RollingCorrCoef:
         self.X = X
         self.Y = Y
 
+        perf_fields = dict(perf_context or {})
+        perf_fields.update(
+            {
+                "corrcoef_label": perf_label,
+                "corrcoef_device": str(self.device),
+                "corrcoef_dtype": str(self.dtype),
+                "corrcoef_with_self": self.with_self,
+                "input_x_layout": tensor_runtime_metadata(x) if perf_enabled else None,
+                "input_y_layout": tensor_runtime_metadata(y) if perf_enabled else None,
+            }
+        )
+        same_input = x is y
         # Benchmark-consistency path for the legacy dashboard's default CPU accumulator.
         # Keep the original synchronous DtoH semantics while reusing host buffers.
         # x = x.to(dtype=self.dtype, device=self.device)
@@ -68,31 +93,119 @@ class RollingCorrCoef:
             x_src = x
             y_src = y
             self._x_buf = self._ensure_cpu_buffer(X, Nx, self._x_buf)
-            x = self._x_buf[:, :Nx].copy_(x_src)
-            if self.with_self:
-                y = x
-            else:
-                self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_copy_x_to_cpu_buffer",
+                device=str(self.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                same_input=same_input,
+                buffer_shape=tuple(self._x_buf.shape),
+                buffer_pinned=self._x_buf.is_pinned(),
+            ):
+                x = self._x_buf[:, :Nx].copy_(x_src)
+            self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_copy_y_to_cpu_buffer",
+                device=str(self.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                same_input=same_input,
+                buffer_shape=tuple(self._y_buf.shape),
+                buffer_pinned=self._y_buf.is_pinned(),
+            ):
                 y = self._y_buf[:, :Ny].copy_(y_src)
         else:
-            x = x.to(dtype=self.dtype, device=self.device)
-            y = y.to(dtype=self.dtype, device=self.device)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_materialize_x",
+                device=str(self.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                same_input=same_input,
+            ):
+                x = x.to(dtype=self.dtype, device=self.device)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_materialize_y",
+                device=str(self.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                same_input=same_input,
+            ):
+                y = y.to(dtype=self.dtype, device=self.device, copy=same_input)
+
+        if perf_enabled:
+            log_perf_event(
+                "rolling_tensor_layout",
+                stage=f"rolling_{perf_label}_materialized_inputs",
+                **perf_fields,
+                same_input=same_input,
+                materialized_x_layout=tensor_runtime_metadata(x),
+                materialized_y_layout=tensor_runtime_metadata(y),
+            )
 
         if self.n == 0:
-            self.x_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
-            self.xy_sum = torch.zeros(X, Y, device=x.device, dtype=self.dtype)
-            self.x2_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
-            if not self.with_self:
-                self.y_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
-                self.y2_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_init_accumulators",
+                device=str(x.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+                x_rows=X,
+                y_rows=Y,
+                n_cols=Nx,
+            ):
+                self.x_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
+                self.xy_sum = torch.zeros(X, Y, device=x.device, dtype=self.dtype)
+                self.x2_sum = torch.zeros(X, device=x.device, dtype=self.dtype)
+                if not self.with_self:
+                    self.y_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
+                    self.y2_sum = torch.zeros(Y, device=y.device, dtype=self.dtype)
 
         self.n += x.shape[-1]
-        self.x_sum += einops.reduce(x, "X N -> X", "sum")
-        self.xy_sum += einops.einsum(x, y, "X N, Y N -> X Y")
-        self.x2_sum += einops.reduce(x**2, "X N -> X", "sum")
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_x_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.x_sum += einops.reduce(x, "X N -> X", "sum")
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_xy_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.xy_sum += einops.einsum(x, y, "X N, Y N -> X Y")
+        with timed_stage(
+            perf_enabled,
+            f"rolling_{perf_label}_x2_sum_update",
+            device=str(x.device),
+            capture_runtime_metrics=True,
+            **perf_fields,
+        ):
+            self.x2_sum += einops.reduce(x**2, "X N -> X", "sum")
         if not self.with_self:
-            self.y_sum += einops.reduce(y, "Y N -> Y", "sum")
-            self.y2_sum += einops.reduce(y**2, "Y N -> Y", "sum")
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_y_sum_update",
+                device=str(y.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+            ):
+                self.y_sum += einops.reduce(y, "Y N -> Y", "sum")
+            with timed_stage(
+                perf_enabled,
+                f"rolling_{perf_label}_y2_sum_update",
+                device=str(y.device),
+                capture_runtime_metrics=True,
+                **perf_fields,
+            ):
+                self.y2_sum += einops.reduce(y**2, "Y N -> Y", "sum")
 
     def corrcoef(
         self,

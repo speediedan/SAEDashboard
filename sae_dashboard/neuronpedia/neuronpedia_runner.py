@@ -1959,6 +1959,7 @@ class NeuronpediaRunner:
                         quantile_feature_batch_size=self.cfg.quantile_feature_batch_size,
                         verbose=True,
                         log_performance=self.cfg.log_performance,
+                        profile_rolling_substages=self.cfg.profile_rolling_substages,
                         cleanup_each_minibatch=self.cfg.cleanup_each_minibatch,
                         torch_profile=self.cfg.torch_profile,
                         torch_profile_dir=(
@@ -2435,6 +2436,15 @@ def main():
         help="Emit per-batch and per-stage wall-clock, CPU, CUDA, and process I/O timing diagnostics.",
     )
     parser.add_argument(
+        "--profile-rolling-substages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Emit nested rolling-correlation substage timings and runtime metrics. "
+            "Disabled by default so normal timing runs keep only the aggregate rolling stage."
+        ),
+    )
+    parser.add_argument(
         "--converter-input-artifact-dir",
         default=None,
         help=(
@@ -2847,6 +2857,7 @@ def main():
         log_resource_snapshots=args.log_resource_snapshots,
         log_hook_aliases=args.log_hook_aliases,
         log_performance=args.log_performance,
+        profile_rolling_substages=args.profile_rolling_substages,
         cleanup_each_minibatch=args.cleanup_each_minibatch,
         correlation_accumulation_device=args.correlation_accumulation_device,
         rolling_coefficient_num_threads=args.rolling_coefficient_num_threads,

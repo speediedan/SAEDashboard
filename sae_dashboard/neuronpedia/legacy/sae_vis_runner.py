@@ -69,6 +69,7 @@ def run_object_feature_batch(
         runner.cfg.log_performance,
         "activation_and_encode_total",
         device=runner.device,
+        capture_runtime_metrics=True,
         batch=feature_batch_index,
         feature_count=len(features),
     ):

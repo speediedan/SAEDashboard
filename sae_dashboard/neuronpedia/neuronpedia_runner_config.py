@@ -138,6 +138,7 @@ class NeuronpediaRunnerConfig:
     log_resource_snapshots: bool = False
     log_hook_aliases: bool = False
     log_performance: bool = False
+    profile_rolling_substages: bool = False
     cleanup_each_minibatch: bool = False
     correlation_accumulation_device: str = "auto"
     rolling_coefficient_num_threads: Optional[int] = None
