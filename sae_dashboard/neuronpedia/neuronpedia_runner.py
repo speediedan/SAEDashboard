@@ -2510,7 +2510,7 @@ def main():
     )
     parser.add_argument(
         "--sequence-selection-backend",
-        choices=("legacy", "lazy_gpu"),
+        choices=("legacy", "columnar_gpu"),
         default="legacy",
         help="Sequence candidate-selection backend.",
     )

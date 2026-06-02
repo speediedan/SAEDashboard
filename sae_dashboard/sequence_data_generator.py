@@ -26,7 +26,7 @@ from sae_dashboard.utils_fns import (
 )
 from sae_dashboard.vector_vis_data import VectorVisConfig
 
-SequenceSelectionBackend = Literal["legacy", "lazy_gpu"]
+SequenceSelectionBackend = Literal["legacy", "columnar_gpu"]
 
 
 def _parse_activation_group_name(group_name: str) -> tuple[float, float, float]:
@@ -754,7 +754,7 @@ class SequenceDataGenerator:
                 Optional mask selecting valid token positions for padded prompt batches.
             selection_backend:
                 Candidate-selection backend to use before compact sequence table construction. The default keeps the
-                preserved legacy JSON CPU selector; `"lazy_gpu"` enables the guarded candidate-vector substitute path.
+                preserved legacy JSON CPU selector; `"columnar_gpu"` enables the guarded candidate-vector substitute path.
 
         Returns:
             SequenceCoordinateTable
@@ -860,8 +860,8 @@ class SequenceDataGenerator:
             return self.get_indices_dict(
                 buffer, feat_acts, selection_mask=selection_mask
             )
-        if selection_backend == "lazy_gpu":
-            return self.get_indices_dict_lazy_gpu(
+        if selection_backend == "columnar_gpu":
+            return self.get_indices_dict_columnar_gpu(
                 buffer, feat_acts, selection_mask=selection_mask
             )
         raise ValueError(f"Unsupported sequence selection backend: {selection_backend}")
@@ -1317,7 +1317,7 @@ class SequenceDataGenerator:
         )
         return quantiles, interval_positions, interval_offsets, interval_counts
 
-    def get_indices_dict_lazy_gpu(
+    def get_indices_dict_columnar_gpu(
         self,
         buffer: tuple[int, int] | None,
         feat_acts: Float[Tensor, "batch seq"],

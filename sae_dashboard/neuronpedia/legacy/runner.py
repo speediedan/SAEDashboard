@@ -32,7 +32,7 @@ from sae_dashboard.sae_vis_data import SaeVisConfig
 
 class LegacyPathConfig(Protocol):
     dashboard_output_format: Literal["legacy_json", "columnar"]
-    sequence_selection_backend: Literal["legacy", "lazy_gpu"]
+    sequence_selection_backend: Literal["legacy", "columnar_gpu"]
 
 
 def is_preserved_legacy_path(cfg: LegacyPathConfig) -> bool:

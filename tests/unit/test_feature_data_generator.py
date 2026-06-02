@@ -279,7 +279,7 @@ def test_transfer_feature_acts_for_output_downcasts_non_legacy_paths() -> None:
         hook_point="blocks.0.hook_resid_pre",
         features=[0],
         dashboard_output_format="columnar",
-        sequence_selection_backend="lazy_gpu",
+        sequence_selection_backend="columnar_gpu",
     )
 
     feature_acts = torch.tensor([5091.77587890625], dtype=torch.float32)

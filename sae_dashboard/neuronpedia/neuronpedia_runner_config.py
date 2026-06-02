@@ -9,7 +9,7 @@ DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO = 8
 LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE = (
     "The legacy JSON dashboard path (dashboard_output_format='legacy_json' with "
     "sequence_selection_backend='legacy') is deprecated and retained only for compatibility/baseline checks. "
-    "Prefer dashboard_output_format='columnar' with sequence_selection_backend='lazy_gpu' for new runs."
+    "Prefer dashboard_output_format='columnar' with sequence_selection_backend='columnar_gpu' for new runs."
 )
 
 

@@ -639,7 +639,7 @@ def test_setup_output_directory_stages_shared_tokens_file(tmp_path: Path) -> Non
         n_prompts_total=2,
         shared_tokens_file=str(shared_tokens_file),
         dashboard_output_format="columnar",
-        sequence_selection_backend="lazy_gpu",
+        sequence_selection_backend="columnar_gpu",
     )
     runner.model_id = "google/gemma-3-1b-it"
     runner.hook_name = "blocks.10.hook_mlp_in"

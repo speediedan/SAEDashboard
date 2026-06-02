@@ -409,7 +409,7 @@ def test_get_sequence_coordinate_table_matches_get_sequences_data(
     assert nested_from_table == nested_direct
 
 
-def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy() -> None:
+def test_get_sequence_coordinate_table_columnar_gpu_selection_matches_legacy() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 4  # type: ignore
@@ -455,7 +455,7 @@ def test_get_sequence_coordinate_table_lazy_gpu_selection_matches_legacy() -> No
         resid_post=resid_post,
         feature_resid_dir=feature_resid_dir,
         selection_mask=selection_mask,
-        selection_backend="lazy_gpu",
+        selection_backend="columnar_gpu",
     )
 
     assert (
@@ -511,7 +511,7 @@ def test_get_sequences_data_selection_mask_excludes_ignored_padding_positions() 
     )
 
 
-def test_get_indices_dict_lazy_gpu_matches_legacy_indices_with_selection_mask() -> (
+def test_get_indices_dict_columnar_gpu_matches_legacy_indices_with_selection_mask() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -548,7 +548,7 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_indices_with_selection_mask() 
     )
     random.seed(12345)
     lazy_indices_dict, lazy_indices_bold, lazy_n_bold = (
-        generator.get_indices_dict_lazy_gpu(
+        generator.get_indices_dict_columnar_gpu(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -863,7 +863,7 @@ def test_legacy_sequence_generator_preserves_cuda_zero_tie_order() -> None:
     ]
 
 
-def test_get_indices_dict_lazy_gpu_matches_legacy_for_bfloat16_interval_boundaries() -> (
+def test_get_indices_dict_columnar_gpu_matches_legacy_for_bfloat16_interval_boundaries() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
@@ -893,7 +893,7 @@ def test_get_indices_dict_lazy_gpu_matches_legacy_for_bfloat16_interval_boundari
     )
     random.seed(12345)
     lazy_indices_dict, lazy_indices_bold, lazy_n_bold = (
-        generator.get_indices_dict_lazy_gpu(
+        generator.get_indices_dict_columnar_gpu(
             generator.buffer,
             feat_acts,
             selection_mask=selection_mask,
@@ -933,7 +933,7 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
         feat_acts_float32,
         selection_mask=selection_mask,
     )
-    lazy_indices_dict, _, _ = generator.get_indices_dict_lazy_gpu(
+    lazy_indices_dict, _, _ = generator.get_indices_dict_columnar_gpu(
         generator.buffer,
         feat_acts_bfloat16,
         selection_mask=selection_mask,
@@ -992,7 +992,7 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
         selection_mask=selection_mask,
     )
     random.seed(12345)
-    lazy_indices_dict, _, _ = generator.get_indices_dict_lazy_gpu(
+    lazy_indices_dict, _, _ = generator.get_indices_dict_columnar_gpu(
         generator.buffer,
         feat_acts,
         selection_mask=selection_mask,
