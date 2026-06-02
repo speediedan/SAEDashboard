@@ -24,6 +24,7 @@ class RollingCorrCoef:
         with_self: bool = False,
         dtype: torch.dtype = torch.float32,
         device: torch.device = torch.device("cpu"),
+        reuse_host_buffers: bool = False,
     ) -> None:
         self.n = 0
         self.X = None
@@ -32,6 +33,7 @@ class RollingCorrCoef:
         self.with_self = with_self
         self.dtype = dtype
         self.device = torch.device(device)
+        self.reuse_host_buffers = reuse_host_buffers
         self._x_buf: Tensor | None = None
         self._y_buf: Tensor | None = None
 
@@ -85,11 +87,7 @@ class RollingCorrCoef:
             }
         )
         same_input = x is y
-        # Benchmark-consistency path for the legacy dashboard's default CPU accumulator.
-        # Keep the original synchronous DtoH semantics while reusing host buffers.
-        # x = x.to(dtype=self.dtype, device=self.device)
-        # y = y.to(dtype=self.dtype, device=self.device)
-        if self.device.type == "cpu":
+        if self.device.type == "cpu" and self.reuse_host_buffers:
             x_src = x
             y_src = y
             self._x_buf = self._ensure_cpu_buffer(X, Nx, self._x_buf)
@@ -104,18 +102,24 @@ class RollingCorrCoef:
                 buffer_pinned=self._x_buf.is_pinned(),
             ):
                 x = self._x_buf[:, :Nx].copy_(x_src)
-            self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
-            with timed_stage(
-                perf_enabled,
-                f"rolling_{perf_label}_copy_y_to_cpu_buffer",
-                device=str(self.device),
-                capture_runtime_metrics=True,
-                **perf_fields,
-                same_input=same_input,
-                buffer_shape=tuple(self._y_buf.shape),
-                buffer_pinned=self._y_buf.is_pinned(),
-            ):
-                y = self._y_buf[:, :Ny].copy_(y_src)
+            if self.with_self:
+                y = x
+            else:
+                self._y_buf = self._ensure_cpu_buffer(Y, Ny, self._y_buf)
+                with timed_stage(
+                    perf_enabled,
+                    f"rolling_{perf_label}_copy_y_to_cpu_buffer",
+                    device=str(self.device),
+                    capture_runtime_metrics=True,
+                    **perf_fields,
+                    same_input=same_input,
+                    buffer_shape=tuple(self._y_buf.shape),
+                    buffer_pinned=self._y_buf.is_pinned(),
+                ):
+                    y = self._y_buf[:, :Ny].copy_(y_src)
+        elif self.device.type == "cpu":
+            x = x.to(dtype=self.dtype, device=self.device)
+            y = y.to(dtype=self.dtype, device=self.device)
         else:
             with timed_stage(
                 perf_enabled,

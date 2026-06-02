@@ -132,7 +132,7 @@ def test_legacy_RollingCorrCoef_reuses_cpu_buffers_and_matches_shared():
     ys = torch.randn(4, 7)
 
     shared = RollingCorrCoef()
-    legacy = LegacyRollingCorrCoef()
+    legacy = LegacyRollingCorrCoef(reuse_host_buffers=True)
 
     shared.update(xs[:, :4], ys[:, :4])
     legacy.update(xs[:, :4], ys[:, :4])
@@ -156,7 +156,7 @@ def test_legacy_RollingCorrCoef_with_self_reuses_single_cpu_buffer():
     xs = torch.randn(3, 7)
 
     shared = RollingCorrCoef(with_self=True)
-    legacy = LegacyRollingCorrCoef(with_self=True)
+    legacy = LegacyRollingCorrCoef(with_self=True, reuse_host_buffers=True)
 
     shared.update(xs[:, :4], xs[:, :4])
     legacy.update(xs[:, :4], xs[:, :4])
