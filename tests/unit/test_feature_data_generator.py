@@ -197,7 +197,7 @@ def test_feature_data_generator_factory_routes_legacy_to_legacy_subclass() -> No
     )
 
 
-def test_preserved_legacy_uses_device_concat() -> None:
+def test_preserved_legacy_uses_index_copy_scatter() -> None:
     generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
@@ -206,19 +206,14 @@ def test_preserved_legacy_uses_device_concat() -> None:
         sequence_selection_backend="legacy",
     )
 
-    assert generator._uses_preserved_legacy_feature_act_concat()
+    assert not generator._uses_preserved_legacy_feature_act_concat()
 
-    chunks = [
-        torch.tensor([[[1.0], [0.0]]], dtype=torch.float32),
-        torch.tensor([[[2.0], [3.0]]], dtype=torch.float32),
-    ]
+    destination = torch.zeros(2, 1, 1, dtype=torch.float32)
+    chunk = torch.tensor([[[1.0]], [[2.0]]], dtype=torch.float32)
+    generator._scatter_feature_act_chunk(destination, chunk, prompt_indices=(0, 1))
 
-    concatenated = generator._concat_feature_act_chunks(chunks)
-
-    assert concatenated.device.type == "cpu"
-    assert concatenated.dtype == torch.float32
-    assert concatenated.tolist() == [[[1.0], [0.0]], [[2.0], [3.0]]]
-    assert chunks == []
+    assert destination[0][0][0].item() == pytest.approx(1.0)
+    assert destination[1][0][0].item() == pytest.approx(2.0)
 
 
 def test_legacy_feature_data_generator_uses_legacy_corrcoef() -> None:

@@ -15,7 +15,7 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
         return feature_acts_for_output
 
     def _uses_preserved_legacy_feature_act_concat(self) -> bool:
-        return True
+        return False
 
     def _uses_full_feature_encode_path(self) -> bool:
         return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]
