@@ -22,7 +22,7 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
         *,
         correlation_device: torch.device,
     ):
-        return legacy_utils_fns.RollingCorrCoef(device=correlation_device)
+        return legacy_utils_fns.RollingCorrCoef(device=torch.device("cpu"))
 
     def _create_corrcoef_encoder(
         self,
@@ -33,5 +33,5 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
         return legacy_utils_fns.RollingCorrCoef(
             indices=feature_indices,
             with_self=True,
-            device=correlation_device,
+            device=torch.device("cpu"),
         )
