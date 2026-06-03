@@ -120,9 +120,6 @@ class FeatureDataGenerator:
     ) -> Tensor:
         return feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
 
-    def _uses_preserved_legacy_feature_act_concat(self) -> bool:
-        return False
-
     def _uses_full_feature_encode_path(self) -> bool:
         return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
             self.encoder.activation_fn, TopK
@@ -518,10 +515,6 @@ class FeatureDataGenerator:
                 feature_out_dir, self.model  # type: ignore
             )  # [feats d_model]
         all_feat_acts_tensor: Tensor | None = None
-        all_feat_act_chunks: list[Tensor] = []
-        use_preserved_legacy_feature_act_concat = (
-            self._uses_preserved_legacy_feature_act_concat()
-        )
 
         # ! Compute & concatenate together all feature activations & post-activation function values
         for i, minibatch in enumerate(self.token_minibatches):
@@ -631,13 +624,9 @@ class FeatureDataGenerator:
                     target_seq_len=self.full_sequence_length,
                 )
 
-                if use_preserved_legacy_feature_act_concat:
-                    all_feat_act_chunks.append(feature_acts_for_output)
-                    feature_acts_cpu = None
-                else:
-                    feature_acts_cpu = self._transfer_feature_acts_for_output(
-                        feature_acts_for_output
-                    )
+                feature_acts_cpu = self._transfer_feature_acts_for_output(
+                    feature_acts_for_output
+                )
 
             peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
                 self._update_resource_peaks(
@@ -722,9 +711,6 @@ class FeatureDataGenerator:
                     if torch.cuda.is_available() and self.cfg.device.startswith("cuda"):
                         torch.cuda.empty_cache()
 
-        if use_preserved_legacy_feature_act_concat:
-            all_feat_acts_tensor = self._concat_feature_act_chunks(all_feat_act_chunks)
-
         with timed_stage(
             profile_feature_data,
             "feature_data_final_cleanup",
@@ -772,17 +758,6 @@ class FeatureDataGenerator:
             corrcoef_encoder,
             all_dfa_results,
         )
-
-    @staticmethod
-    def _concat_feature_act_chunks(feature_act_chunks: list[Tensor]) -> Tensor:
-        if not feature_act_chunks:
-            return torch.empty(0)
-
-        # Match the detached baseline compatibility path rather than rebuilding
-        # the tensor chunk-by-chunk inside get_feature_data().
-        concatenated = torch.cat(feature_act_chunks, dim=0)
-        feature_act_chunks.clear()
-        return concatenated
 
     @torch.inference_mode()
     def get_model_acts(

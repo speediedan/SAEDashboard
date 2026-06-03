@@ -197,7 +197,7 @@ def test_feature_data_generator_factory_routes_legacy_to_legacy_subclass() -> No
     )
 
 
-def test_preserved_legacy_uses_index_copy_scatter() -> None:
+def test_legacy_feature_data_generator_scatter_matches_detached_baseline() -> None:
     generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
         hook_point="blocks.0.hook_resid_pre",
@@ -206,14 +206,26 @@ def test_preserved_legacy_uses_index_copy_scatter() -> None:
         sequence_selection_backend="legacy",
     )
 
-    assert not generator._uses_preserved_legacy_feature_act_concat()
-
     destination = torch.zeros(2, 1, 1, dtype=torch.float32)
     chunk = torch.tensor([[[1.0]], [[2.0]]], dtype=torch.float32)
     generator._scatter_feature_act_chunk(destination, chunk, prompt_indices=(0, 1))
 
     assert destination[0][0][0].item() == pytest.approx(1.0)
     assert destination[1][0][0].item() == pytest.approx(2.0)
+
+
+def test_legacy_feature_data_generator_keeps_float32_output_dtype() -> None:
+    generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
+    generator.cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        dashboard_output_format="legacy_json",
+        sequence_selection_backend="legacy",
+    )
+    x = torch.randn(2, 4, 256)
+    result = generator._transfer_feature_acts_for_output(x)
+    assert result.dtype == torch.float32
+    assert result is x
 
 
 def test_legacy_feature_data_generator_uses_legacy_corrcoef() -> None:
