@@ -723,6 +723,8 @@ class FeatureDataGenerator:
 
         if all_feat_acts_tensor is None:
             all_feat_acts_tensor = torch.empty(0)
+        else:
+            all_feat_acts_tensor = all_feat_acts_tensor.contiguous()
 
         if self.cfg.log_performance:
             summary_fields: dict[str, Any] = {
