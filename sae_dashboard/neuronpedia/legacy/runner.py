@@ -115,6 +115,7 @@ def _build_legacy_vis_config(
         ),
         correlation_accumulation_device="cpu",
         rolling_coefficient_num_threads=runner.cfg.rolling_coefficient_num_threads,
+        activation_significance_floor=runner.cfg.activation_significance_floor,
         sequence_selection_backend=runner.cfg.sequence_selection_backend,
         dashboard_output_format=runner.cfg.dashboard_output_format,
     )

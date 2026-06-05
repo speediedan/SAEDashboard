@@ -104,6 +104,7 @@ class SaeVisConfig:
     torch_profile_dir: Path | None = None
     correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
     rolling_coefficient_num_threads: int | None = None
+    activation_significance_floor: float = 0.0
     feature_statistics_backend: Literal["object", "arrow"] = "object"
     logits_histogram_backend: Literal["object", "arrow"] = "object"
     activation_histogram_backend: Literal["torch", "polars"] = "torch"

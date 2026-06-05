@@ -142,6 +142,7 @@ class NeuronpediaRunnerConfig:
     cleanup_each_minibatch: bool = False
     correlation_accumulation_device: str = "auto"
     rolling_coefficient_num_threads: Optional[int] = None
+    activation_significance_floor: float = 0.0
     converter_input_artifact_dir: Optional[str] = None
     sequence_replay_artifact_dir: Optional[str] = None
     feature_statistics_backend: str = "arrow"

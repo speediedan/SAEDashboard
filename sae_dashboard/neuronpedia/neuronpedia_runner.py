@@ -1997,6 +1997,7 @@ class NeuronpediaRunner:
                         ),
                         correlation_accumulation_device=self.cfg.correlation_accumulation_device,
                         rolling_coefficient_num_threads=self.cfg.rolling_coefficient_num_threads,
+                        activation_significance_floor=self.cfg.activation_significance_floor,
                         feature_statistics_backend=self.cfg.feature_statistics_backend,
                         logits_histogram_backend=self.cfg.logits_histogram_backend,
                         activation_histogram_backend=self.cfg.activation_histogram_backend,
@@ -2485,6 +2486,12 @@ def main():
         ),
     )
     parser.add_argument(
+        "--activation-significance-floor",
+        type=float,
+        default=0.0,
+        help="Minimum activation value to consider significant. Values <= floor are excluded from histograms.",
+    )
+    parser.add_argument(
         "--feature-statistics-backend",
         choices=("object", "arrow"),
         default="arrow",
@@ -2861,6 +2868,7 @@ def main():
         cleanup_each_minibatch=args.cleanup_each_minibatch,
         correlation_accumulation_device=args.correlation_accumulation_device,
         rolling_coefficient_num_threads=args.rolling_coefficient_num_threads,
+        activation_significance_floor=args.activation_significance_floor,
         converter_input_artifact_dir=args.converter_input_artifact_dir,
         sequence_replay_artifact_dir=args.sequence_replay_artifact_dir,
         feature_statistics_backend=args.feature_statistics_backend,

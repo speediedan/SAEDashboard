@@ -871,7 +871,8 @@ class SaeVisRunner:
                 for row_index, feat in enumerate(features):
                     feat_acts = all_feat_acts[..., row_index]
                     masked_feat_acts = feat_acts * ignore_tokens_mask
-                    nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
+                    significance_floor = getattr(self.cfg, 'activation_significance_floor', 0.0)
+                    nonzero_feat_acts = masked_feat_acts[masked_feat_acts > significance_floor]
                     valid_feature_token_count = max(
                         1,
                         int(ignore_tokens_mask.sum().item()),
@@ -1146,7 +1147,8 @@ class SaeVisRunner:
             for row_index, feat in enumerate(features):
                 feat_acts = all_feat_acts[..., row_index]
                 masked_feat_acts = feat_acts * ignore_tokens_mask
-                nonzero_feat_acts = masked_feat_acts[masked_feat_acts > 0]
+                significance_floor = getattr(self.cfg, 'activation_significance_floor', 0.0)
+                nonzero_feat_acts = masked_feat_acts[masked_feat_acts > significance_floor]
                 valid_feature_token_count = max(
                     1,
                     int(ignore_tokens_mask.sum().item()),
