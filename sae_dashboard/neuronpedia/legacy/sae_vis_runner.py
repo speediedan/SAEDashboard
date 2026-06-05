@@ -187,7 +187,7 @@ def run_object_feature_batch(
             feat_acts = all_feat_acts[..., row_index]
             masked_feat_acts = feat_acts * ignore_tokens_mask
             masked_feat_acts_by_feature.append(masked_feat_acts)
-            significance_floor = getattr(self.cfg, 'activation_significance_floor', 0.0)
+            significance_floor = getattr(runner.cfg, 'activation_significance_floor', 0.0)
             nonzero_feat_acts = masked_feat_acts[masked_feat_acts > significance_floor]
             frac_nonzero = (
                 nonzero_feat_acts.numel() / masked_feat_acts.numel()
