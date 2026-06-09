@@ -1,1 +1,1 @@
-{"model": "gpt2-small", "sae_set": "gpt2-small-res-jb", "sae_path": "blocks.0.hook_resid_pre"}
+{"windowing_mode": "concatenate", "prompt_windowing_family": "packed_legacy", "effective_context_size": 128, "context_size": 128, "tokenizer_name": "gpt2", "dataset_path": "monology/pile-uncopyrighted"}
