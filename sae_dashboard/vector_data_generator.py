@@ -41,8 +41,8 @@ class VectorDataGenerator:
 
         if cfg.use_dfa:
             assert (
-                "hook_z" in encoder.cfg.hook_name
-            ), f"DFAs are only supported for hook_z, but got {encoder.cfg.hook_name}"
+                "hook_z" in encoder.cfg.metadata.hook_name
+            ), f"DFAs are only supported for hook_z, but got {encoder.cfg.metadata.hook_name}"
 
     @torch.inference_mode()
     def batch_tokens(

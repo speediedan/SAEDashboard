@@ -108,8 +108,8 @@ class FeatureDataGenerator:
                     "Please use TransformerLens (use_huggingface=False) for DFA."
                 )
             assert (
-                "hook_z" in encoder.cfg.hook_name
-            ), f"DFAs are only supported for hook_z, but got {encoder.cfg.hook_name}"
+                "hook_z" in encoder.cfg.metadata.hook_name
+            ), f"DFAs are only supported for hook_z, but got {encoder.cfg.metadata.hook_name}"
             self.dfa_calculator = DFACalculator(model.model, encoder)  # type: ignore
         else:
             self.dfa_calculator = None

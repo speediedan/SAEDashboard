@@ -594,9 +594,32 @@ def test_current_legacy_matches_golden_example_aligned():
             if candidate.is_dir() and (candidate / "batch-0.json").exists():
                 batch_dir = candidate
                 break
+        golden_batches = [
+            json.loads(batch0_path.read_text()),
+            json.loads(batch1_path.read_text()),
+        ]
         for i in range(2):
             test_path = batch_dir / f"batch-{i}.json"
             assert test_path.exists(), f"Missing {test_path}"
+            test_data = json.loads(test_path.read_text())
+            golden_data = golden_batches[i]
+
+            # Validate feature counts match (same math path, same inputs)
+            test_feat_count = len(test_data["features"])
+            golden_feat_count = len(golden_data["features"])
+            assert test_feat_count == golden_feat_count, (
+                f"Feature count mismatch in batch {i}: {test_feat_count} vs {golden_feat_count}"
+            )
+
+            # Validate per-feature activation counts match (H1: max_abs_delta <= 0)
+            for fi in range(test_feat_count):
+                test_acts = len(test_data["features"][fi]["activations"])
+                golden_acts = len(golden_data["features"][fi]["activations"])
+                abs_delta = abs(test_acts - golden_acts)
+                assert abs_delta <= GOLDEN_BATCH_FEATURE_COUNT_TOLERANCE, (
+                    f"Feature {fi} activation count mismatch in batch {i}: "
+                    f"{test_acts} vs {golden_acts} (delta={abs_delta})"
+                )
 
             golden_batch_obj = json_to_class(str(batch0_path).replace("batch-0", f"batch-{i}"), NeuronpediaDashboardBatch)
             test_batch_obj = json_to_class(str(test_path), NeuronpediaDashboardBatch)

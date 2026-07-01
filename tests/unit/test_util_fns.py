@@ -615,45 +615,6 @@ def test_histogram_data_from_data_batch_positive_only_sparse_matches_scalar_path
         assert batch_histogram.title == scalar_histogram.title
 
 
-def test_histogram_data_from_data_batch_positive_only_polars_matches_torch_path():
-    pytest.importorskip("pyarrow")
-    pytest.importorskip("polars")
-
-    data = torch.tensor(
-        [
-            [0.0, 0.1, 0.0, 2.5, -3.0, 0.0, 0.7],
-            [0.0, 0.0, 0.0, 0.0, -2.0, -1.0, 0.0],
-            [4.0, 0.0, 0.0, 1.0, 0.0, 8.0, 0.0],
-            [3.5, 3.5, 0.0, -1.0, 0.0, 3.5, 0.0],
-        ]
-    )
-    titles = ["sparse", "empty", "mixed", "constant"]
-
-    torch_histograms = HistogramData.from_data_batch(
-        data,
-        n_bins=5,
-        tickmode="5 ticks",
-        title=None,
-        positive_only=True,
-        titles=titles,
-        backend="torch",
-    )
-    polars_histograms = HistogramData.from_data_batch(
-        data,
-        n_bins=5,
-        tickmode="5 ticks",
-        title=None,
-        positive_only=True,
-        titles=titles,
-        backend="polars",
-    )
-
-    assert len(polars_histograms) == len(torch_histograms)
-    for torch_histogram, polars_histogram in zip(torch_histograms, polars_histograms):
-        assert polars_histogram.bar_heights == torch_histogram.bar_heights
-        assert polars_histogram.bar_values == torch_histogram.bar_values
-        assert polars_histogram.tick_vals == torch_histogram.tick_vals
-        assert polars_histogram.title == torch_histogram.title
 
 
 def test_histogram_data_from_data_batch_arrow_table_matches_object_path():

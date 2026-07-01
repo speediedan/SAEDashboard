@@ -91,7 +91,7 @@ def _run_columnar_runner(tmpdir: str, n_features: int = 4, n_prompts: int = 64,
         sequence_selection_backend="columnar_gpu",
         feature_statistics_backend="arrow",
         logits_histogram_backend="arrow",
-        activation_histogram_backend="polars",
+        activation_histogram_backend="torch",
         columnar_artifact_format="arrow",
     )
     runner = NeuronpediaRunner(cfg)

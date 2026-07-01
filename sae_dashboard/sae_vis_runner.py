@@ -848,7 +848,7 @@ class SaeVisRunner:
                 device=flat_all_feat_acts.device,
                 dtype=flat_all_feat_acts.dtype,
             )
-            if self.cfg.activation_histogram_backend in {"torch", "polars"}:
+            if self.cfg.activation_histogram_backend in {"torch"}:
                 pyarrow, _, _ = self._load_columnar_modules()
                 activation_histogram_table = HistogramData.from_data_batch_arrow_table(
                     data=masked_flat_all_feat_acts,

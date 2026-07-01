@@ -2505,7 +2505,7 @@ def main():
     )
     parser.add_argument(
         "--activation-histogram-backend",
-        choices=("torch", "polars"),
+        choices=("torch",),
         default="torch",
         help="Backend for positive-only activation histogram packaging in columnar mode.",
     )

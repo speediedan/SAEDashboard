@@ -107,7 +107,7 @@ class SaeVisConfig:
     activation_significance_floor: float = 0.0
     feature_statistics_backend: Literal["object", "arrow"] = "object"
     logits_histogram_backend: Literal["object", "arrow"] = "object"
-    activation_histogram_backend: Literal["torch", "polars"] = "torch"
+    activation_histogram_backend: Literal["torch"] = "torch"
     defer_component_construction: bool = False
     sequence_selection_backend: Literal["legacy", "columnar_gpu"] = "legacy"
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"

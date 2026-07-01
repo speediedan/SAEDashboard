@@ -124,16 +124,6 @@ def create_iterator(
     return tqdm(iterator, desc=desc, leave=False) if verbose else iterator
 
 
-def _load_histogram_columnar_modules() -> tuple[Any, Any]:
-    try:
-        pyarrow = importlib.import_module("pyarrow")
-        polars = importlib.import_module("polars")
-    except ImportError as exc:
-        raise RuntimeError(
-            "The polars histogram backend requires both pyarrow and polars to be installed."
-        ) from exc
-    return pyarrow, polars
-
 
 def k_largest_indices(
     x: Float[Tensor, "rows cols"],
@@ -1713,7 +1703,7 @@ class HistogramData:
         row_batch_size: int = 64,
         positive_only: bool = False,
         titles: Sequence[str | None] | None = None,
-        backend: Literal["torch", "polars"] = "torch",
+        backend: Literal["torch"] = "torch",
     ) -> list[T]:
         """Create one histogram per row of a 2D tensor using batched binning."""
         histogram_rows = cls._from_data_batch_rows(
@@ -1738,10 +1728,10 @@ class HistogramData:
         row_batch_size: int = 64,
         positive_only: bool = False,
         titles: Sequence[str | None] | None = None,
-        backend: Literal["torch", "polars"] = "torch",
+        backend: Literal["torch"] = "torch",
     ) -> Any:
         pyarrow = importlib.import_module("pyarrow")
-        if backend == "torch" and not positive_only:
+        if not positive_only:
             tensor_table = cls._from_dense_data_batch_arrow_table(
                 data=data,
                 n_bins=n_bins,
@@ -1752,14 +1742,6 @@ class HistogramData:
             )
             if tensor_table is not None:
                 return tensor_table
-        if backend == "polars" and positive_only:
-            return cls._from_data_batch_positive_only_polars_arrow_table(
-                data=data,
-                n_bins=n_bins,
-                tickmode=tickmode,
-                title=title,
-                titles=titles,
-            )
 
         histogram_rows = cls._from_data_batch_rows(
             data=data,
@@ -2009,7 +1991,7 @@ class HistogramData:
         row_batch_size: int = 64,
         positive_only: bool = False,
         titles: Sequence[str | None] | None = None,
-        backend: Literal["torch", "polars"] = "torch",
+        backend: Literal["torch"] = "torch",
     ) -> list[dict[str, object]]:
         """Create one histogram row dict per row of a 2D tensor using batched binning."""
         if data.ndim != 2:
@@ -2020,22 +2002,7 @@ class HistogramData:
             return []
         if titles is not None and len(titles) != data.shape[0]:
             raise ValueError("titles must match the number of data rows")
-        if backend not in ("torch", "polars"):
-            raise ValueError("backend must be either 'torch' or 'polars'")
-
         data = data.to(torch.float32)
-        if backend == "polars":
-            if not positive_only:
-                raise ValueError(
-                    "The polars histogram backend currently only supports positive_only=True"
-                )
-            return cls._from_data_batch_positive_only_polars_rows(
-                data=data,
-                n_bins=n_bins,
-                tickmode=tickmode,
-                title=title,
-                titles=titles,
-            )
 
         histograms: list[dict[str, object] | None] = [None] * data.shape[0]
         row_batch_size = max(1, row_batch_size)
@@ -2214,165 +2181,6 @@ class HistogramData:
                 ).to_row_dict()
 
         return cast(list[dict[str, object]], histograms)
-
-    @classmethod
-    def _from_data_batch_positive_only_polars_rows(
-        cls: Type[T],
-        data: Tensor,
-        n_bins: int,
-        tickmode: Literal["ints", "5 ticks"],
-        title: str | None,
-        titles: Sequence[str | None] | None,
-    ) -> list[T]:
-        """Prototype columnar histogram path for positive-only activation histograms."""
-        columns = cls._from_data_batch_positive_only_polars_columns(
-            data=data,
-            n_bins=n_bins,
-            tickmode=tickmode,
-            title=title,
-            titles=titles,
-        )
-        return [
-            {
-                "bar_heights": columns["bar_heights"][row_index],
-                "bar_values": columns["bar_values"][row_index],
-                "tick_vals": columns["tick_vals"][row_index],
-                "title": columns["title"][row_index],
-            }
-            for row_index in range(len(columns["row_index"]))
-        ]
-
-    @classmethod
-    def _from_data_batch_positive_only_polars_arrow_table(
-        cls: Type[T],
-        data: Tensor,
-        n_bins: int,
-        tickmode: Literal["ints", "5 ticks"],
-        title: str | None,
-        titles: Sequence[str | None] | None,
-    ) -> Any:
-        pyarrow, _ = _load_histogram_columnar_modules()
-        columns = cls._from_data_batch_positive_only_polars_columns(
-            data=data,
-            n_bins=n_bins,
-            tickmode=tickmode,
-            title=title,
-            titles=titles,
-        )
-        return pyarrow.table(columns)
-
-    @classmethod
-    def _from_data_batch_positive_only_polars_columns(
-        cls: Type[T],
-        data: Tensor,
-        n_bins: int,
-        tickmode: Literal["ints", "5 ticks"],
-        title: str | None,
-        titles: Sequence[str | None] | None,
-    ) -> dict[str, list[object]]:
-        data = data.to(torch.float32)
-        row_count = int(data.shape[0])
-        bar_heights_column: list[object | None] = [None] * row_count
-        bar_values_column: list[object | None] = [None] * row_count
-        tick_vals_column: list[object | None] = [None] * row_count
-        title_column: list[object | None] = (
-            list(titles) if titles is not None else [title] * row_count
-        )
-
-        positive_coords = torch.nonzero(data > 0, as_tuple=False)
-        row_has_values = torch.zeros(row_count, dtype=torch.bool, device=data.device)
-        if positive_coords.numel() > 0:
-            positive_rows = positive_coords[:, 0]
-            positive_values = data[positive_rows, positive_coords[:, 1]]
-            row_has_values.scatter_(0, positive_rows, True)
-
-            row_min = torch.full(
-                (row_count,), float("inf"), dtype=data.dtype, device=data.device
-            )
-            row_max = torch.full(
-                (row_count,), float("-inf"), dtype=data.dtype, device=data.device
-            )
-            row_min.scatter_reduce_(
-                0, positive_rows, positive_values, reduce="amin", include_self=True
-            )
-            row_max.scatter_reduce_(
-                0, positive_rows, positive_values, reduce="amax", include_self=True
-            )
-            nonconstant_mask = row_has_values & (row_max > row_min)
-
-            positive_nonconstant_mask = nonconstant_mask[positive_rows]
-            if bool(positive_nonconstant_mask.any().item()):
-                nonconstant_rows = positive_rows[positive_nonconstant_mask]
-                nonconstant_values = positive_values[positive_nonconstant_mask]
-                row_range = row_max - row_min
-                scaled_bins = torch.floor(
-                    (nonconstant_values - row_min[nonconstant_rows])
-                    * n_bins
-                    / row_range[nonconstant_rows]
-                ).to(torch.int64)
-                scaled_bins = scaled_bins.clamp_(0, n_bins - 1)
-
-                counts_flat = torch.zeros(
-                    row_count * n_bins, dtype=torch.int32, device=data.device
-                )
-                flat_bin_indices = nonconstant_rows * n_bins + scaled_bins
-                counts_flat.scatter_add_(
-                    0,
-                    flat_bin_indices,
-                    torch.ones_like(flat_bin_indices, dtype=torch.int32),
-                )
-                counts = counts_flat.reshape(row_count, n_bins).detach().cpu().numpy()
-
-                sorted_nonconstant_rows = torch.where(nonconstant_mask)[0]
-                bin_offsets = (
-                    torch.arange(n_bins, dtype=data.dtype, device=data.device) + 0.5
-                )
-                bin_sizes = row_range[sorted_nonconstant_rows] / n_bins
-                bar_values = (
-                    row_min[sorted_nonconstant_rows, None]
-                    + bin_offsets[None, :] * bin_sizes[:, None]
-                )
-                bar_values = np.round(
-                    bar_values.detach().cpu().numpy().astype(np.float64), 5
-                )
-                row_min_cpu = row_min[sorted_nonconstant_rows].detach().cpu().tolist()
-                row_max_cpu = row_max[sorted_nonconstant_rows].detach().cpu().tolist()
-                sorted_rows_cpu = sorted_nonconstant_rows.detach().cpu().tolist()
-
-                for row_position, row_index in enumerate(sorted_rows_cpu):
-                    bar_heights_column[row_index] = counts[row_index].tolist()
-                    bar_values_column[row_index] = bar_values[row_position].tolist()
-                    tick_vals_column[row_index] = cls._tick_values(
-                        float(row_max_cpu[row_position]),
-                        float(row_min_cpu[row_position]),
-                        tickmode,
-                    )
-
-        for row_index, bar_heights in enumerate(bar_heights_column):
-            if bar_heights is None:
-                if not row_has_values[row_index]:
-                    fallback_row = cls().to_row_dict()
-                else:
-                    row_data = data[row_index]
-                    row_data = row_data[row_data > 0]
-                    fallback_row = cls.from_data(
-                        row_data,
-                        n_bins=n_bins,
-                        tickmode=tickmode,
-                        title=titles[row_index] if titles is not None else title,
-                    ).to_row_dict()
-                bar_heights_column[row_index] = fallback_row["bar_heights"]
-                bar_values_column[row_index] = fallback_row["bar_values"]
-                tick_vals_column[row_index] = fallback_row["tick_vals"]
-                title_column[row_index] = fallback_row["title"]
-
-        return {
-            "row_index": list(range(row_count)),
-            "bar_heights": cast(list[object], bar_heights_column),
-            "bar_values": cast(list[object], bar_values_column),
-            "tick_vals": cast(list[object], tick_vals_column),
-            "title": cast(list[object], title_column),
-        }
 
     @staticmethod
     def _tick_values(
