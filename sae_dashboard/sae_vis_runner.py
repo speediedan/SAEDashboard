@@ -182,6 +182,9 @@ class SaeVisRunner:
         self.cfg = cfg
         self.device = self.cfg.device
         self.dtype = DTYPES[self.cfg.dtype]
+        # token_id -> token string memoization for activation-row detokenization; the
+        # mapping is model-constant for a runner instance.
+        self._token_str_cache: dict[int, str] = {}
         if self.cfg.cache_dir is not None:
             self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg.sequence_replay_artifact_dir is not None:
@@ -283,6 +286,20 @@ class SaeVisRunner:
         if isinstance(tokens, str):
             return [tokens]
         return [str(token) for token in tokens]
+
+    def _decode_token_ids_cached(
+        self, model: HookedSAETransformer, token_ids: list[int]
+    ) -> list[str]:
+        """Memoized `_decode_token_ids`: `convert_ids_to_tokens` is a pure per-id
+        mapping, so per-id caching across rows/features/batches is exact."""
+        cache = self._token_str_cache
+        missing = list(
+            dict.fromkeys(token_id for token_id in token_ids if token_id not in cache)
+        )
+        if missing:
+            decoded = self._decode_token_ids(model, missing)
+            cache.update(zip(missing, decoded))
+        return [cache[token_id] for token_id in token_ids]
 
     def _feature_statistics_arrow_table(
         self,
@@ -471,7 +488,7 @@ class SaeVisRunner:
         tables["logits_tables"] = logits_tables_name
 
         def decode_token_ids(token_ids: list[int]) -> list[str]:
-            return self._decode_token_ids(model, token_ids)
+            return self._decode_token_ids_cached(model, token_ids)
 
         pad_token_id = getattr(model.tokenizer, "pad_token_id", None)  # type: ignore[attr-defined]
         if self.cfg.columnar_emit_sequence_rows:
@@ -727,6 +744,15 @@ class SaeVisRunner:
                 valid_token_count=valid_token_count,
             )
 
+        packaging_device = (
+            self.device
+            if str(self.device).startswith("cuda") and torch.cuda.is_available()
+            else None
+        )
+        flat_valid_indices = torch.nonzero(
+            flat_ignore_tokens_mask, as_tuple=False
+        ).flatten()
+
         with timed_stage(
             self.cfg.log_performance,
             "feature_statistics_packaging",
@@ -734,24 +760,29 @@ class SaeVisRunner:
             batch=feature_batch_index,
             feature_count=len(features),
         ):
-            feature_stats_input = flat_all_feat_acts[:, flat_ignore_tokens_mask]
-            if feature_stats_input.shape[-1] == 0:
-                feature_stats_input = torch.zeros(
-                    (flat_all_feat_acts.shape[0], 1),
-                    dtype=flat_all_feat_acts.dtype,
-                    device=flat_all_feat_acts.device,
-                )
             feature_stats: FeatureStatistics | None = None
             feature_statistics_table = None
+            feature_stats_input = torch.empty(0)
             if self.cfg.feature_statistics_backend == "arrow":
                 pyarrow, _, _ = self._load_columnar_modules()
-                feature_statistics_table = self._feature_statistics_arrow_table(
-                    feature_indices=[int(feature) for feature in features],
-                    feature_stats_input=feature_stats_input,
-                    feature_stats=None,
+                feature_statistics_table = self._replace_index_column(
+                    FeatureStatistics.create_scalar_arrow_table_from_flat_valid(
+                        flat_all_feat_acts,
+                        flat_valid_indices,
+                        compute_device=packaging_device,
+                    ),
+                    column_name="feature_index",
+                    values=[int(feature) for feature in features],
                     pyarrow=pyarrow,
                 )
             else:
+                feature_stats_input = flat_all_feat_acts[:, flat_ignore_tokens_mask]
+                if feature_stats_input.shape[-1] == 0:
+                    feature_stats_input = torch.zeros(
+                        (flat_all_feat_acts.shape[0], 1),
+                        dtype=flat_all_feat_acts.dtype,
+                        device=flat_all_feat_acts.device,
+                    )
                 feature_stats = FeatureStatistics.create(
                     data=feature_stats_input,
                     batch_size=self.cfg.quantile_feature_batch_size,
@@ -844,20 +875,17 @@ class SaeVisRunner:
                     flat_all_feat_acts,
                     valid_mask=flat_ignore_tokens_mask,
                 )
-            masked_flat_all_feat_acts = flat_all_feat_acts * flat_ignore_tokens_mask.to(
-                device=flat_all_feat_acts.device,
-                dtype=flat_all_feat_acts.dtype,
-            )
             if self.cfg.activation_histogram_backend in {"torch"}:
                 pyarrow, _, _ = self._load_columnar_modules()
-                activation_histogram_table = HistogramData.from_data_batch_arrow_table(
-                    data=masked_flat_all_feat_acts,
-                    n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
-                    tickmode="5 ticks",
-                    title=None,
-                    positive_only=True,
-                    titles=activation_histogram_titles,
-                    backend=self.cfg.activation_histogram_backend,
+                activation_histogram_table = (
+                    HistogramData.from_flat_valid_data_batch_arrow_table(
+                        flat_all_feat_acts,
+                        flat_valid_indices,
+                        n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
+                        tickmode="5 ticks",
+                        titles=activation_histogram_titles,
+                        compute_device=packaging_device,
+                    )
                 )
                 activation_histogram_table = self._replace_index_column(
                     activation_histogram_table,
@@ -927,15 +955,10 @@ class SaeVisRunner:
             masked_all_feat_acts = all_feat_acts * ignore_tokens_mask.unsqueeze(-1)
             precomputed_selections: list[tuple[dict[str, Any], Any, int]] | None = None
             if self.cfg.sequence_selection_backend == "columnar_gpu":
-                selection_device = (
-                    self.device
-                    if str(self.device).startswith("cuda") and torch.cuda.is_available()
-                    else None
-                )
                 with timed_stage(
                     self.cfg.log_performance,
                     "sequence_selection_batched",
-                    device=selection_device or str(masked_all_feat_acts.device),
+                    device=packaging_device or str(masked_all_feat_acts.device),
                     batch=feature_batch_index,
                     feature_count=len(features),
                 ):
@@ -944,7 +967,7 @@ class SaeVisRunner:
                             sequence_data_generator.buffer,
                             masked_all_feat_acts,
                             selection_mask=ignore_tokens_mask,
-                            selection_device=selection_device,
+                            selection_device=packaging_device,
                         )
                     )
             for row_index, feat in enumerate(features):

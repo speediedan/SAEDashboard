@@ -16,7 +16,6 @@ from typing import (
     overload,
 )
 
-import einops
 import numpy as np
 import torch
 from dataclasses_json import dataclass_json
@@ -122,7 +121,6 @@ def create_iterator(
     Returns an iterator, useful for reducing code repetition.
     """
     return tqdm(iterator, desc=desc, leave=False) if verbose else iterator
-
 
 
 def k_largest_indices(
@@ -912,6 +910,117 @@ class FeatureStatistics:
             {
                 "feature_index": pyarrow.array(
                     np.arange(data.shape[0], dtype=np.int64), type=pyarrow.int64()
+                ),
+                "max": pyarrow.array(np.ascontiguousarray(float_columns[:, 0])),
+                "frac_nonzero": pyarrow.array(
+                    np.ascontiguousarray(float_columns[:, 1])
+                ),
+                "positive_density": pyarrow.array(
+                    np.ascontiguousarray(float_columns[:, 2])
+                ),
+                "positive_count": pyarrow.array(
+                    np.ascontiguousarray(count_columns[:, 0])
+                ),
+                "nonzero_count": pyarrow.array(
+                    np.ascontiguousarray(count_columns[:, 1])
+                ),
+                "valid_count": pyarrow.array(np.ascontiguousarray(count_columns[:, 2])),
+            }
+        )
+
+    @classmethod
+    def create_scalar_arrow_table_from_flat_valid(
+        cls,
+        flat_data: torch.Tensor,
+        valid_flat_indices: torch.Tensor,
+        compute_device: str | torch.device | None = None,
+        row_chunk_size: int = 256,
+    ) -> Any:
+        """Chunked-device equivalent of the runner's gather + `_create_scalar_arrow_table` path.
+
+        ``flat_data`` is the ``[rows, samples_total]`` activation matrix (any device/dtype);
+        ``valid_flat_indices`` selects the valid sample columns. Row chunks are staged onto
+        ``compute_device`` (defaults to ``flat_data.device``), the valid columns gathered
+        there, and the same exact reductions applied (row max, ``abs > 1e-6`` counts,
+        ``> 0`` counts, exact integer/float32 divisions), so the resulting table is
+        identical to gathering on the host first. When no valid columns exist, the
+        zero-substitution semantics of the previous runner path are reproduced
+        (all-zero statistics with ``valid_count == 1``).
+        """
+        pyarrow = importlib.import_module("pyarrow")
+        device = (
+            torch.device(compute_device)
+            if compute_device is not None
+            else flat_data.device
+        )
+        n_rows = int(flat_data.shape[0])
+        n_valid = int(valid_flat_indices.numel())
+        valid_indices_dev = valid_flat_indices.to(device)
+
+        max_chunks: list[torch.Tensor] = []
+        nonzero_chunks: list[torch.Tensor] = []
+        positive_chunks: list[torch.Tensor] = []
+        row_chunk_size = max(1, row_chunk_size)
+        for row_start in range(0, n_rows, max(1, row_chunk_size)):
+            row_end = min(row_start + row_chunk_size, n_rows)
+            chunk = flat_data[row_start:row_end].to(device)
+            if n_valid > 0:
+                valid_chunk = chunk.index_select(-1, valid_indices_dev)
+            else:
+                valid_chunk = torch.zeros(
+                    (row_end - row_start, 1),
+                    dtype=chunk.dtype,
+                    device=device,
+                )
+            max_chunks.append(valid_chunk.max(dim=-1).values.to(torch.float32))
+            nonzero_chunks.append((valid_chunk.abs() > 1e-6).sum(dim=-1))
+            positive_chunks.append((valid_chunk > 0).sum(dim=-1))
+            del chunk, valid_chunk
+
+        max_values = torch.cat(max_chunks) if max_chunks else torch.zeros(0)
+        nonzero_counts = (
+            torch.cat(nonzero_chunks)
+            if nonzero_chunks
+            else torch.zeros(0, dtype=torch.int64)
+        )
+        positive_counts = (
+            torch.cat(positive_chunks)
+            if positive_chunks
+            else torch.zeros(0, dtype=torch.int64)
+        )
+        valid_counts = torch.full(
+            (n_rows,),
+            n_valid if n_valid > 0 else 1,
+            dtype=torch.int64,
+            device=max_values.device,
+        )
+
+        safe_valid_counts = valid_counts.clamp(min=1).to(torch.float32)
+        frac_nonzero = nonzero_counts.to(torch.float32) / safe_valid_counts
+        positive_density = positive_counts.to(torch.float32) / safe_valid_counts
+        float_columns = (
+            torch.stack((max_values, frac_nonzero, positive_density), dim=1)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        count_columns = (
+            torch.stack(
+                (
+                    positive_counts.to(torch.int64),
+                    nonzero_counts.to(torch.int64),
+                    valid_counts.to(torch.int64),
+                ),
+                dim=1,
+            )
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        return pyarrow.table(
+            {
+                "feature_index": pyarrow.array(
+                    np.arange(n_rows, dtype=np.int64), type=pyarrow.int64()
                 ),
                 "max": pyarrow.array(np.ascontiguousarray(float_columns[:, 0])),
                 "frac_nonzero": pyarrow.array(
@@ -1770,6 +1879,86 @@ class HistogramData:
         )
 
     @classmethod
+    def from_flat_valid_data_batch_arrow_table(
+        cls: Type[T],
+        flat_data: Tensor,
+        valid_flat_indices: Tensor,
+        n_bins: int,
+        tickmode: Literal["ints", "5 ticks"],
+        titles: Sequence[str | None] | None,
+        compute_device: str | torch.device | None = None,
+        row_chunk_size: int = 128,
+        row_batch_size: int = 64,
+    ) -> Any:
+        """Chunked-device positive-only histogram table from a flat activation matrix.
+
+        Equivalent to masking ``flat_data`` with the valid-position mask and calling
+        `from_data_batch_arrow_table(..., positive_only=True)`: for the positive-only
+        lane, gathering the valid columns yields identical histograms to zero-masking
+        the invalid columns (only ``> 0`` values participate, and rows whose valid
+        values are all non-positive fall back to the same default/constant-row paths).
+        Row chunks are staged onto ``compute_device`` so the binning runs there and
+        only compact per-row outputs are transferred back.
+        """
+        pyarrow = importlib.import_module("pyarrow")
+        device = (
+            torch.device(compute_device)
+            if compute_device is not None
+            else flat_data.device
+        )
+        n_rows = int(flat_data.shape[0])
+        n_valid = int(valid_flat_indices.numel())
+        if titles is not None and len(titles) != n_rows:
+            raise ValueError("titles must match the number of data rows")
+        valid_indices_dev = valid_flat_indices.to(device)
+
+        histogram_rows: list[dict[str, object]] = []
+        row_chunk_size = max(1, row_chunk_size)
+        for row_start in range(0, n_rows, row_chunk_size):
+            row_end = min(row_start + row_chunk_size, n_rows)
+            chunk = flat_data[row_start:row_end].to(device)
+            if n_valid > 0:
+                valid_chunk = chunk.index_select(-1, valid_indices_dev)
+            else:
+                # Reproduce the previous zero-masked behavior: rows with no valid
+                # positions produce the default (empty) histogram rows.
+                valid_chunk = torch.zeros(
+                    (row_end - row_start, 1),
+                    dtype=chunk.dtype,
+                    device=device,
+                )
+            histogram_rows.extend(
+                cls._from_data_batch_rows(
+                    data=valid_chunk,
+                    n_bins=n_bins,
+                    tickmode=tickmode,
+                    title=None,
+                    row_batch_size=row_batch_size,
+                    positive_only=True,
+                    titles=(
+                        list(titles[row_start:row_end]) if titles is not None else None
+                    ),
+                )
+            )
+            del chunk, valid_chunk
+
+        return pyarrow.table(
+            {
+                "row_index": pyarrow.array(range(len(histogram_rows))),
+                "bar_heights": pyarrow.array(
+                    [row["bar_heights"] for row in histogram_rows]
+                ),
+                "bar_values": pyarrow.array(
+                    [row["bar_values"] for row in histogram_rows]
+                ),
+                "tick_vals": pyarrow.array(
+                    [row["tick_vals"] for row in histogram_rows]
+                ),
+                "title": pyarrow.array([row["title"] for row in histogram_rows]),
+            }
+        )
+
+    @classmethod
     def _from_dense_data_batch_arrow_table(
         cls: Type[T],
         data: Tensor,
@@ -2077,10 +2266,11 @@ class HistogramData:
                     ]
                     max_list = row_max.cpu().tolist()
                     min_list = row_min.cpu().tolist()
+                    nonconstant_list = nonconstant_mask.cpu().tolist()
                     for output_index, source_index in enumerate(
                         row_index_batch.cpu().tolist()
                     ):
-                        if not nonconstant_mask[output_index]:
+                        if not nonconstant_list[output_index]:
                             continue
                         histograms[source_index] = {
                             "bar_heights": bar_heights_lists[output_index],
@@ -2095,9 +2285,10 @@ class HistogramData:
                             ),
                         }
 
+            row_has_values_list = row_has_values.cpu().tolist()
             for row_index, histogram in enumerate(histograms):
                 if histogram is None:
-                    if not row_has_values[row_index]:
+                    if not row_has_values_list[row_index]:
                         histograms[row_index] = cls().to_row_dict()
                         continue
                     row_data = data[row_index]
