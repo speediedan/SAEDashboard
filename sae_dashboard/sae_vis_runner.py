@@ -39,8 +39,8 @@ from sae_dashboard.huggingface_model_wrapper import (
 )
 from sae_dashboard.neuronpedia.legacy import (
     feature_data_generator as legacy_feature_data_generator,
-    sae_vis_runner as legacy_sae_vis_runner,
 )
+from sae_dashboard.neuronpedia.legacy import sae_vis_runner as legacy_sae_vis_runner
 from sae_dashboard.neuronpedia.legacy.runner import (
     is_preserved_legacy_path,
 )
@@ -871,8 +871,12 @@ class SaeVisRunner:
                 for row_index, feat in enumerate(features):
                     feat_acts = all_feat_acts[..., row_index]
                     masked_feat_acts = feat_acts * ignore_tokens_mask
-                    significance_floor = getattr(self.cfg, 'activation_significance_floor', 0.0)
-                    nonzero_feat_acts = masked_feat_acts[masked_feat_acts > significance_floor]
+                    significance_floor = getattr(
+                        self.cfg, "activation_significance_floor", 0.0
+                    )
+                    nonzero_feat_acts = masked_feat_acts[
+                        masked_feat_acts > significance_floor
+                    ]
                     valid_feature_token_count = max(
                         1,
                         int(ignore_tokens_mask.sum().item()),
@@ -920,16 +924,43 @@ class SaeVisRunner:
             batch=feature_batch_index,
             feature_count=len(features),
         ):
+            masked_all_feat_acts = all_feat_acts * ignore_tokens_mask.unsqueeze(-1)
+            precomputed_selections: list[tuple[dict[str, Any], Any, int]] | None = None
+            if self.cfg.sequence_selection_backend == "columnar_gpu":
+                selection_device = (
+                    self.device
+                    if str(self.device).startswith("cuda") and torch.cuda.is_available()
+                    else None
+                )
+                with timed_stage(
+                    self.cfg.log_performance,
+                    "sequence_selection_batched",
+                    device=selection_device or str(masked_all_feat_acts.device),
+                    batch=feature_batch_index,
+                    feature_count=len(features),
+                ):
+                    precomputed_selections = (
+                        sequence_data_generator.get_indices_dicts_columnar_gpu_batched(
+                            sequence_data_generator.buffer,
+                            masked_all_feat_acts,
+                            selection_mask=ignore_tokens_mask,
+                            selection_device=selection_device,
+                        )
+                    )
             for row_index, feat in enumerate(features):
-                masked_feat_acts = all_feat_acts[..., row_index] * ignore_tokens_mask
                 sequence_coordinate_tables[feat] = (
                     sequence_data_generator.get_sequence_coordinate_table(
-                        feat_acts=masked_feat_acts,
+                        feat_acts=masked_all_feat_acts[..., row_index],
                         feat_logits=logits[row_index],
                         resid_post=torch.tensor([]),
                         feature_resid_dir=feature_resid_dir[row_index],
                         selection_mask=ignore_tokens_mask,
                         selection_backend=self.cfg.sequence_selection_backend,
+                        precomputed_selection=(
+                            precomputed_selections[row_index]
+                            if precomputed_selections is not None
+                            else None
+                        ),
                     )
                 )
                 if self.cfg.use_dfa:
@@ -942,6 +973,7 @@ class SaeVisRunner:
                     )
                 if progress is not None:
                     progress[1].update(1)
+            del masked_all_feat_acts
 
         artifact_path = self._write_sequence_replay_artifact(
             feature_batch_index=feature_batch_index,
@@ -1147,8 +1179,12 @@ class SaeVisRunner:
             for row_index, feat in enumerate(features):
                 feat_acts = all_feat_acts[..., row_index]
                 masked_feat_acts = feat_acts * ignore_tokens_mask
-                significance_floor = getattr(self.cfg, 'activation_significance_floor', 0.0)
-                nonzero_feat_acts = masked_feat_acts[masked_feat_acts > significance_floor]
+                significance_floor = getattr(
+                    self.cfg, "activation_significance_floor", 0.0
+                )
+                nonzero_feat_acts = masked_feat_acts[
+                    masked_feat_acts > significance_floor
+                ]
                 valid_feature_token_count = max(
                     1,
                     int(ignore_tokens_mask.sum().item()),
@@ -1254,7 +1290,9 @@ class SaeVisRunner:
         if callable(encoder_architecture):
             encoder_architecture = encoder_architecture()
 
-        if "CLTLayerWrapper" in str(type(encoder)) or encoder_architecture in ["temporal"]:
+        if "CLTLayerWrapper" in str(type(encoder)) or encoder_architecture in [
+            "temporal"
+        ]:
             print("SaeVisRunner: Skipping fold_W_dec_norm() for CLT wrapper.")
         else:
             encoder.fold_W_dec_norm()

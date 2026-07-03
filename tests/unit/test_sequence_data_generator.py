@@ -603,9 +603,7 @@ def test_get_indices_dict_legacy_unmasked_matches_baseline_logic() -> None:
     )
     for i in range(cfg.feature_centric_layout.seq_cfg.n_quantiles - 1, -1, -1):  # type: ignore[operator]
         lower, upper = quantiles[i : i + 2].tolist()
-        pct = float(
-            ((feat_acts >= lower) & (feat_acts <= upper)).float().mean().item()
-        )
+        pct = float(((feat_acts >= lower) & (feat_acts <= upper)).float().mean().item())
         expected_indices_dict[
             f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
         ] = random_range_indices(
@@ -811,9 +809,13 @@ def test_get_indices_dict_legacy_skips_candidate_mask_without_selection_mask(
 
     def _fail_candidate_mask(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("candidate mask path should not run without a selection mask")
+        raise AssertionError(
+            "candidate mask path should not run without a selection mask"
+        )
 
-    monkeypatch.setattr(generator, "_get_candidate_mask_and_indices", _fail_candidate_mask)
+    monkeypatch.setattr(
+        generator, "_get_candidate_mask_and_indices", _fail_candidate_mask
+    )
 
     generator.get_indices_dict_legacy(generator.buffer, feat_acts)
 
@@ -907,9 +909,7 @@ def test_get_indices_dict_columnar_gpu_matches_legacy_for_bfloat16_interval_boun
         assert torch.equal(lazy_indices_dict[group_name], legacy_indices)
 
 
-def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() -> (
-    None
-):
+def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() -> None:
     cfg: SaeVisConfig = build_sae_vis_cfg()
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 1  # type: ignore
@@ -948,7 +948,9 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
             group_name
             for group_name, group_indices in indices_dict.items()
             if group_name.startswith("INTERVAL")
-            and any(torch.equal(group_index, target_index) for group_index in group_indices)
+            and any(
+                torch.equal(group_index, target_index) for group_index in group_indices
+            )
         ]
 
     legacy_groups = interval_groups_for_target(legacy_indices_dict)
@@ -1007,7 +1009,9 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
             group_name
             for group_name, group_indices in indices_dict.items()
             if group_name.startswith("INTERVAL")
-            and any(torch.equal(group_index, target_index) for group_index in group_indices)
+            and any(
+                torch.equal(group_index, target_index) for group_index in group_indices
+            )
         ]
 
     legacy_groups = interval_groups_for_target(legacy_indices_dict)
@@ -1015,3 +1019,188 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
 
     assert legacy_groups == ["INTERVAL 0.500 - 0.750"]
     assert lazy_groups == ["INTERVAL 0.500 - 0.750"]
+
+
+def _batched_selection_fixture_generator(
+    n_quantiles: int = 4,
+    top_acts_group_size: int = 3,
+    quantile_group_size: int = 2,
+    batch: int = 3,
+    seq: int = 8,
+) -> SequenceDataGenerator:
+    cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.top_acts_group_size = top_acts_group_size  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.n_quantiles = n_quantiles  # type: ignore
+    cfg.feature_centric_layout.seq_cfg.quantile_group_size = quantile_group_size  # type: ignore
+    tokens = torch.arange(batch * seq, dtype=torch.long).reshape(batch, seq)
+    return SequenceDataGenerator(cfg, tokens, torch.randn(4, 32))
+
+
+def _sequential_selection_reference(
+    generator: SequenceDataGenerator,
+    all_feat_acts: torch.Tensor,
+    selection_mask: torch.Tensor | None,
+) -> list[tuple[dict[str, torch.Tensor], torch.Tensor, int]]:
+    return [
+        generator.get_indices_dict_columnar_gpu(
+            generator.buffer,
+            all_feat_acts[..., feature_index],
+            selection_mask=selection_mask,
+        )
+        for feature_index in range(all_feat_acts.shape[-1])
+    ]
+
+
+def _assert_selections_equal(
+    batched: list[tuple[dict[str, torch.Tensor], torch.Tensor, int]],
+    sequential: list[tuple[dict[str, torch.Tensor], torch.Tensor, int]],
+) -> None:
+    assert len(batched) == len(sequential)
+    for feature_index, (batched_sel, sequential_sel) in enumerate(
+        zip(batched, sequential)
+    ):
+        batched_dict, batched_bold, batched_n_bold = batched_sel
+        sequential_dict, sequential_bold, sequential_n_bold = sequential_sel
+        assert list(batched_dict) == list(sequential_dict), f"feature {feature_index}"
+        for group_name in sequential_dict:
+            assert torch.equal(
+                batched_dict[group_name], sequential_dict[group_name]
+            ), f"feature {feature_index} group {group_name!r}"
+        assert torch.equal(batched_bold, sequential_bold), f"feature {feature_index}"
+        assert batched_n_bold == sequential_n_bold, f"feature {feature_index}"
+
+
+def test_get_indices_dicts_columnar_gpu_batched_matches_per_feature() -> None:
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(202607)
+    # Tie-free positive values with interval overfill so sampling RNG is exercised.
+    all_feat_acts = (torch.rand(3, 8, 5, dtype=torch.float32) + 0.01) * torch.linspace(
+        0.5, 2.0, 5
+    )
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[:, -1] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(20260703)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(20260703)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=2,
+    )
+
+    _assert_selections_equal(batched, sequential)
+
+
+def test_get_indices_dicts_columnar_gpu_batched_boundary_zero_and_negative() -> None:
+    generator = _batched_selection_fixture_generator(quantile_group_size=16)
+    all_feat_acts = torch.zeros(3, 8, 3, dtype=torch.float32)
+    # Feature 0: value exactly on an interior interval boundary (dual membership).
+    all_feat_acts[0, 1, 0] = 1.0
+    all_feat_acts[0, 2, 0] = 0.25  # boundary of linspace(0, 1.0, 5)
+    all_feat_acts[1, 3, 0] = 0.6
+    # Feature 1: all zeros (feat_max == 0 degenerate all-membership case).
+    # Feature 2: negative values only (no interval membership).
+    all_feat_acts[..., 2] = -torch.rand(3, 8)
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(31337)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(31337)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=2,
+    )
+
+    _assert_selections_equal(batched, sequential)
+
+
+def test_get_indices_dicts_columnar_gpu_batched_bfloat16_inputs() -> None:
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(42)
+    all_feat_acts = (torch.rand(3, 8, 4, dtype=torch.float32) + 0.01).to(torch.bfloat16)
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[0, 0] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(7)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(7)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=3,
+    )
+
+    _assert_selections_equal(batched, sequential)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_get_indices_dicts_columnar_gpu_batched_cuda_selection_device() -> None:
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(9)
+    # Tie-free values so CUDA top-k tie-order differences cannot mask real regressions.
+    all_feat_acts = (torch.rand(3, 8, 4, dtype=torch.float32) + 0.01) * torch.linspace(
+        0.5, 2.0, 4
+    )
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    masked_acts = (all_feat_acts * selection_mask.unsqueeze(-1)).to(torch.bfloat16)
+
+    random.seed(11)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(11)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        selection_device="cuda",
+        feature_chunk_size=3,
+    )
+
+    _assert_selections_equal(batched, sequential)
+
+
+def test_get_sequence_coordinate_table_precomputed_selection_matches_inline() -> None:
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(5)
+    all_feat_acts = torch.rand(3, 8, 2, dtype=torch.float32) + 0.01
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+    feat_logits = torch.linspace(-1.0, 1.0, 32)
+
+    random.seed(99)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+    )
+    random.seed(99)
+    for feature_index in range(masked_acts.shape[-1]):
+        inline_table = generator.get_sequence_coordinate_table(
+            feat_acts=masked_acts[..., feature_index],
+            feat_logits=feat_logits,
+            resid_post=torch.empty(0),
+            feature_resid_dir=torch.empty(0),
+            selection_mask=selection_mask,
+            selection_backend="columnar_gpu",
+        )
+        precomputed_table = generator.get_sequence_coordinate_table(
+            feat_acts=masked_acts[..., feature_index],
+            feat_logits=feat_logits,
+            resid_post=torch.empty(0),
+            feature_resid_dir=torch.empty(0),
+            selection_mask=selection_mask,
+            selection_backend="columnar_gpu",
+            precomputed_selection=batched[feature_index],
+        )
+        assert (
+            precomputed_table.to_sequence_multi_group_data()
+            == inline_table.to_sequence_multi_group_data()
+        )

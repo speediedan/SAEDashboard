@@ -341,7 +341,7 @@ class SequenceCoordinateTable:
 
     @staticmethod
     def activation_row_arrow_record_batch_from_columns(
-        columns: dict[str, list[Any]]
+        columns: dict[str, list[Any]],
     ) -> Any:
         pyarrow, _, _ = _load_sequence_row_pyarrow_modules()
         return pyarrow.RecordBatch.from_pydict(
@@ -723,6 +723,7 @@ class SequenceDataGenerator:
         feature_resid_dir: Float[Tensor, "d_model"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
         selection_backend: SequenceSelectionBackend = "legacy",
+        precomputed_selection: tuple[dict[str, Tensor], Tensor, int] | None = None,
     ) -> SequenceCoordinateTable:
         """
         This function returns the compact selected-sequence table which underlies the right-hand sequence visualizations.
@@ -755,6 +756,10 @@ class SequenceDataGenerator:
             selection_backend:
                 Candidate-selection backend to use before compact sequence table construction. The default keeps the
                 preserved legacy JSON CPU selector; `"columnar_gpu"` enables the guarded candidate-vector substitute path.
+            precomputed_selection:
+                Optional `(indices_dict, indices_bold, n_bold)` triple produced by
+                `get_indices_dicts_columnar_gpu_batched`; when provided, step (1) is skipped and the supplied
+                selection is used directly.
 
         Returns:
             SequenceCoordinateTable
@@ -763,12 +768,15 @@ class SequenceDataGenerator:
         """
 
         # ! (1) Find the tokens from each group
-        indices_dict, indices_bold, n_bold = self._get_indices_dict_for_backend(
-            selection_backend,
-            self.buffer,
-            feat_acts,
-            selection_mask=selection_mask,
-        )
+        if precomputed_selection is not None:
+            indices_dict, indices_bold, n_bold = precomputed_selection
+        else:
+            indices_dict, indices_bold, n_bold = self._get_indices_dict_for_backend(
+                selection_backend,
+                self.buffer,
+                feat_acts,
+                selection_mask=selection_mask,
+            )
 
         # ! (2) Get the buffer indices
         indices_buf = self.get_indices_buf(
@@ -847,7 +855,9 @@ class SequenceDataGenerator:
         feat_acts: Float[Tensor, "batch seq"],
         selection_mask: Int[Tensor, "batch seq"] | None = None,
     ):
-        return self.get_indices_dict_legacy(buffer, feat_acts, selection_mask=selection_mask)
+        return self.get_indices_dict_legacy(
+            buffer, feat_acts, selection_mask=selection_mask
+        )
 
     def _get_indices_dict_for_backend(
         self,
@@ -879,7 +889,9 @@ class SequenceDataGenerator:
         else:
             feat_acts_view = feat_acts[:, buffer[0] : buffer[1]]
             selection_mask_view = (
-                None if selection_mask is None else selection_mask[:, buffer[0] : buffer[1]]
+                None
+                if selection_mask is None
+                else selection_mask[:, buffer[0] : buffer[1]]
             )
             col_offset = buffer[0]
 
@@ -900,21 +912,19 @@ class SequenceDataGenerator:
         profile_enabled = bool(getattr(self.cfg, "log_performance", False))
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
-        feat_acts_view, selection_mask_view, col_offset = self._get_legacy_selection_views(
-            feat_acts,
-            buffer,
-            selection_mask=selection_mask,
+        feat_acts_view, selection_mask_view, col_offset = (
+            self._get_legacy_selection_views(
+                feat_acts,
+                buffer,
+                selection_mask=selection_mask,
+            )
         )
 
         mask_setup_wall_s = 0.0
         candidate_extract_wall_s = 0.0
         if selection_mask is None:
             candidate_values = feat_acts_view.reshape(-1)
-            feat_max = (
-                float(feat_acts.max().item())
-                if feat_acts.numel() > 0
-                else 0.0
-            )
+            feat_max = float(feat_acts.max().item()) if feat_acts.numel() > 0 else 0.0
         else:
             mask_setup_start = perf_counter() if profile_enabled else 0.0
             _, _, candidate_flat_indices = self._get_candidate_mask_and_indices(
@@ -963,10 +973,14 @@ class SequenceDataGenerator:
                     ~selection_mask_view,
                     float("-inf"),
                 )
-                flat_top_indices = masked_feat_acts.flatten().topk(
-                    k=top_k,
-                    largest=True,
-                ).indices
+                flat_top_indices = (
+                    masked_feat_acts.flatten()
+                    .topk(
+                        k=top_k,
+                        largest=True,
+                    )
+                    .indices
+                )
                 top_indices = torch.stack(
                     (
                         flat_top_indices // masked_feat_acts.size(1),
@@ -980,9 +994,7 @@ class SequenceDataGenerator:
         top_group_max = (
             float(feat_acts.max().item()) if selection_mask is None else feat_max
         )
-        indices_dict = {
-            f"TOP ACTIVATIONS<br>MAX = {top_group_max:.3f}": top_indices
-        }
+        indices_dict = {f"TOP ACTIVATIONS<br>MAX = {top_group_max:.3f}": top_indices}
 
         # Get all possible indices. Note, we need to be able to look 1 back (feature activation on prev token is needed for
         # computing loss effect on this token)
@@ -1039,9 +1051,7 @@ class SequenceDataGenerator:
                         buffer=buffer,
                     ).cpu()
                     if profile_enabled:
-                        interval_sample_wall_s += (
-                            perf_counter() - interval_sample_start
-                        )
+                        interval_sample_wall_s += perf_counter() - interval_sample_start
                 else:
                     pct = interval_count / valid_token_count
                     indices = torch.stack(torch.where(interval_member_mask), dim=-1)
@@ -1051,9 +1061,7 @@ class SequenceDataGenerator:
                             device=indices.device,
                         )
                     if profile_enabled:
-                        interval_where_wall_s += (
-                            perf_counter() - interval_where_start
-                        )
+                        interval_where_wall_s += perf_counter() - interval_where_start
                         interval_candidate_count += interval_count
                         largest_interval_count = max(
                             largest_interval_count, interval_count
@@ -1063,7 +1071,9 @@ class SequenceDataGenerator:
                         if interval_count > 0:
                             nonempty_interval_group_count += 1
                     if interval_count > self.seq_cfg.quantile_group_size:
-                        interval_sample_start = perf_counter() if profile_enabled else 0.0
+                        interval_sample_start = (
+                            perf_counter() if profile_enabled else 0.0
+                        )
                         indices = indices[
                             sample_unique_indices(
                                 interval_count,
@@ -1549,6 +1559,208 @@ class SequenceDataGenerator:
             )
 
         return indices_dict, indices_bold, n_bold
+
+    @torch.inference_mode()
+    def get_indices_dicts_columnar_gpu_batched(
+        self,
+        buffer: tuple[int, int] | None,
+        all_feat_acts: Float[Tensor, "batch seq feats"],
+        selection_mask: Int[Tensor, "batch seq"] | None = None,
+        selection_device: str | torch.device | None = None,
+        feature_chunk_size: int = 64,
+    ) -> list[tuple[dict[str, Tensor], Tensor, int]]:
+        """Batched-across-features equivalent of `get_indices_dict_columnar_gpu`.
+
+        Returns one ``(indices_dict, indices_bold, n_bold)`` triple per feature column of
+        ``all_feat_acts`` while running the selection math (top-k, interval membership,
+        interval sampling) batched per feature chunk on ``selection_device``.
+
+        Selection semantics match the sequential per-feature selector exactly:
+
+        - interval boundaries are float32 CPU ``linspace`` values (bitwise-identical to the
+          per-feature CPU interval path used in production), and membership uses the same
+          closed-interval ``>= lower & <= upper`` comparisons on float32-widened values;
+        - ``sample_unique_indices`` is invoked in the same feature-ascending /
+          interval-descending order with the same arguments, so the shared RNG stream is
+          consumed identically to a sequential feature loop;
+        - group labels, per-group index ordering (top-k order for the top group, ascending
+          candidate order for non-overfilled intervals, sample order for overfilled ones),
+          and the dict insertion order are unchanged.
+
+        The per-feature candidate composition statistics recorded by the sequential selector
+        are intentionally not computed here (they are profiling-only and taxed the stage they
+        measured); only the cheap wall/feature aggregates are maintained.
+        """
+        profile_enabled = bool(getattr(self.cfg, "log_performance", False))
+        batched_start = perf_counter() if profile_enabled else 0.0
+
+        n_features = int(all_feat_acts.shape[-1])
+        if n_features == 0:
+            return []
+
+        _, candidate_indices, candidate_flat_indices = (
+            self._get_candidate_mask_and_indices(
+                all_feat_acts[..., 0],
+                buffer,
+                selection_mask,
+            )
+        )
+        candidate_indices_cpu = candidate_indices.cpu()
+        candidate_token_count = int(candidate_flat_indices.numel())
+        valid_token_count = max(1, candidate_token_count)
+        n_quantiles = self.seq_cfg.n_quantiles
+        group_size = self.seq_cfg.quantile_group_size
+        top_k = min(self.seq_cfg.top_acts_group_size, candidate_token_count)
+
+        device = (
+            torch.device(selection_device)
+            if selection_device is not None
+            else all_feat_acts.device
+        )
+        flat_acts = all_feat_acts.reshape(-1, n_features)
+        candidate_flat_indices_dev = candidate_flat_indices.to(device)
+
+        selections: list[tuple[dict[str, Tensor], Tensor, int]] = []
+        for chunk_start in range(0, n_features, feature_chunk_size):
+            chunk_end = min(chunk_start + feature_chunk_size, n_features)
+            chunk_width = chunk_end - chunk_start
+
+            chunk_vals: Tensor | None = None
+            if candidate_token_count > 0:
+                chunk_vals = flat_acts[:, chunk_start:chunk_end].to(device)[
+                    candidate_flat_indices_dev
+                ]
+                feat_max_chunk = [
+                    float(value)
+                    for value in chunk_vals.max(dim=0).values.float().cpu().tolist()
+                ]
+                if top_k > 0:
+                    top_positions_chunk = chunk_vals.topk(k=top_k, dim=0).indices.cpu()
+                else:
+                    top_positions_chunk = torch.zeros(
+                        (0, chunk_width), dtype=torch.long
+                    )
+            else:
+                feat_max_chunk = [0.0] * chunk_width
+                top_positions_chunk = torch.zeros((0, chunk_width), dtype=torch.long)
+
+            quantile_values_chunk: list[list[float]] = []
+            interval_positions_flat: Tensor | None = None
+            interval_offsets: list[int] = []
+            interval_counts: list[int] = []
+            if n_quantiles > 0:
+                boundaries = torch.stack(
+                    [
+                        self._build_interval_quantiles(feat_max, torch.device("cpu"))
+                        for feat_max in feat_max_chunk
+                    ]
+                )
+                quantile_values_chunk = boundaries.tolist()
+                if chunk_vals is not None:
+                    boundaries_dev = boundaries.to(device)
+                    vals32 = chunk_vals.to(torch.float32).T
+                    membership = (
+                        vals32.unsqueeze(1) >= boundaries_dev[:, :-1].unsqueeze(2)
+                    ) & (vals32.unsqueeze(1) <= boundaries_dev[:, 1:].unsqueeze(2))
+                    flat_membership = membership.reshape(chunk_width * n_quantiles, -1)
+                    nonzero_pairs = flat_membership.nonzero()
+                    group_counts = torch.bincount(
+                        nonzero_pairs[:, 0],
+                        minlength=chunk_width * n_quantiles,
+                    ).cpu()
+                    interval_counts = [int(count) for count in group_counts.tolist()]
+                    interval_offsets = [0]
+                    for count in interval_counts:
+                        interval_offsets.append(interval_offsets[-1] + count)
+                    interval_positions_flat = nonzero_pairs[:, 1]
+                    del membership, flat_membership, vals32, nonzero_pairs
+                else:
+                    interval_counts = [0] * (chunk_width * n_quantiles)
+                    interval_offsets = [0] * (chunk_width * n_quantiles + 1)
+
+            # Per-feature assembly. RNG consumption must match the sequential selector:
+            # feature ascending, interval index descending, sampling only on overfill.
+            chunk_plans: list[list[tuple[str, Tensor | None, int]]] = []
+            selected_position_groups: list[Tensor] = []
+            for local_index in range(chunk_width):
+                feat_max = feat_max_chunk[local_index]
+                plan: list[tuple[str, Tensor | None, int]] = [
+                    (
+                        f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}",
+                        (
+                            top_positions_chunk[:, local_index]
+                            if top_positions_chunk.numel() > 0
+                            else torch.zeros(0, dtype=torch.long)
+                        ),
+                        -1,
+                    )
+                ]
+                if n_quantiles > 0:
+                    quantile_values = quantile_values_chunk[local_index]
+                    for i in range(n_quantiles - 1, -1, -1):
+                        lower, upper = quantile_values[i : i + 2]
+                        group_index = local_index * n_quantiles + i
+                        interval_count = (
+                            interval_counts[group_index] if interval_counts else 0
+                        )
+                        pct = interval_count / valid_token_count
+                        label = (
+                            f"INTERVAL {lower:.3f} - {upper:.3f}"
+                            f"<br>CONTAINS {pct:.3%}"
+                        )
+                        if interval_positions_flat is None or interval_count == 0:
+                            plan.append((label, torch.zeros(0, dtype=torch.long), -1))
+                            continue
+                        start = interval_offsets[group_index]
+                        end = interval_offsets[group_index + 1]
+                        group_positions = interval_positions_flat[start:end]
+                        if interval_count > group_size:
+                            sampled_relative = sample_unique_indices(
+                                interval_count,
+                                group_size,
+                            ).to(group_positions.device)
+                            group_positions = group_positions[sampled_relative]
+                        plan.append((label, None, len(selected_position_groups)))
+                        selected_position_groups.append(group_positions)
+                chunk_plans.append(plan)
+
+            if selected_position_groups:
+                group_lengths = [
+                    int(group.shape[0]) for group in selected_position_groups
+                ]
+                selected_positions_cpu = torch.cat(selected_position_groups).cpu()
+                selected_groups_cpu = list(selected_positions_cpu.split(group_lengths))
+            else:
+                selected_groups_cpu = []
+
+            for plan in chunk_plans:
+                indices_dict: dict[str, Tensor] = {}
+                for label, direct_positions, group_ref in plan:
+                    positions = (
+                        direct_positions
+                        if direct_positions is not None
+                        else selected_groups_cpu[group_ref]
+                    )
+                    if positions.numel() > 0:
+                        indices_dict[label] = candidate_indices_cpu[positions]
+                    else:
+                        indices_dict[label] = torch.zeros((0, 2), dtype=torch.long)
+                indices_bold = torch.concat(list(indices_dict.values()))
+                selections.append(
+                    (indices_dict, indices_bold, int(indices_bold.shape[0]))
+                )
+            del chunk_vals
+
+        if profile_enabled:
+            self._profile_totals["feature_calls"] += float(n_features)
+            self._profile_totals["candidate_token_count_total"] += float(
+                candidate_token_count * n_features
+            )
+            self._profile_totals["get_indices_dict_wall_s"] += (
+                perf_counter() - batched_start
+            )
+
+        return selections
 
     def get_indices_buf(
         self,

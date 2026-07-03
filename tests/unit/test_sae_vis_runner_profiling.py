@@ -37,6 +37,22 @@ class _FakeSequenceDataGenerator:
         self.cfg = cfg
         self.tokens = tokens
         self.W_U = W_U
+        self.buffer: tuple[int, int] | None = None
+
+    def get_indices_dicts_columnar_gpu_batched(
+        self,
+        buffer: tuple[int, int] | None,
+        all_feat_acts: Tensor,
+        selection_mask: Tensor | None = None,
+        selection_device: Any = None,
+        feature_chunk_size: int = 64,
+    ) -> list[tuple[dict[str, Tensor], Tensor, int]]:
+        del buffer, selection_mask, selection_device, feature_chunk_size
+        empty_indices = torch.zeros((0, 2), dtype=torch.long)
+        return [
+            ({"TOP ACTIVATIONS<br>MAX = 1.000": empty_indices}, empty_indices, 0)
+            for _ in range(all_feat_acts.shape[-1])
+        ]
 
     def get_sequences_data(
         self,
@@ -65,6 +81,7 @@ class _FakeSequenceDataGenerator:
         feature_resid_dir: Tensor,
         selection_mask: Tensor | None = None,
         selection_backend: SequenceSelectionBackend = "legacy",
+        precomputed_selection: tuple[dict[str, Tensor], Tensor, int] | None = None,
     ) -> SequenceCoordinateTable:
         del (
             feat_acts,
@@ -73,6 +90,7 @@ class _FakeSequenceDataGenerator:
             feature_resid_dir,
             selection_mask,
             selection_backend,
+            precomputed_selection,
         )
         return SequenceCoordinateTable(
             group_names=["TOP ACTIVATIONS<br>MAX = 1.000"],
