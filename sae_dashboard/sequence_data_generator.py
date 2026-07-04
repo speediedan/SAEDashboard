@@ -533,12 +533,128 @@ class SequenceCoordinateTable:
         *,
         pad_token_id: int | None = None,
     ) -> Any:
-        return self.activation_row_arrow_record_batch_from_columns(
-            self.to_activation_row_columns(
-                feature_index,
-                decode_token_ids,
-                pad_token_id=pad_token_id,
+        """Vectorized activation-row RecordBatch construction.
+
+        Produces the same rows as `activation_row_arrow_record_batch_from_columns(
+        to_activation_row_columns(...))` (which is retained as the reference
+        implementation) but builds the Arrow arrays from flat numpy buffers with
+        list offsets instead of per-row Python lists: one vectorized round of the
+        value matrix, vectorized trailing-pad trimming, masked row max/min/argmax,
+        a single unique-id detokenization pass mapped back through a numpy object
+        array, and `ListArray.from_arrays` for the nested columns.
+        """
+        pyarrow, _, _ = _load_sequence_row_pyarrow_modules()
+        if self.token_ids.ndim != 2:
+            raise ValueError("token_ids must be a 2D sequence table")
+        if self.feat_acts.ndim != 2:
+            raise ValueError("feat_acts must be a 2D sequence table")
+        if self.feat_acts.shape != tuple(self.token_ids.shape):
+            raise ValueError("feat_acts must match token_ids shape")
+
+        n_sequences = int(self.token_ids.shape[0])
+        if sum(self.group_sizes) != n_sequences:
+            raise ValueError("group_sizes must sum to the number of sequence rows")
+
+        token_ids = self.token_ids.detach().cpu().to(dtype=torch.long).numpy()
+        qualifying_token_indices = (
+            self.qualifying_token_indices.detach().cpu().to(dtype=torch.long).numpy()
+        )
+        values = np.round(np.asarray(self.feat_acts, dtype=np.float64), 3)
+        buffer_width = int(token_ids.shape[1]) if n_sequences else 0
+
+        if pad_token_id is None or buffer_width == 0:
+            lengths = np.full(n_sequences, buffer_width, dtype=np.int64)
+        else:
+            not_pad = token_ids != pad_token_id
+            has_content = not_pad.any(axis=1)
+            first_content_from_end = np.argmax(not_pad[:, ::-1], axis=1)
+            lengths = np.where(
+                has_content, buffer_width - first_content_from_end, 0
+            ).astype(np.int64)
+
+        if n_sequences and buffer_width:
+            valid = np.arange(buffer_width)[None, :] < lengths[:, None]
+        else:
+            valid = np.zeros((n_sequences, buffer_width), dtype=bool)
+        has_values = lengths > 0
+        max_values = np.where(
+            has_values,
+            np.where(valid, values, -np.inf).max(axis=1, initial=-np.inf),
+            0.0,
+        )
+        min_values = np.where(
+            has_values,
+            np.where(valid, values, np.inf).min(axis=1, initial=np.inf),
+            0.0,
+        )
+        if n_sequences and buffer_width:
+            max_value_token_indices = np.where(
+                has_values,
+                np.argmax(valid & (values == max_values[:, None]), axis=1),
+                0,
+            ).astype(np.int64)
+        else:
+            max_value_token_indices = np.zeros(n_sequences, dtype=np.int64)
+
+        group_bins = [
+            _parse_activation_group_name(group_name) for group_name in self.group_names
+        ]
+        bin_mins = np.repeat(
+            np.array([bins[0] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+        bin_maxes = np.repeat(
+            np.array([bins[1] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+        bin_contains = np.repeat(
+            np.array([bins[2] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+
+        flat_token_ids = token_ids[valid]
+        flat_values = values[valid]
+        offsets = np.zeros(n_sequences + 1, dtype=np.int32)
+        np.cumsum(lengths, out=offsets[1:])
+
+        if flat_token_ids.size:
+            unique_ids = np.unique(flat_token_ids)
+            decoded_tokens = decode_token_ids(
+                [int(token_id) for token_id in unique_ids.tolist()]
             )
+            if len(decoded_tokens) != len(unique_ids):
+                raise ValueError(
+                    f"Token decoder returned {len(decoded_tokens)} tokens for "
+                    f"{len(unique_ids)} ids."
+                )
+            token_string_lookup = np.empty(int(unique_ids.max()) + 1, dtype=object)
+            token_string_lookup[unique_ids] = np.array(decoded_tokens, dtype=object)
+            flat_token_strings = token_string_lookup[flat_token_ids]
+        else:
+            flat_token_strings = np.array([], dtype=object)
+
+        offsets_array = pyarrow.array(offsets, type=pyarrow.int32())
+        arrays = [
+            pyarrow.array(np.full(n_sequences, feature_index, dtype=np.int64)),
+            pyarrow.array(np.arange(n_sequences, dtype=np.int64)),
+            pyarrow.ListArray.from_arrays(
+                offsets_array,
+                pyarrow.array(flat_token_strings, type=pyarrow.string()),
+            ),
+            pyarrow.array(max_values, type=pyarrow.float64()),
+            pyarrow.array(max_value_token_indices),
+            pyarrow.array(min_values, type=pyarrow.float64()),
+            pyarrow.ListArray.from_arrays(
+                offsets_array,
+                pyarrow.array(flat_values, type=pyarrow.float64()),
+            ),
+            pyarrow.array(bin_mins, type=pyarrow.float64()),
+            pyarrow.array(bin_maxes, type=pyarrow.float64()),
+            pyarrow.array(bin_contains, type=pyarrow.float64()),
+            pyarrow.array(qualifying_token_indices.astype(np.int64) - 1),
+        ]
+        return pyarrow.RecordBatch.from_arrays(
+            arrays, schema=self.activation_row_arrow_schema()
         )
 
     def write_sequence_row_arrow_ipc(
@@ -1568,6 +1684,7 @@ class SequenceDataGenerator:
         selection_mask: Int[Tensor, "batch seq"] | None = None,
         selection_device: str | torch.device | None = None,
         feature_chunk_size: int = 64,
+        staged_flat_acts: Tensor | None = None,
     ) -> list[tuple[dict[str, Tensor], Tensor, int]]:
         """Batched-across-features equivalent of `get_indices_dict_columnar_gpu`.
 
@@ -1590,6 +1707,12 @@ class SequenceDataGenerator:
         The per-feature candidate composition statistics recorded by the sequential selector
         are intentionally not computed here (they are profiling-only and taxed the stage they
         measured); only the cheap wall/feature aggregates are maintained.
+
+        ``staged_flat_acts`` optionally supplies an already device-resident
+        ``[features, batch*seq]`` activation matrix (values must equal ``all_feat_acts`` at
+        every candidate position — the unmasked flat acts qualify because candidates are a
+        subset of valid positions where masking is the identity); when provided, the
+        selection device is taken from it and no per-chunk host-to-device uploads occur.
         """
         profile_enabled = bool(getattr(self.cfg, "log_performance", False))
         batched_start = perf_counter() if profile_enabled else 0.0
@@ -1612,11 +1735,12 @@ class SequenceDataGenerator:
         group_size = self.seq_cfg.quantile_group_size
         top_k = min(self.seq_cfg.top_acts_group_size, candidate_token_count)
 
-        device = (
-            torch.device(selection_device)
-            if selection_device is not None
-            else all_feat_acts.device
-        )
+        if staged_flat_acts is not None:
+            device = staged_flat_acts.device
+        elif selection_device is not None:
+            device = torch.device(selection_device)
+        else:
+            device = all_feat_acts.device
         flat_acts = all_feat_acts.reshape(-1, n_features)
         candidate_flat_indices_dev = candidate_flat_indices.to(device)
 
@@ -1627,9 +1751,16 @@ class SequenceDataGenerator:
 
             chunk_vals: Tensor | None = None
             if candidate_token_count > 0:
-                chunk_vals = flat_acts[:, chunk_start:chunk_end].to(device)[
-                    candidate_flat_indices_dev
-                ]
+                if staged_flat_acts is not None:
+                    chunk_vals = (
+                        staged_flat_acts[chunk_start:chunk_end]
+                        .index_select(-1, candidate_flat_indices_dev)
+                        .T
+                    )
+                else:
+                    chunk_vals = flat_acts[:, chunk_start:chunk_end].to(device)[
+                        candidate_flat_indices_dev
+                    ]
                 feat_max_chunk = [
                     float(value)
                     for value in chunk_vals.max(dim=0).values.float().cpu().tolist()

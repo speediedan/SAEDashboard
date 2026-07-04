@@ -30,6 +30,7 @@ from sae_dashboard.components import (
 from sae_dashboard.data_parsing_fns import (
     get_features_table_data,
     get_logits_table_data,
+    get_logits_table_data_batch,
 )
 from sae_dashboard.feature_data import FeatureData
 from sae_dashboard.feature_data_generator import FeatureDataGenerator
@@ -76,6 +77,13 @@ def _resolve_unembed_matrix(model: HookedSAETransformer) -> Tensor:
     if hasattr(model, "unembed") and hasattr(model.unembed, "W_U"):
         return model.unembed.W_U
     raise AttributeError(f"{type(model).__name__} does not expose W_U")
+
+
+# Upper bound for staging the full [features, batch*seq] activation matrix on the
+# packaging device so selection/statistics/histograms share one upload (bf16 examples:
+# ~2.6 GiB at Monology 4096x256, ~3.25 GiB at RTE 2048x128); larger shapes fall back to
+# per-stage chunked uploads.
+COLUMNAR_DEVICE_STAGING_MAX_BYTES = 4 * 1024**3
 
 
 def _build_ignore_tokens_mask(
@@ -752,6 +760,13 @@ class SaeVisRunner:
         flat_valid_indices = torch.nonzero(
             flat_ignore_tokens_mask, as_tuple=False
         ).flatten()
+        staged_flat_acts = flat_all_feat_acts
+        acts_byte_size = flat_all_feat_acts.element_size() * flat_all_feat_acts.numel()
+        if (
+            packaging_device is not None
+            and acts_byte_size <= COLUMNAR_DEVICE_STAGING_MAX_BYTES
+        ):
+            staged_flat_acts = flat_all_feat_acts.to(packaging_device)
 
         with timed_stage(
             self.cfg.log_performance,
@@ -767,7 +782,7 @@ class SaeVisRunner:
                 pyarrow, _, _ = self._load_columnar_modules()
                 feature_statistics_table = self._replace_index_column(
                     FeatureStatistics.create_scalar_arrow_table_from_flat_valid(
-                        flat_all_feat_acts,
+                        staged_flat_acts,
                         flat_valid_indices,
                         compute_device=packaging_device,
                     ),
@@ -879,7 +894,7 @@ class SaeVisRunner:
                 pyarrow, _, _ = self._load_columnar_modules()
                 activation_histogram_table = (
                     HistogramData.from_flat_valid_data_batch_arrow_table(
-                        flat_all_feat_acts,
+                        staged_flat_acts,
                         flat_valid_indices,
                         n_bins=layout.act_hist_cfg.n_bins,  # type: ignore
                         tickmode="5 ticks",
@@ -936,12 +951,12 @@ class SaeVisRunner:
             batch=feature_batch_index,
             feature_count=len(features),
         ):
-            for feat, logit_vector in zip(features, logits):
-                feature_data_dict[feat].logits_table_data = get_logits_table_data(
-                    logit_vector=logit_vector,
-                    n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
-                )
-                logits_table_rows.append(feature_data_dict[feat].logits_table_data)
+            logits_table_rows = get_logits_table_data_batch(
+                logits,
+                n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
+            )
+            for feat, logits_table_row in zip(features, logits_table_rows):
+                feature_data_dict[feat].logits_table_data = logits_table_row
 
         sequence_coordinate_tables: dict[int, SequenceCoordinateTable] = {}
 
@@ -968,6 +983,11 @@ class SaeVisRunner:
                             masked_all_feat_acts,
                             selection_mask=ignore_tokens_mask,
                             selection_device=packaging_device,
+                            staged_flat_acts=(
+                                staged_flat_acts
+                                if staged_flat_acts.device.type != "cpu"
+                                else None
+                            ),
                         )
                     )
             for row_index, feat in enumerate(features):
@@ -997,6 +1017,7 @@ class SaeVisRunner:
                 if progress is not None:
                     progress[1].update(1)
             del masked_all_feat_acts
+            del staged_flat_acts
 
         artifact_path = self._write_sequence_replay_artifact(
             feature_batch_index=feature_batch_index,
