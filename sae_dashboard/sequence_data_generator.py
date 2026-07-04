@@ -618,7 +618,7 @@ class SequenceCoordinateTable:
         np.cumsum(lengths, out=offsets[1:])
 
         if flat_token_ids.size:
-            unique_ids = np.unique(flat_token_ids)
+            unique_ids, inverse_indices = np.unique(flat_token_ids, return_inverse=True)
             decoded_tokens = decode_token_ids(
                 [int(token_id) for token_id in unique_ids.tolist()]
             )
@@ -627,9 +627,7 @@ class SequenceCoordinateTable:
                     f"Token decoder returned {len(decoded_tokens)} tokens for "
                     f"{len(unique_ids)} ids."
                 )
-            token_string_lookup = np.empty(int(unique_ids.max()) + 1, dtype=object)
-            token_string_lookup[unique_ids] = np.array(decoded_tokens, dtype=object)
-            flat_token_strings = token_string_lookup[flat_token_ids]
+            flat_token_strings = np.array(decoded_tokens, dtype=object)[inverse_indices]
         else:
             flat_token_strings = np.array([], dtype=object)
 
