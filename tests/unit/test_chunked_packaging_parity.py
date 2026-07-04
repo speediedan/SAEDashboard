@@ -326,3 +326,79 @@ def test_batched_selection_with_staged_flat_acts_matches_unstaged() -> None:
     )
 
     _assert_selections_equal(staged_result, unstaged)
+
+
+def test_build_sequence_coordinate_tables_batched_matches_per_feature() -> None:
+    import random
+
+    from tests.unit.test_sequence_data_generator import (
+        _batched_selection_fixture_generator,
+    )
+
+    generator = _batched_selection_fixture_generator()
+    assert generator.supports_batched_coordinate_tables()
+    torch.manual_seed(404)
+    n_features = 4
+    all_feat_acts = (
+        torch.rand(3, 8, n_features, dtype=torch.float32) + 0.01
+    ) * torch.linspace(0.5, 2.0, n_features)
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[:, 0] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+    feat_logits_batch = torch.randn(n_features, 32, dtype=torch.float32)
+
+    random.seed(808)
+    selections = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+    )
+    batched_tables = generator.build_sequence_coordinate_tables_batched(
+        masked_acts,
+        feat_logits_batch,
+        selections,
+    )
+
+    assert len(batched_tables) == n_features
+    for feature_index in range(n_features):
+        reference = generator.get_sequence_coordinate_table(
+            feat_acts=masked_acts[..., feature_index],
+            feat_logits=feat_logits_batch[feature_index],
+            resid_post=torch.empty(0),
+            feature_resid_dir=torch.empty(0),
+            selection_mask=selection_mask,
+            selection_backend="columnar_gpu",
+            precomputed_selection=selections[feature_index],
+        )
+        batched = batched_tables[feature_index]
+        assert batched.group_names == reference.group_names
+        assert batched.group_sizes == reference.group_sizes
+        assert torch.equal(batched.original_indices, reference.original_indices)
+        assert torch.equal(
+            batched.qualifying_token_indices, reference.qualifying_token_indices
+        )
+        assert torch.equal(
+            batched.source_token_indices.contiguous(),
+            reference.source_token_indices,
+        )
+        assert torch.equal(batched.token_ids, reference.token_ids)
+        assert np.array_equal(batched.feat_acts, reference.feat_acts)
+        assert torch.equal(batched.token_logits, reference.token_logits)
+        assert (
+            batched.to_sequence_multi_group_data()
+            == reference.to_sequence_multi_group_data()
+        )
+
+
+def test_build_sequence_coordinate_tables_batched_rejects_buffered_config() -> None:
+    from tests.unit.test_sequence_data_generator import (
+        _batched_selection_fixture_generator,
+    )
+
+    generator = _batched_selection_fixture_generator()
+    generator.seq_cfg.buffer = (2, 2)  # type: ignore[assignment]
+    assert not generator.supports_batched_coordinate_tables()
+    with pytest.raises(ValueError, match="buffer=None"):
+        generator.build_sequence_coordinate_tables_batched(
+            torch.zeros(2, 6, 1), torch.zeros(1, 8), [({}, torch.zeros(0, 2), 0)]
+        )

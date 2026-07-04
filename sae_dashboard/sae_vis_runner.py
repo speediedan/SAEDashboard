@@ -681,6 +681,46 @@ class SaeVisRunner:
         )
         return artifact_path
 
+    def _build_sequence_coordinate_tables(
+        self,
+        *,
+        sequence_data_generator: SequenceDataGenerator,
+        masked_all_feat_acts: Tensor,
+        logits: Tensor,
+        feature_resid_dir: Tensor,
+        ignore_tokens_mask: Tensor,
+        features: list[int],
+        precomputed_selections: list[tuple[dict[str, Any], Any, int]] | None,
+    ) -> dict[int, SequenceCoordinateTable]:
+        if (
+            precomputed_selections is not None
+            and sequence_data_generator.supports_batched_coordinate_tables()
+        ):
+            batched_tables = (
+                sequence_data_generator.build_sequence_coordinate_tables_batched(
+                    masked_all_feat_acts,
+                    logits,
+                    precomputed_selections,
+                )
+            )
+            return dict(zip(features, batched_tables))
+        return {
+            feat: sequence_data_generator.get_sequence_coordinate_table(
+                feat_acts=masked_all_feat_acts[..., row_index],
+                feat_logits=logits[row_index],
+                resid_post=torch.tensor([]),
+                feature_resid_dir=feature_resid_dir[row_index],
+                selection_mask=ignore_tokens_mask,
+                selection_backend=self.cfg.sequence_selection_backend,
+                precomputed_selection=(
+                    precomputed_selections[row_index]
+                    if precomputed_selections is not None
+                    else None
+                ),
+            )
+            for row_index, feat in enumerate(features)
+        }
+
     def _run_columnar_feature_batch(
         self,
         *,
@@ -990,22 +1030,18 @@ class SaeVisRunner:
                             ),
                         )
                     )
-            for row_index, feat in enumerate(features):
-                sequence_coordinate_tables[feat] = (
-                    sequence_data_generator.get_sequence_coordinate_table(
-                        feat_acts=masked_all_feat_acts[..., row_index],
-                        feat_logits=logits[row_index],
-                        resid_post=torch.tensor([]),
-                        feature_resid_dir=feature_resid_dir[row_index],
-                        selection_mask=ignore_tokens_mask,
-                        selection_backend=self.cfg.sequence_selection_backend,
-                        precomputed_selection=(
-                            precomputed_selections[row_index]
-                            if precomputed_selections is not None
-                            else None
-                        ),
-                    )
+            sequence_coordinate_tables.update(
+                self._build_sequence_coordinate_tables(
+                    sequence_data_generator=sequence_data_generator,
+                    masked_all_feat_acts=masked_all_feat_acts,
+                    logits=logits,
+                    feature_resid_dir=feature_resid_dir,
+                    ignore_tokens_mask=ignore_tokens_mask,
+                    features=features,
+                    precomputed_selections=precomputed_selections,
                 )
+            )
+            for row_index, feat in enumerate(features):
                 if self.cfg.use_dfa:
                     feature_data_dict[feat].dfa_data = all_consolidated_dfa_results.get(
                         feat,

@@ -2053,6 +2053,108 @@ class SequenceDataGenerator:
         )
         return sequence_coordinate_table.to_sequence_multi_group_data()
 
+    def supports_batched_coordinate_tables(self) -> bool:
+        """The cross-feature coordinate-table fast path covers the production columnar
+        configuration: full-sequence context (``buffer is None``) with buffer computation
+        enabled and no ablation experiments."""
+        return (
+            self.seq_cfg.buffer is None
+            and self.seq_cfg.compute_buffer
+            and not self.cfg.perform_ablation_experiments
+        )
+
+    @torch.inference_mode()
+    def build_sequence_coordinate_tables_batched(
+        self,
+        all_feat_acts: Float[Tensor, "batch seq feats"],
+        feat_logits_batch: Float[Tensor, "feats d_vocab"],
+        selections: list[tuple[dict[str, Tensor], Tensor, int]],
+    ) -> list[SequenceCoordinateTable]:
+        """Cross-feature equivalent of per-feature `get_sequence_coordinate_table` for the
+        ``buffer is None`` / ``compute_buffer`` configuration.
+
+        With full-sequence context every selected row's buffered window is simply its whole
+        sequence, so the per-feature `get_indices_buf` + `eindex` gathers reduce to row
+        selections. This method concatenates all features' selected rows, performs one token
+        row-gather, one per-row-feature activation gather, one vectorized ``np.around`` pass,
+        and one flat logits gather (on `feat_logits_batch`'s device, transferring only the
+        gathered ``[rows, seq-1]`` block), then splits the results back into one
+        `SequenceCoordinateTable` per feature. Values are identical to the per-feature path:
+        every operation is a pure gather or the same elementwise rounding.
+        """
+        if not self.supports_batched_coordinate_tables():
+            raise ValueError(
+                "build_sequence_coordinate_tables_batched requires buffer=None, "
+                "compute_buffer=True, and no ablation experiments."
+            )
+        if not selections:
+            return []
+
+        n_bold_per_feature = [selection[2] for selection in selections]
+        all_bold = torch.cat([selection[1] for selection in selections]).cpu()
+        total_rows = int(all_bold.shape[0])
+        seq_length = int(self.tokens.shape[1])
+        n_features = len(selections)
+
+        feature_row_ids = torch.repeat_interleave(
+            torch.arange(n_features, dtype=torch.long),
+            torch.tensor(n_bold_per_feature, dtype=torch.long),
+        )
+
+        if total_rows:
+            bold_batch_indices = all_bold[:, 0]
+            # token ids for positions 1..seq-1 of each selected sequence
+            token_ids_all = self.tokens.cpu()[bold_batch_indices][:, 1:]
+            # coloring values: the selected feature's activations at positions 1..seq-1
+            coloring_all = all_feat_acts[bold_batch_indices, :, feature_row_ids][:, 1:]
+            feat_acts_all = np.around(
+                coloring_all.to(dtype=torch.float32)
+                .numpy()
+                .astype(np.float64, copy=False),
+                4,
+            )
+            logits_device = feat_logits_batch.device
+            d_vocab = int(feat_logits_batch.shape[-1])
+            flat_logit_indices = feature_row_ids.to(logits_device)[
+                :, None
+            ] * d_vocab + token_ids_all.to(logits_device)
+            token_logits_all = feat_logits_batch.reshape(-1)[flat_logit_indices].cpu()
+            source_token_indices_all = torch.arange(
+                1, seq_length, dtype=torch.long
+            ).expand(total_rows, seq_length - 1)
+        else:
+            token_ids_all = torch.zeros((0, seq_length - 1), dtype=torch.long)
+            feat_acts_all = np.zeros((0, seq_length - 1), dtype=np.float64)
+            token_logits_all = torch.zeros(
+                (0, seq_length - 1), dtype=feat_logits_batch.dtype
+            )
+            source_token_indices_all = torch.zeros(
+                (0, seq_length - 1), dtype=torch.long
+            )
+
+        token_ids_split = torch.split(token_ids_all, n_bold_per_feature)
+        token_logits_split = torch.split(token_logits_all, n_bold_per_feature)
+        source_indices_split = torch.split(source_token_indices_all, n_bold_per_feature)
+        value_offsets = np.cumsum(n_bold_per_feature)[:-1]
+        feat_acts_split = np.split(feat_acts_all, value_offsets)
+
+        tables: list[SequenceCoordinateTable] = []
+        for feature_position, (indices_dict, indices_bold, _) in enumerate(selections):
+            indices_bold_cpu = indices_bold.cpu()
+            tables.append(
+                SequenceCoordinateTable(
+                    group_names=list(indices_dict.keys()),
+                    group_sizes=[len(indices) for indices in indices_dict.values()],
+                    original_indices=indices_bold_cpu[:, 0],
+                    qualifying_token_indices=indices_bold_cpu[:, 1],
+                    source_token_indices=source_indices_split[feature_position],
+                    token_ids=token_ids_split[feature_position],
+                    feat_acts=feat_acts_split[feature_position],
+                    token_logits=token_logits_split[feature_position],
+                )
+            )
+        return tables
+
     def build_sequence_coordinate_table(
         self,
         token_ids: Int[Tensor, "n_bold buf"],
