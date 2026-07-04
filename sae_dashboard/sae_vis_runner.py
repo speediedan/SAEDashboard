@@ -172,7 +172,11 @@ class FeatureDataGeneratorFactory:
                     else []
                 ),
             )
-            wrapped_model = TransformerLensWrapper(model, activation_config)  # type: ignore
+            wrapped_model = TransformerLensWrapper(
+                model,
+                activation_config,
+                disable_kv_cache=not is_preserved_legacy_path(cfg),
+            )  # type: ignore
 
         feature_data_generator_cls = (
             FeatureDataGeneratorFactory.resolve_feature_data_generator_cls(cfg)
@@ -536,14 +540,15 @@ class SaeVisRunner:
                 batch=feature_batch_index,
                 feature_count=len(feature_indices),
             ):
-                for feature_index in feature_indices:
-                    activation_row_batch = sequence_coordinate_tables[
-                        feature_index
-                    ].to_activation_row_arrow_record_batch(
-                        feature_index,
-                        decode_token_ids,
-                        pad_token_id=pad_token_id,
-                    )
+                batched_activation_rows = SequenceCoordinateTable.activation_row_arrow_record_batches_for_features(
+                    [
+                        (feature_index, sequence_coordinate_tables[feature_index])
+                        for feature_index in feature_indices
+                    ],
+                    decode_token_ids,
+                    pad_token_id=pad_token_id,
+                )
+                for activation_row_batch in batched_activation_rows:
                     if self.cfg.columnar_emit_activation_rows:
                         activation_row_batches.append(activation_row_batch)
                     if self.cfg.columnar_emit_activation_copy_rows:
@@ -685,7 +690,7 @@ class SaeVisRunner:
         self,
         *,
         sequence_data_generator: SequenceDataGenerator,
-        masked_all_feat_acts: Tensor,
+        all_feat_acts: Tensor,
         logits: Tensor,
         feature_resid_dir: Tensor,
         ignore_tokens_mask: Tensor,
@@ -698,12 +703,14 @@ class SaeVisRunner:
         ):
             batched_tables = (
                 sequence_data_generator.build_sequence_coordinate_tables_batched(
-                    masked_all_feat_acts,
+                    all_feat_acts,
                     logits,
                     precomputed_selections,
+                    ignore_tokens_mask=ignore_tokens_mask,
                 )
             )
             return dict(zip(features, batched_tables))
+        masked_all_feat_acts = all_feat_acts * ignore_tokens_mask.unsqueeze(-1)
         return {
             feat: sequence_data_generator.get_sequence_coordinate_table(
                 feat_acts=masked_all_feat_acts[..., row_index],
@@ -1007,20 +1014,23 @@ class SaeVisRunner:
             batch=feature_batch_index,
             feature_count=len(features),
         ):
-            masked_all_feat_acts = all_feat_acts * ignore_tokens_mask.unsqueeze(-1)
+            # Selection reads only candidate positions (a subset of valid positions,
+            # where the ignore-mask multiply is the identity), so it can consume the
+            # unmasked activations directly; masking is applied post-gather in the
+            # batched coordinate-table builder and eagerly only on the fallback path.
             precomputed_selections: list[tuple[dict[str, Any], Any, int]] | None = None
             if self.cfg.sequence_selection_backend == "columnar_gpu":
                 with timed_stage(
                     self.cfg.log_performance,
                     "sequence_selection_batched",
-                    device=packaging_device or str(masked_all_feat_acts.device),
+                    device=packaging_device or str(all_feat_acts.device),
                     batch=feature_batch_index,
                     feature_count=len(features),
                 ):
                     precomputed_selections = (
                         sequence_data_generator.get_indices_dicts_columnar_gpu_batched(
                             sequence_data_generator.buffer,
-                            masked_all_feat_acts,
+                            all_feat_acts,
                             selection_mask=ignore_tokens_mask,
                             selection_device=packaging_device,
                             staged_flat_acts=(
@@ -1033,7 +1043,7 @@ class SaeVisRunner:
             sequence_coordinate_tables.update(
                 self._build_sequence_coordinate_tables(
                     sequence_data_generator=sequence_data_generator,
-                    masked_all_feat_acts=masked_all_feat_acts,
+                    all_feat_acts=all_feat_acts,
                     logits=logits,
                     feature_resid_dir=feature_resid_dir,
                     ignore_tokens_mask=ignore_tokens_mask,
@@ -1052,7 +1062,6 @@ class SaeVisRunner:
                     )
                 if progress is not None:
                     progress[1].update(1)
-            del masked_all_feat_acts
             del staged_flat_acts
 
         artifact_path = self._write_sequence_replay_artifact(

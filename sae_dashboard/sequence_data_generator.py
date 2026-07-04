@@ -526,31 +526,18 @@ class SequenceCoordinateTable:
             schema=SequenceCoordinateTable.activation_copy_row_arrow_schema(),
         )
 
-    def to_activation_row_arrow_record_batch(
+    def _prepare_activation_row_matrices(
         self,
-        feature_index: int,
-        decode_token_ids: Callable[[list[int]], list[str]],
-        *,
-        pad_token_id: int | None = None,
-    ) -> Any:
-        """Vectorized activation-row RecordBatch construction.
-
-        Produces the same rows as `activation_row_arrow_record_batch_from_columns(
-        to_activation_row_columns(...))` (which is retained as the reference
-        implementation) but builds the Arrow arrays from flat numpy buffers with
-        list offsets instead of per-row Python lists: one vectorized round of the
-        value matrix, vectorized trailing-pad trimming, masked row max/min/argmax,
-        a single unique-id detokenization pass mapped back through a numpy object
-        array, and `ListArray.from_arrays` for the nested columns.
-        """
-        pyarrow, _, _ = _load_sequence_row_pyarrow_modules()
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Validate and convert this table's rows into the numpy matrices consumed by the
+        shared activation-row RecordBatch core (token ids, rounded values, qualifying
+        indices, and the per-row bin columns expanded from the group names)."""
         if self.token_ids.ndim != 2:
             raise ValueError("token_ids must be a 2D sequence table")
         if self.feat_acts.ndim != 2:
             raise ValueError("feat_acts must be a 2D sequence table")
         if self.feat_acts.shape != tuple(self.token_ids.shape):
             raise ValueError("feat_acts must match token_ids shape")
-
         n_sequences = int(self.token_ids.shape[0])
         if sum(self.group_sizes) != n_sequences:
             raise ValueError("group_sizes must sum to the number of sequence rows")
@@ -560,6 +547,55 @@ class SequenceCoordinateTable:
             self.qualifying_token_indices.detach().cpu().to(dtype=torch.long).numpy()
         )
         values = np.round(np.asarray(self.feat_acts, dtype=np.float64), 3)
+        group_bins = [
+            _parse_activation_group_name(group_name) for group_name in self.group_names
+        ]
+        bin_mins = np.repeat(
+            np.array([bins[0] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+        bin_maxes = np.repeat(
+            np.array([bins[1] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+        bin_contains = np.repeat(
+            np.array([bins[2] for bins in group_bins], dtype=np.float64),
+            self.group_sizes,
+        )
+        return (
+            token_ids,
+            values,
+            qualifying_token_indices,
+            bin_mins,
+            bin_maxes,
+            bin_contains,
+        )
+
+    @staticmethod
+    def _activation_row_record_batch_from_matrices(
+        *,
+        token_ids: np.ndarray,
+        values: np.ndarray,
+        feature_indices_per_row: np.ndarray,
+        sequence_indices_per_row: np.ndarray,
+        qualifying_token_indices: np.ndarray,
+        bin_mins: np.ndarray,
+        bin_maxes: np.ndarray,
+        bin_contains: np.ndarray,
+        decode_token_ids: Callable[[list[int]], list[str]],
+        pad_token_id: int | None,
+    ) -> Any:
+        """Shared vectorized activation-row RecordBatch core.
+
+        Operates on ``[rows, buf]`` matrices (single-feature or concatenated across a
+        whole feature batch): one vectorized trailing-pad trim, masked row
+        max/min/first-max-index, a single unique-id detokenization pass mapped through
+        `np.unique(return_inverse=True)`, and `ListArray.from_arrays` nested columns.
+        All operations are elementwise or per-row, so per-feature and concatenated
+        invocations produce identical rows.
+        """
+        pyarrow, _, _ = _load_sequence_row_pyarrow_modules()
+        n_sequences = int(token_ids.shape[0])
         buffer_width = int(token_ids.shape[1]) if n_sequences else 0
 
         if pad_token_id is None or buffer_width == 0:
@@ -596,22 +632,6 @@ class SequenceCoordinateTable:
         else:
             max_value_token_indices = np.zeros(n_sequences, dtype=np.int64)
 
-        group_bins = [
-            _parse_activation_group_name(group_name) for group_name in self.group_names
-        ]
-        bin_mins = np.repeat(
-            np.array([bins[0] for bins in group_bins], dtype=np.float64),
-            self.group_sizes,
-        )
-        bin_maxes = np.repeat(
-            np.array([bins[1] for bins in group_bins], dtype=np.float64),
-            self.group_sizes,
-        )
-        bin_contains = np.repeat(
-            np.array([bins[2] for bins in group_bins], dtype=np.float64),
-            self.group_sizes,
-        )
-
         flat_token_ids = token_ids[valid]
         flat_values = values[valid]
         offsets = np.zeros(n_sequences + 1, dtype=np.int32)
@@ -633,8 +653,8 @@ class SequenceCoordinateTable:
 
         offsets_array = pyarrow.array(offsets, type=pyarrow.int32())
         arrays = [
-            pyarrow.array(np.full(n_sequences, feature_index, dtype=np.int64)),
-            pyarrow.array(np.arange(n_sequences, dtype=np.int64)),
+            pyarrow.array(feature_indices_per_row.astype(np.int64, copy=False)),
+            pyarrow.array(sequence_indices_per_row.astype(np.int64, copy=False)),
             pyarrow.ListArray.from_arrays(
                 offsets_array,
                 pyarrow.array(flat_token_strings, type=pyarrow.string()),
@@ -652,8 +672,121 @@ class SequenceCoordinateTable:
             pyarrow.array(qualifying_token_indices.astype(np.int64) - 1),
         ]
         return pyarrow.RecordBatch.from_arrays(
-            arrays, schema=self.activation_row_arrow_schema()
+            arrays, schema=SequenceCoordinateTable.activation_row_arrow_schema()
         )
+
+    def to_activation_row_arrow_record_batch(
+        self,
+        feature_index: int,
+        decode_token_ids: Callable[[list[int]], list[str]],
+        *,
+        pad_token_id: int | None = None,
+    ) -> Any:
+        """Vectorized activation-row RecordBatch construction (single feature).
+
+        Produces the same rows as `activation_row_arrow_record_batch_from_columns(
+        to_activation_row_columns(...))`, which is retained as the reference
+        implementation; see `_activation_row_record_batch_from_matrices` for the
+        shared vectorized core.
+        """
+        (
+            token_ids,
+            values,
+            qualifying_token_indices,
+            bin_mins,
+            bin_maxes,
+            bin_contains,
+        ) = self._prepare_activation_row_matrices()
+        n_sequences = int(token_ids.shape[0])
+        return self._activation_row_record_batch_from_matrices(
+            token_ids=token_ids,
+            values=values,
+            feature_indices_per_row=np.full(n_sequences, feature_index, dtype=np.int64),
+            sequence_indices_per_row=np.arange(n_sequences, dtype=np.int64),
+            qualifying_token_indices=qualifying_token_indices,
+            bin_mins=bin_mins,
+            bin_maxes=bin_maxes,
+            bin_contains=bin_contains,
+            decode_token_ids=decode_token_ids,
+            pad_token_id=pad_token_id,
+        )
+
+    @staticmethod
+    def activation_row_arrow_record_batches_for_features(
+        tables_by_feature: "list[tuple[int, SequenceCoordinateTable]]",
+        decode_token_ids: Callable[[list[int]], list[str]],
+        *,
+        pad_token_id: int | None = None,
+    ) -> list[Any]:
+        """Build activation-row RecordBatches for a whole feature batch in one pass.
+
+        Concatenates every feature's row matrices, runs the shared vectorized core once
+        (one pad-trim/round/reduction pass and a single unique-id detokenization over the
+        entire batch), and returns zero-copy per-feature `RecordBatch.slice` views so the
+        per-feature record-batch layout (manifest row groups, copy-row derivation) is
+        unchanged. Rows are identical to per-feature construction because every core
+        operation is elementwise or per-row.
+        """
+        if not tables_by_feature:
+            return []
+        prepared = [
+            (feature_index, table._prepare_activation_row_matrices())
+            for feature_index, table in tables_by_feature
+        ]
+        row_counts = [int(matrices[0].shape[0]) for _, matrices in prepared]
+        buffer_widths = {
+            int(matrices[0].shape[1]) for _, matrices in prepared if matrices[0].size
+        }
+        if len(buffer_widths) > 1:
+            # Mixed sequence widths cannot share one concatenated matrix; fall back.
+            return [
+                table.to_activation_row_arrow_record_batch(
+                    feature_index, decode_token_ids, pad_token_id=pad_token_id
+                )
+                for feature_index, table in tables_by_feature
+            ]
+
+        common_width = buffer_widths.pop() if buffer_widths else 0
+
+        def _normalize_width(matrix: np.ndarray) -> np.ndarray:
+            if matrix.shape[0] == 0 and matrix.shape[1] != common_width:
+                return matrix.reshape(0, common_width)
+            return matrix
+
+        token_ids = np.concatenate(
+            [_normalize_width(m[0]) for _, m in prepared], axis=0
+        )
+        values = np.concatenate([_normalize_width(m[1]) for _, m in prepared], axis=0)
+        qualifying = np.concatenate([m[2] for _, m in prepared], axis=0)
+        bin_mins = np.concatenate([m[3] for _, m in prepared], axis=0)
+        bin_maxes = np.concatenate([m[4] for _, m in prepared], axis=0)
+        bin_contains = np.concatenate([m[5] for _, m in prepared], axis=0)
+        feature_indices_per_row = np.repeat(
+            np.array([feature_index for feature_index, _ in prepared], dtype=np.int64),
+            row_counts,
+        )
+        sequence_indices_per_row = np.concatenate(
+            [np.arange(count, dtype=np.int64) for count in row_counts]
+        )
+
+        combined = SequenceCoordinateTable._activation_row_record_batch_from_matrices(
+            token_ids=token_ids,
+            values=values,
+            feature_indices_per_row=feature_indices_per_row,
+            sequence_indices_per_row=sequence_indices_per_row,
+            qualifying_token_indices=qualifying,
+            bin_mins=bin_mins,
+            bin_maxes=bin_maxes,
+            bin_contains=bin_contains,
+            decode_token_ids=decode_token_ids,
+            pad_token_id=pad_token_id,
+        )
+        slices: list[Any] = []
+        offset = 0
+        for count in row_counts:
+            slices.append(combined.slice(offset, count))
+            offset += count
+        return slices
 
     def write_sequence_row_arrow_ipc(
         self, path: str | PathLike[str], *, feature_index: int
@@ -2069,6 +2202,7 @@ class SequenceDataGenerator:
         all_feat_acts: Float[Tensor, "batch seq feats"],
         feat_logits_batch: Float[Tensor, "feats d_vocab"],
         selections: list[tuple[dict[str, Tensor], Tensor, int]],
+        ignore_tokens_mask: Tensor | None = None,
     ) -> list[SequenceCoordinateTable]:
         """Cross-feature equivalent of per-feature `get_sequence_coordinate_table` for the
         ``buffer is None`` / ``compute_buffer`` configuration.
@@ -2105,10 +2239,24 @@ class SequenceDataGenerator:
             bold_batch_indices = all_bold[:, 0]
             # token ids for positions 1..seq-1 of each selected sequence
             token_ids_all = self.tokens.cpu()[bold_batch_indices][:, 1:]
-            # coloring values: the selected feature's activations at positions 1..seq-1
-            coloring_all = all_feat_acts[bold_batch_indices, :, feature_row_ids][:, 1:]
+            # coloring values: the selected feature's activations at positions 1..seq-1.
+            # `all_feat_acts` may be unmasked (device-resident staging); applying the
+            # ignore mask to the gathered rows is the same elementwise multiply the
+            # per-feature path applies before gathering.
+            acts_device = all_feat_acts.device
+            coloring_all = all_feat_acts[
+                bold_batch_indices.to(acts_device),
+                :,
+                feature_row_ids.to(acts_device),
+            ]
+            if ignore_tokens_mask is not None:
+                coloring_all = coloring_all * ignore_tokens_mask.to(acts_device)[
+                    bold_batch_indices.to(acts_device)
+                ].to(dtype=coloring_all.dtype)
+            coloring_all = coloring_all[:, 1:]
             feat_acts_all = np.around(
                 coloring_all.to(dtype=torch.float32)
+                .cpu()
                 .numpy()
                 .astype(np.float64, copy=False),
                 4,

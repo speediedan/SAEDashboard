@@ -1,7 +1,7 @@
 import re
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -30,11 +30,22 @@ class TransformerLensWrapper(nn.Module):
     """
 
     def __init__(
-        self, model: HookedSAETransformer, activation_config: ActivationConfig
+        self,
+        model: HookedSAETransformer,
+        activation_config: ActivationConfig,
+        disable_kv_cache: bool = False,
     ):
         super().__init__()
         self.model = model
         self.activation_config = activation_config
+        # Bridge forwards run the underlying HF model with use_cache=True by default,
+        # paying DynamicCache initialization churn on every full-sequence forward even
+        # though the KV cache is never reused here. Opt-in per lane so the preserved
+        # legacy path keeps its exact previous behavior; only effective for bridge
+        # models (HookedTransformer forwards do not accept the kwarg).
+        self.disable_kv_cache = bool(disable_kv_cache) and hasattr(
+            model, "original_model"
+        )
         self.validate_hook_points()
         self.hook_layer = self.get_layer(self.activation_config.primary_hook_point)
 
@@ -114,7 +125,10 @@ class TransformerLensWrapper(nn.Module):
             hooks_context(fwd_hooks=hooks) if callable(hooks_context) else nullcontext()
         )
         with context_manager:
-            body_model(input_ids=tokens)
+            if self.disable_kv_cache:
+                body_model(input_ids=tokens, use_cache=False)
+            else:
+                body_model(input_ids=tokens)
 
     def _run_with_hooks_once(
         self,
@@ -137,6 +151,9 @@ class TransformerLensWrapper(nn.Module):
                 activation_dict[hook_point] = activation
 
         output = None
+        forward_kwargs: dict[str, Any] = (
+            {"use_cache": False} if self.disable_kv_cache else {}
+        )
         if self._should_bypass_final_layer_logits(return_logits):
             self._run_final_layer_without_logits(tokens, hooks)
         else:
@@ -145,6 +162,7 @@ class TransformerLensWrapper(nn.Module):
                 return_type=return_type,
                 stop_at_layer=self.hook_layer + 1,
                 fwd_hooks=hooks,  # type: ignore[arg-type]
+                **forward_kwargs,
             )
 
         build_act_dict(hooks)

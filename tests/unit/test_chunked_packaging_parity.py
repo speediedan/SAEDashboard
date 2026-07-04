@@ -402,3 +402,152 @@ def test_build_sequence_coordinate_tables_batched_rejects_buffered_config() -> N
         generator.build_sequence_coordinate_tables_batched(
             torch.zeros(2, 6, 1), torch.zeros(1, 8), [({}, torch.zeros(0, 2), 0)]
         )
+
+
+def test_activation_row_record_batches_for_features_match_per_feature() -> None:
+    import dataclasses
+
+    from sae_dashboard.sequence_data_generator import SequenceCoordinateTable
+
+    tables: list[tuple[int, Any]] = []
+    for feature_index in (3, 9, 27):
+        base = _coordinate_table_fixture()
+        # vary the values per feature so rows are distinct
+        tables.append(
+            (
+                feature_index,
+                dataclasses.replace(
+                    base, feat_acts=base.feat_acts * (0.5 + 0.25 * feature_index)
+                ),
+            )
+        )
+    # add an empty-row table (feature with no selected sequences)
+    empty = dataclasses.replace(
+        _coordinate_table_fixture(),
+        group_names=["TOP ACTIVATIONS<br>MAX = 0.000"],
+        group_sizes=[0],
+        original_indices=torch.zeros(0, dtype=torch.long),
+        qualifying_token_indices=torch.zeros(0, dtype=torch.long),
+        source_token_indices=torch.zeros((0, 4), dtype=torch.long),
+        token_ids=torch.zeros((0, 4), dtype=torch.long),
+        feat_acts=np.zeros((0, 4), dtype=np.float64),
+        token_logits=torch.zeros((0, 4), dtype=torch.float32),
+    )
+    tables.insert(1, (5, empty))
+
+    def decode(token_ids: list[int]) -> list[str]:
+        return [f"tok{token_id}" for token_id in token_ids]
+
+    for pad_token_id in (0, None):
+        batched = (
+            SequenceCoordinateTable.activation_row_arrow_record_batches_for_features(
+                tables, decode, pad_token_id=pad_token_id
+            )
+        )
+        assert len(batched) == len(tables)
+        for (feature_index, table), batch_slice in zip(tables, batched):
+            reference = table.activation_row_arrow_record_batch_from_columns(
+                table.to_activation_row_columns(
+                    feature_index, decode, pad_token_id=pad_token_id
+                )
+            )
+            assert batch_slice.schema.equals(reference.schema)
+            assert batch_slice.to_pydict() == reference.to_pydict()
+
+
+def test_build_sequence_coordinate_tables_batched_unmasked_with_mask_matches_masked() -> (
+    None
+):
+    import random
+
+    from tests.unit.test_sequence_data_generator import (
+        _batched_selection_fixture_generator,
+    )
+
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(606)
+    n_features = 3
+    all_feat_acts = torch.randn(3, 8, n_features, dtype=torch.float32)
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[:, 0] = False
+    selection_mask[1, -2:] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+    feat_logits_batch = torch.randn(n_features, 32, dtype=torch.float32)
+
+    random.seed(909)
+    selections = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+    )
+    reference_tables = generator.build_sequence_coordinate_tables_batched(
+        masked_acts,
+        feat_logits_batch,
+        selections,
+    )
+    # production path post-slice-6: unmasked acts + post-gather masking
+    unmasked_tables = generator.build_sequence_coordinate_tables_batched(
+        all_feat_acts,
+        feat_logits_batch,
+        selections,
+        ignore_tokens_mask=selection_mask,
+    )
+    if torch.cuda.is_available():
+        device_tables = generator.build_sequence_coordinate_tables_batched(
+            all_feat_acts.to("cuda"),
+            feat_logits_batch.to("cuda"),
+            selections,
+            ignore_tokens_mask=selection_mask,
+        )
+    else:
+        device_tables = unmasked_tables
+
+    for reference, unmasked, on_device in zip(
+        reference_tables, unmasked_tables, device_tables
+    ):
+        for candidate in (unmasked, on_device):
+            assert torch.equal(candidate.token_ids, reference.token_ids)
+            assert np.array_equal(candidate.feat_acts, reference.feat_acts)
+            assert torch.equal(
+                candidate.token_logits.cpu().float(),
+                reference.token_logits.float(),
+            )
+            assert candidate.group_names == reference.group_names
+
+
+def test_resolve_feature_acts_output_device_decision() -> None:
+    from types import SimpleNamespace
+
+    from sae_dashboard.feature_data_generator import FeatureDataGenerator
+
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.full_sequence_length = 128
+
+    generator.cfg = SimpleNamespace(dashboard_output_format="json", device="cuda")
+    assert (
+        generator._resolve_feature_acts_output_device(
+            total_prompt_count=2490, feature_count=1024
+        )
+        == "cpu"
+    )
+
+    generator.cfg = SimpleNamespace(dashboard_output_format="columnar", device="cpu")
+    assert (
+        generator._resolve_feature_acts_output_device(
+            total_prompt_count=2490, feature_count=1024
+        )
+        == "cpu"
+    )
+
+    generator.cfg = SimpleNamespace(dashboard_output_format="columnar", device="cuda")
+    over_budget = generator._resolve_feature_acts_output_device(
+        total_prompt_count=2490, feature_count=1_000_000
+    )
+    assert over_budget == "cpu"
+    if torch.cuda.is_available():
+        assert (
+            generator._resolve_feature_acts_output_device(
+                total_prompt_count=2490, feature_count=1024
+            )
+            == "cuda"
+        )

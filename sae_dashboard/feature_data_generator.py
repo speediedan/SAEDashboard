@@ -84,6 +84,12 @@ class PromptTokenMinibatch:
     cache_key: str | None = None
 
 
+# Retention budget for keeping the padded per-batch feature activations on the model
+# device in the columnar path (bf16: ~2.6 GiB at Monology 4096x256, ~3.25 GiB at RTE
+# 2048x128); larger shapes fall back to the previous CPU staging.
+FEATURE_ACTS_DEVICE_RETENTION_MAX_BYTES = 4 * 1024**3
+
+
 class FeatureDataGenerator:
     def __init__(
         self,
@@ -96,6 +102,7 @@ class FeatureDataGenerator:
         self.model = model
         self.encoder = encoder
         self.full_sequence_length = int(tokens.shape[1])
+        self._feature_acts_output_device: str = "cpu"
         self.token_minibatches = self.batch_tokens(tokens)
         if self.cfg.cache_dir is not None:
             self._prepare_activation_cache_dir(tokens)
@@ -118,12 +125,35 @@ class FeatureDataGenerator:
         self,
         feature_acts_for_output: Tensor,
     ) -> Tensor:
-        return feature_acts_for_output.to(device="cpu", dtype=torch.bfloat16)
+        return feature_acts_for_output.to(
+            device=getattr(self, "_feature_acts_output_device", "cpu"),
+            dtype=torch.bfloat16,
+        )
+
+    def _resolve_feature_acts_output_device(
+        self, *, total_prompt_count: int, feature_count: int
+    ) -> str:
+        """Keep the padded per-batch feature activations on the model device for the
+        columnar path when they fit the retention budget, instead of staging them to
+        host and re-uploading for device-side packaging. The bfloat16 cast is
+        deterministic round-to-nearest-even on both devices, so retained values are
+        identical to the previous CPU-staged tensor."""
+        if getattr(self.cfg, "dashboard_output_format", "") != "columnar":
+            return "cpu"
+        device = str(self.cfg.device)
+        if not device.startswith("cuda") or not torch.cuda.is_available():
+            return "cpu"
+        acts_bytes = total_prompt_count * self.full_sequence_length * feature_count * 2
+        if acts_bytes > FEATURE_ACTS_DEVICE_RETENTION_MAX_BYTES:
+            return "cpu"
+        return device
 
     def _uses_full_feature_encode_path(self) -> bool:
-        return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"] or isinstance(
-            self.encoder.activation_fn, TopK
-        )
+        return self.encoder.cfg.architecture() in [
+            "topk",
+            "batchtopk",
+            "temporal",
+        ] or isinstance(self.encoder.activation_fn, TopK)
 
     def _create_corrcoef_neurons(
         self,
@@ -187,54 +217,6 @@ class FeatureDataGenerator:
             _max_optional(peak_cuda_allocated_gib, current_cuda_allocated_gib),
             _max_optional(peak_cuda_reserved_gib, current_cuda_reserved_gib),
         )
-
-    @staticmethod
-    def _activation_cache_manifest_path(cache_dir: Path) -> Path:
-        return cache_dir / "activation_cache_layout.json"
-
-    @staticmethod
-    def _build_activation_cache_layout_key(tokens: Tensor) -> str:
-        digest = hashlib.sha1()
-        token_array = tokens.detach().to("cpu").contiguous().numpy()
-        digest.update(np.asarray(token_array.shape, dtype=np.int32).tobytes())
-        digest.update(str(token_array.dtype).encode("utf-8"))
-        digest.update(token_array.tobytes())
-        return digest.hexdigest()[:16]
-
-    def _expected_activation_cache_manifest(self, tokens: Tensor) -> dict[str, Any]:
-        return {
-            "cache_version": 1,
-            "layout_key": self._build_activation_cache_layout_key(tokens),
-            "token_shape": list(tokens.shape),
-            "token_dtype": str(tokens.dtype),
-            "prompt_minibatch_count": len(self.token_minibatches),
-        }
-
-    def _prepare_activation_cache_dir(self, tokens: Tensor) -> None:
-        cache_dir = self.cfg.cache_dir
-        if cache_dir is None:
-            return
-
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = self._activation_cache_manifest_path(cache_dir)
-        expected_manifest = self._expected_activation_cache_manifest(tokens)
-        existing_manifest: dict[str, Any] | None = None
-
-        if manifest_path.is_file():
-            try:
-                existing_manifest = json.loads(
-                    manifest_path.read_text(encoding="utf-8")
-                )
-            except json.JSONDecodeError:
-                existing_manifest = None
-
-        if existing_manifest != expected_manifest:
-            for stale_cache_path in cache_dir.glob("model_activations_*.pt"):
-                stale_cache_path.unlink()
-            manifest_path.write_text(
-                json.dumps(expected_manifest, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
 
     @torch.inference_mode()
     def batch_tokens(
@@ -481,6 +463,10 @@ class FeatureDataGenerator:
         total_prompt_count = sum(
             int(minibatch.tokens.shape[0]) for minibatch in self.token_minibatches
         )
+        self._feature_acts_output_device = self._resolve_feature_acts_output_device(
+            total_prompt_count=total_prompt_count,
+            feature_count=len(feature_indices),
+        )
         peak_rss_gib, peak_cuda_allocated_gib, peak_cuda_reserved_gib = (
             self._update_resource_peaks(
                 None,
@@ -571,7 +557,10 @@ class FeatureDataGenerator:
                 if self.cfg.ignore_high_activation_norm_multiple is not None:
                     norms_bs = primary_acts.norm(dim=-1)
                     median_norm = norms_bs.median()
-                    high_norm_mask = norms_bs > median_norm * self.cfg.ignore_high_activation_norm_multiple
+                    high_norm_mask = (
+                        norms_bs
+                        > median_norm * self.cfg.ignore_high_activation_norm_multiple
+                    )
                     if high_norm_mask.any():
                         feature_acts = feature_acts.masked_fill(
                             high_norm_mask.unsqueeze(-1).to(feature_acts.device), 0
