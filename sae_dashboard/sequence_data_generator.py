@@ -584,6 +584,7 @@ class SequenceCoordinateTable:
         bin_contains: np.ndarray,
         decode_token_ids: Callable[[list[int]], list[str]],
         pad_token_id: int | None,
+        decode_token_ids_array: "Callable[[np.ndarray], np.ndarray] | None" = None,
     ) -> Any:
         """Shared vectorized activation-row RecordBatch core.
 
@@ -638,16 +639,30 @@ class SequenceCoordinateTable:
         np.cumsum(lengths, out=offsets[1:])
 
         if flat_token_ids.size:
-            unique_ids, inverse_indices = np.unique(flat_token_ids, return_inverse=True)
-            decoded_tokens = decode_token_ids(
-                [int(token_id) for token_id in unique_ids.tolist()]
-            )
-            if len(decoded_tokens) != len(unique_ids):
-                raise ValueError(
-                    f"Token decoder returned {len(decoded_tokens)} tokens for "
-                    f"{len(unique_ids)} ids."
+            if decode_token_ids_array is not None:
+                # array-level decoder (e.g. a persistent vocab cache): O(n) gathers with
+                # no per-batch sort over the concatenated ids
+                flat_token_strings = decode_token_ids_array(flat_token_ids)
+                if len(flat_token_strings) != flat_token_ids.size:
+                    raise ValueError(
+                        f"Token array decoder returned {len(flat_token_strings)} tokens "
+                        f"for {flat_token_ids.size} ids."
+                    )
+            else:
+                unique_ids, inverse_indices = np.unique(
+                    flat_token_ids, return_inverse=True
                 )
-            flat_token_strings = np.array(decoded_tokens, dtype=object)[inverse_indices]
+                decoded_tokens = decode_token_ids(
+                    [int(token_id) for token_id in unique_ids.tolist()]
+                )
+                if len(decoded_tokens) != len(unique_ids):
+                    raise ValueError(
+                        f"Token decoder returned {len(decoded_tokens)} tokens for "
+                        f"{len(unique_ids)} ids."
+                    )
+                flat_token_strings = np.array(decoded_tokens, dtype=object)[
+                    inverse_indices
+                ]
         else:
             flat_token_strings = np.array([], dtype=object)
 
@@ -717,6 +732,7 @@ class SequenceCoordinateTable:
         decode_token_ids: Callable[[list[int]], list[str]],
         *,
         pad_token_id: int | None = None,
+        decode_token_ids_array: "Callable[[np.ndarray], np.ndarray] | None" = None,
     ) -> list[Any]:
         """Build activation-row RecordBatches for a whole feature batch in one pass.
 
@@ -780,6 +796,7 @@ class SequenceCoordinateTable:
             bin_contains=bin_contains,
             decode_token_ids=decode_token_ids,
             pad_token_id=pad_token_id,
+            decode_token_ids_array=decode_token_ids_array,
         )
         slices: list[Any] = []
         offset = 0

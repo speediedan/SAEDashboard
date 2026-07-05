@@ -195,8 +195,11 @@ class SaeVisRunner:
         self.device = self.cfg.device
         self.dtype = DTYPES[self.cfg.dtype]
         # token_id -> token string memoization for activation-row detokenization; the
-        # mapping is model-constant for a runner instance.
+        # mapping is model-constant for a runner instance. The array pair supports
+        # O(n) vocab-array gathers for whole-feature-batch flat id vectors.
         self._token_str_cache: dict[int, str] = {}
+        self._token_string_vocab: np.ndarray = np.empty(0, dtype=object)
+        self._token_string_known: np.ndarray = np.zeros(0, dtype=bool)
         if self.cfg.cache_dir is not None:
             self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg.sequence_replay_artifact_dir is not None:
@@ -298,6 +301,34 @@ class SaeVisRunner:
         if isinstance(tokens, str):
             return [tokens]
         return [str(token) for token in tokens]
+
+    def _decode_token_ids_array_cached(
+        self, model: HookedSAETransformer, flat_token_ids: "np.ndarray"
+    ) -> "np.ndarray":
+        """Vocab-array variant of the memoized detokenizer for flat id vectors.
+
+        Ids never seen before are decoded once (unique only over the unknown subset,
+        which is empty in steady state); known ids resolve through O(n) array gathers
+        with no per-batch sort."""
+        if flat_token_ids.size == 0:
+            return np.empty(0, dtype=object)
+        max_id = int(flat_token_ids.max())
+        if len(self._token_string_vocab) <= max_id:
+            grown_vocab = np.empty(max_id + 1, dtype=object)
+            grown_vocab[: len(self._token_string_vocab)] = self._token_string_vocab
+            grown_known = np.zeros(max_id + 1, dtype=bool)
+            grown_known[: len(self._token_string_known)] = self._token_string_known
+            self._token_string_vocab = grown_vocab
+            self._token_string_known = grown_known
+        unknown_mask = ~self._token_string_known[flat_token_ids]
+        if unknown_mask.any():
+            missing_ids = np.unique(flat_token_ids[unknown_mask])
+            decoded = self._decode_token_ids_cached(
+                model, [int(token_id) for token_id in missing_ids.tolist()]
+            )
+            self._token_string_vocab[missing_ids] = np.array(decoded, dtype=object)
+            self._token_string_known[missing_ids] = True
+        return self._token_string_vocab[flat_token_ids]
 
     def _decode_token_ids_cached(
         self, model: HookedSAETransformer, token_ids: list[int]
@@ -547,6 +578,11 @@ class SaeVisRunner:
                     ],
                     decode_token_ids,
                     pad_token_id=pad_token_id,
+                    decode_token_ids_array=(
+                        lambda flat_ids: self._decode_token_ids_array_cached(
+                            model, flat_ids
+                        )
+                    ),
                 )
                 for activation_row_batch in batched_activation_rows:
                     if self.cfg.columnar_emit_activation_rows:

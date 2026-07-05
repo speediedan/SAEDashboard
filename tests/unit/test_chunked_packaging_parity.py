@@ -551,3 +551,51 @@ def test_resolve_feature_acts_output_device_decision() -> None:
             )
             == "cuda"
         )
+
+
+def test_decode_token_ids_array_cached_matches_list_decoder() -> None:
+    runner = SaeVisRunner(build_sae_vis_cfg())
+    model: Any = _FakeModel()
+
+    flat_ids = np.array([5, 3, 5, 9, 262143, 3], dtype=np.int64)
+    first = runner._decode_token_ids_array_cached(model, flat_ids)
+    assert list(first) == ["tok5", "tok3", "tok5", "tok9", "tok262143", "tok3"]
+    decoded_after_first = model.tokenizer.ids_decoded
+
+    # steady state: all ids known, no further tokenizer calls
+    second = runner._decode_token_ids_array_cached(model, flat_ids[::-1].copy())
+    assert list(second) == list(first[::-1])
+    assert model.tokenizer.ids_decoded == decoded_after_first
+
+    assert (
+        list(runner._decode_token_ids_array_cached(model, np.empty(0, dtype=np.int64)))
+        == []
+    )
+
+
+def test_activation_row_batches_with_array_decoder_match_list_decoder() -> None:
+    from sae_dashboard.sequence_data_generator import SequenceCoordinateTable
+
+    tables = [(3, _coordinate_table_fixture()), (9, _coordinate_table_fixture())]
+    cache: dict[int, str] = {}
+
+    def decode(token_ids: list[int]) -> list[str]:
+        for token_id in token_ids:
+            cache.setdefault(token_id, f"tok{token_id}")
+        return [cache[token_id] for token_id in token_ids]
+
+    def decode_array(flat_ids: np.ndarray) -> np.ndarray:
+        return np.array(decode([int(t) for t in flat_ids.tolist()]), dtype=object)
+
+    reference = (
+        SequenceCoordinateTable.activation_row_arrow_record_batches_for_features(
+            tables, decode, pad_token_id=0
+        )
+    )
+    via_array = (
+        SequenceCoordinateTable.activation_row_arrow_record_batches_for_features(
+            tables, decode, pad_token_id=0, decode_token_ids_array=decode_array
+        )
+    )
+    for ref_batch, arr_batch in zip(reference, via_array):
+        assert arr_batch.to_pydict() == ref_batch.to_pydict()
