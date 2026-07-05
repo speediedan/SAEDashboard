@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
@@ -22,7 +22,9 @@ def is_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> bool:
 
 def warn_if_deprecated_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> None:
     if is_legacy_dashboard_path(cfg):
-        warnings.warn(LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
+        warnings.warn(
+            LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2
+        )
 
 
 @dataclass
@@ -155,6 +157,11 @@ class NeuronpediaRunnerConfig:
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = True
     columnar_emit_activation_copy_rows: bool = False
+    # Overlap each batch's CPU packaging tail and artifact writes with the next batch's
+    # forward/encode via a single background writer (columnar mode only). Batch
+    # completion markers (per-batch root manifests) are still written in order, so
+    # batch-level resume — including across GPUs — is unchanged.
+    overlap_batch_packaging: bool = False
     columnar_activation_copy_model_id: Optional[str] = None
     torch_profile: bool = False
     torch_profile_dir: Optional[str] = None

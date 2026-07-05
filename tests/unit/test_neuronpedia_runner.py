@@ -1235,6 +1235,9 @@ def test_run_feature_batch_with_optional_profile_writes_trace(
         def __init__(self, cfg) -> None:
             self.cfg = cfg
 
+        def adopt_token_string_caches(self, other) -> None:
+            del other
+
         def run(self, encoder, model, tokens):
             assert encoder is runner.sae
             assert model is runner.model

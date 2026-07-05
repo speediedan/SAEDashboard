@@ -413,3 +413,101 @@ def test_SaeVisRunner_columnar_output_writes_importer_compatible_bundle(
     }
     assert f"sequence_row_{artifact_format}_stream_write" in stage_names
     assert "activation_copy_row_packaging" in stage_names
+
+
+def test_SaeVisRunner_deferred_columnar_write_matches_immediate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture_perf_events(monkeypatch)
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.FeatureDataGeneratorFactory.create",
+        lambda cfg, model, encoder, tokens: _FakeFeatureDataGenerator(),
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.SequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+
+    def _make_cfg(artifact_dir: Path, defer: bool) -> SaeVisConfig:
+        return SaeVisConfig(
+            hook_point="blocks.0.hook_resid_pre",
+            features=[0],
+            minibatch_size_features=1,
+            minibatch_size_tokens=1,
+            quantile_feature_batch_size=1,
+            device="cpu",
+            dtype="float32",
+            ignore_tokens={0},
+            log_performance=True,
+            dashboard_output_format="columnar",
+            columnar_defer_batch_write=defer,
+            columnar_artifact_dir=artifact_dir,
+            columnar_artifact_format="parquet",
+            columnar_emit_sequence_rows=True,
+            columnar_emit_activation_rows=True,
+            columnar_emit_activation_copy_rows=True,
+            columnar_activation_copy_model_id="model-a",
+            columnar_activation_copy_layer="9-source-a",
+            columnar_activation_copy_creator_id="creator-a",
+            columnar_activation_copy_created_at="2026-01-02T03:04:05",
+            columnar_activation_copy_id_prefix="act",
+            feature_statistics_backend="arrow",
+            logits_histogram_backend="arrow",
+            activation_histogram_backend="torch",
+        )
+
+    def _run(cfg: SaeVisConfig) -> SaeVisColumnarData:
+        return SaeVisRunner(cfg).run(
+            encoder=cast(SAE[Any], _FakeEncoder()),
+            model=cast(
+                HookedSAETransformer,
+                SimpleNamespace(
+                    W_U=torch.tensor([[1.0]], dtype=torch.float32),
+                    tokenizer=SimpleNamespace(
+                        convert_ids_to_tokens=lambda token_ids: [
+                            f"tok_{token_id}" for token_id in token_ids
+                        ],
+                        pad_token_id=0,
+                    ),
+                ),
+            ),
+            tokens=torch.tensor([[7, 0]], dtype=torch.long),
+        )
+
+    immediate = _run(_make_cfg(tmp_path / "immediate.columnar", defer=False))
+    assert immediate.pending_finalize is None
+    assert immediate.manifest_path.is_file()
+
+    deferred = _run(_make_cfg(tmp_path / "deferred.columnar", defer=True))
+    assert deferred.pending_finalize is not None
+    assert deferred.batches == []
+    # nothing is on disk until finalize runs — the resume completeness marker
+    # (the root manifest) must not exist yet
+    assert not deferred.manifest_path.exists()
+
+    finalized = deferred.pending_finalize()
+    assert finalized.manifest_path.is_file()
+    assert finalized.batches[0].row_counts == immediate.batches[0].row_counts
+
+    immediate_manifest = json.loads(immediate.manifest_path.read_text(encoding="utf-8"))
+    finalized_manifest = json.loads(finalized.manifest_path.read_text(encoding="utf-8"))
+    assert finalized_manifest == immediate_manifest
+
+    immediate_batch_manifest = json.loads(
+        (immediate.artifact_dir / "feature_batch_0" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    finalized_batch_manifest = json.loads(
+        (finalized.artifact_dir / "feature_batch_0" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert finalized_batch_manifest == immediate_batch_manifest

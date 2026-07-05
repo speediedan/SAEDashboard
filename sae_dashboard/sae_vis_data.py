@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 from dataclasses_json import dataclass_json
 from rich import print as rprint
@@ -39,6 +39,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
     activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
     defer_component_construction="Whether columnar/dashboard callers should avoid rebuilding the legacy nested component graph when not needed.",
+    columnar_defer_batch_write="When set, SaeVisRunner.run returns SaeVisColumnarData with a pending_finalize callable that performs the CPU-side activation-row builds and all artifact/manifest writes when invoked, enabling callers to overlap them with the next batch's forward/encode.",
     sequence_selection_backend="Candidate-selection backend for sequence packaging.",
     dashboard_output_format="Output mode for dashboard generation: legacy JSON or importer-compatible columnar bundles.",
     columnar_artifact_dir="Root directory for columnar bundle output when dashboard_output_format is columnar.",
@@ -109,6 +110,7 @@ class SaeVisConfig:
     logits_histogram_backend: Literal["object", "arrow"] = "object"
     activation_histogram_backend: Literal["torch"] = "torch"
     defer_component_construction: bool = False
+    columnar_defer_batch_write: bool = False
     sequence_selection_backend: Literal["legacy", "columnar_gpu"] = "legacy"
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
@@ -176,6 +178,10 @@ class SaeVisColumnarData:
     artifact_dir: Path
     manifest_path: Path
     batches: list[SaeVisColumnarBatch]
+    # When columnar_defer_batch_write is enabled, no artifacts have been written yet and
+    # `batches` is empty; invoking pending_finalize performs the deferred CPU packaging
+    # and all writes (root manifest last) and returns the completed SaeVisColumnarData.
+    pending_finalize: "Callable[[], SaeVisColumnarData] | None" = None
 
 
 @dataclass_json

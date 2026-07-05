@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Set, Tuple, cast
@@ -32,9 +34,7 @@ from sae_dashboard.components_config import (
 # from sae_dashboard.data_writing_fns import save_feature_centric_vis
 from sae_dashboard.hook_utils import convert_model_name_tl_to_hf
 from sae_dashboard.layout import SaeVisLayoutConfig
-from sae_dashboard.neuronpedia.legacy import (
-    runner as legacy_runner,
-)
+from sae_dashboard.neuronpedia.legacy import runner as legacy_runner
 from sae_dashboard.neuronpedia.neuronpedia_converter import NeuronpediaConverter
 from sae_dashboard.neuronpedia.neuronpedia_export import (
     NeuronpediaExportConfig,
@@ -140,6 +140,9 @@ class NeuronpediaRunner:
         cfg: NeuronpediaRunnerConfig,
     ):
         self.cfg = cfg
+        self._columnar_write_executor: ThreadPoolExecutor | None = None
+        self._pending_columnar_writes: deque[tuple[int, int, Future]] = deque()
+        self._last_sae_vis_runner: Any | None = None
         warn_if_deprecated_legacy_dashboard_path(cfg)
 
         # Fail fast if Neuronpedia export was requested but required metadata
@@ -474,7 +477,10 @@ class NeuronpediaRunner:
             and self.cfg.prompt_dataset_path == self.cfg.pretokenized_dataset_path
         ):
             self.cfg.prompt_dataset_mode = "load_from_disk"
-        if self.cfg.prompt_dataset_mode in {"load_dataset", "legacy_jsonl"} and self.cfg.prompt_dataset_path:
+        if (
+            self.cfg.prompt_dataset_mode in {"load_dataset", "legacy_jsonl"}
+            and self.cfg.prompt_dataset_path
+        ):
             self.cfg.huggingface_dataset_path = self.cfg.prompt_dataset_path
 
         self._print_configuration()
@@ -646,8 +652,14 @@ class NeuronpediaRunner:
         if self.cfg.use_huggingface:
             run_kwargs["tokenizer"] = self.tokenizer
 
+        sae_vis_runner = SaeVisRunner(feature_vis_config_gpt)
+        sae_vis_runner.adopt_token_string_caches(
+            getattr(self, "_last_sae_vis_runner", None)
+        )
+        self._last_sae_vis_runner = sae_vis_runner
+
         if not self.cfg.torch_profile:
-            return SaeVisRunner(feature_vis_config_gpt).run(**run_kwargs)
+            return sae_vis_runner.run(**run_kwargs)
 
         activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
@@ -663,7 +675,7 @@ class NeuronpediaRunner:
             profile_memory=True,
             with_stack=False,
         ) as profiler:
-            feature_data = SaeVisRunner(feature_vis_config_gpt).run(**run_kwargs)
+            feature_data = sae_vis_runner.run(**run_kwargs)
         profiler.export_chrome_trace(str(trace_path))
         log_perf_event(
             "torch_profile_trace", batch=feature_batch_count, path=trace_path
@@ -699,14 +711,19 @@ class NeuronpediaRunner:
         if not dataset_path:
             dataset_path = self.cfg.huggingface_dataset_path
         prompt_dataset_mode = self.cfg.prompt_dataset_mode
-        if self.cfg.pretokenized_dataset_path and dataset_path == self.cfg.pretokenized_dataset_path:
+        if (
+            self.cfg.pretokenized_dataset_path
+            and dataset_path == self.cfg.pretokenized_dataset_path
+        ):
             prompt_dataset_mode = "load_from_disk"
         return PromptDatasetConfig(
             dataset_path=dataset_path,
             mode=cast(Any, prompt_dataset_mode),
-            dataset_name=self.cfg.prompt_dataset_name or self.cfg.huggingface_dataset_config_name,
+            dataset_name=self.cfg.prompt_dataset_name
+            or self.cfg.huggingface_dataset_config_name,
             split=self.cfg.prompt_dataset_split or self.cfg.huggingface_dataset_split,
-            text_field=self.cfg.prompt_dataset_text_field or self.cfg.huggingface_dataset_text_field,
+            text_field=self.cfg.prompt_dataset_text_field
+            or self.cfg.huggingface_dataset_text_field,
             data_files=self.cfg.prompt_dataset_data_files or None,
             data_dir=self.cfg.prompt_dataset_data_dir,
             streaming=self.cfg.dataset_streaming,
@@ -947,7 +964,9 @@ class NeuronpediaRunner:
 
         hook_name = getattr(self, "hook_name", "") or ""
         unsafe_markers = ("hook_pre", "hook_post", "hook_z")
-        matched_marker = next((marker for marker in unsafe_markers if marker in hook_name), None)
+        matched_marker = next(
+            (marker for marker in unsafe_markers if marker in hook_name), None
+        )
         if matched_marker is not None:
             print(
                 f"free_unused_model_layers: skipping trim — hook point '{hook_name}' contains '{matched_marker}', "
@@ -1086,10 +1105,14 @@ class NeuronpediaRunner:
             return default_path
         return None
 
-    def _prepare_shared_tokens_from_prompt_dataset(self, target_tokens_file: Path) -> Path:
+    def _prepare_shared_tokens_from_prompt_dataset(
+        self, target_tokens_file: Path
+    ) -> Path:
         materialization = getattr(self, "_prompt_dataset_materialization", None)
         if not isinstance(materialization, PromptDatasetMaterialization):
-            raise ValueError("A materialized prompt dataset is required to generate shared token sidecars.")
+            raise ValueError(
+                "A materialized prompt dataset is required to generate shared token sidecars."
+            )
         if not materialization.is_tokenized or materialization.token_column is None:
             raise ValueError(
                 "Shared prompt token sidecars require a tokenized prompt dataset with an input_ids or tokens column."
@@ -1216,7 +1239,8 @@ class NeuronpediaRunner:
         self, *, require_effective_lengths: bool = False
     ) -> Path | None:
         if getattr(self, "_prompt_dataset_materialization", None) is None and (
-            self.cfg.pretokenized_dataset_path or self.cfg.prompt_dataset_mode in {"load_from_disk", "legacy_jsonl"}
+            self.cfg.pretokenized_dataset_path
+            or self.cfg.prompt_dataset_mode in {"load_from_disk", "legacy_jsonl"}
         ):
             self._materialize_prompt_dataset()
 
@@ -1231,7 +1255,10 @@ class NeuronpediaRunner:
             return source
 
         materialization = getattr(self, "_prompt_dataset_materialization", None)
-        if isinstance(materialization, PromptDatasetMaterialization) and materialization.is_tokenized:
+        if (
+            isinstance(materialization, PromptDatasetMaterialization)
+            and materialization.is_tokenized
+        ):
             return self._prepare_shared_tokens_from_prompt_dataset(source)
 
         candidate_paths = (
@@ -1367,7 +1394,9 @@ class NeuronpediaRunner:
 
         bucket_entries: list[dict[str, Any]] = []
         lower_exclusive = 0
-        for bucket_ceiling in self._normalized_prompt_bucket_ceilings(effective_lengths):
+        for bucket_ceiling in self._normalized_prompt_bucket_ceilings(
+            effective_lengths
+        ):
             bucket_prompt_count = sum(
                 1
                 for effective_length in effective_lengths
@@ -1756,6 +1785,75 @@ class NeuronpediaRunner:
         self._log_token_snapshot("after_add_prefix_suffix", tokens)
         return tokens
 
+    def _log_columnar_output_summary(
+        self,
+        feature_batch_count: int,
+        feature_count: int,
+        feature_data: "SaeVisColumnarData",
+    ) -> None:
+        if self.cfg.log_performance:
+            log_perf_event(
+                "columnar_output_summary",
+                batch=feature_batch_count,
+                feature_count=feature_count,
+                artifact_dir=str(feature_data.artifact_dir),
+                manifest_path=str(feature_data.manifest_path),
+                row_counts={
+                    batch.feature_batch_index: batch.row_counts
+                    for batch in feature_data.batches
+                },
+            )
+        print(f"Columnar output written to {feature_data.manifest_path}")
+
+    def _enqueue_columnar_finalize(
+        self,
+        feature_batch_count: int,
+        feature_count: int,
+        pending_finalize: Any,
+    ) -> None:
+        """Submit a deferred columnar batch write to the single ordered writer.
+
+        In-flight writes are bounded to one, so per-batch completion markers (each
+        batch's root manifest, written last inside finalize) land in batch order and a
+        crash loses at most the in-flight batch — preserving the batch-level resume
+        granularity the pipeline relies on, including across GPUs."""
+        if self._columnar_write_executor is None:
+            self._columnar_write_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="columnar-batch-write"
+            )
+        while len(self._pending_columnar_writes) >= 1:
+            self._drain_oldest_columnar_write()
+        future = self._columnar_write_executor.submit(pending_finalize)
+        self._pending_columnar_writes.append(
+            (feature_batch_count, feature_count, future)
+        )
+
+    def _drain_oldest_columnar_write(self) -> None:
+        feature_batch_count, feature_count, future = (
+            self._pending_columnar_writes.popleft()
+        )
+        try:
+            feature_data = future.result()
+        except Exception:
+            # Do not let later batches write completion markers past a failed batch;
+            # cancel anything queued and surface the failure.
+            for _, _, pending_future in self._pending_columnar_writes:
+                pending_future.cancel()
+            self._pending_columnar_writes.clear()
+            raise
+        self._log_columnar_output_summary(
+            feature_batch_count, feature_count, feature_data
+        )
+
+    def _drain_columnar_writes(self) -> None:
+        try:
+            while self._pending_columnar_writes:
+                self._drain_oldest_columnar_write()
+        finally:
+            if self._columnar_write_executor is not None:
+                self._columnar_write_executor.shutdown(wait=True)
+                self._columnar_write_executor = None
+
     def get_feature_batches(self):
         # divide into batches
         feature_idx = torch.tensor(self.target_feature_indexes)
@@ -2004,6 +2102,10 @@ class NeuronpediaRunner:
                         defer_component_construction=self.cfg.defer_component_construction,
                         sequence_selection_backend=self.cfg.sequence_selection_backend,
                         dashboard_output_format=self.cfg.dashboard_output_format,
+                        columnar_defer_batch_write=(
+                            self.cfg.dashboard_output_format == "columnar"
+                            and self.cfg.overlap_batch_packaging
+                        ),
                         columnar_artifact_dir=output_root,
                         columnar_artifact_format=self.cfg.columnar_artifact_format,
                         columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
@@ -2035,7 +2137,9 @@ class NeuronpediaRunner:
                         tokens,
                         feature_batch_count,
                     )
-                    self._log_resource_snapshot(f"after_feature_run_{feature_batch_count}")
+                    self._log_resource_snapshot(
+                        f"after_feature_run_{feature_batch_count}"
+                    )
 
                     converter_input_artifact = None
                     if self.cfg.dashboard_output_format != "columnar":
@@ -2051,19 +2155,18 @@ class NeuronpediaRunner:
                             raise TypeError(
                                 "Columnar dashboard output requires SaeVisRunner to return SaeVisColumnarData."
                             )
-                        if self.cfg.log_performance:
-                            log_perf_event(
-                                "columnar_output_summary",
-                                batch=feature_batch_count,
-                                feature_count=len(features_to_process),
-                                artifact_dir=str(feature_data.artifact_dir),
-                                manifest_path=str(feature_data.manifest_path),
-                                row_counts={
-                                    batch.feature_batch_index: batch.row_counts
-                                    for batch in feature_data.batches
-                                },
+                        if feature_data.pending_finalize is not None:
+                            self._enqueue_columnar_finalize(
+                                feature_batch_count,
+                                len(features_to_process),
+                                feature_data.pending_finalize,
                             )
-                        print(f"Columnar output written to {feature_data.manifest_path}")
+                        else:
+                            self._log_columnar_output_summary(
+                                feature_batch_count,
+                                len(features_to_process),
+                                feature_data,
+                            )
                     else:
                         with timed_stage(
                             self.cfg.log_performance,
@@ -2091,7 +2194,9 @@ class NeuronpediaRunner:
                                 path=output_file,
                                 output_bytes=output_bytes,
                                 wall_s=write_wall_s,
-                                output_mib_per_s=output_bytes / (1024**2) / write_wall_s,
+                                output_mib_per_s=output_bytes
+                                / (1024**2)
+                                / write_wall_s,
                                 process_io_delta=io_delta(write_start_io, write_end_io),
                             )
                             if converter_input_artifact is not None:
@@ -2127,7 +2232,10 @@ class NeuronpediaRunner:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     self._release_unused_host_memory()
-                    self._log_resource_snapshot(f"post_batch_cleanup_{feature_batch_count}")
+                    self._log_resource_snapshot(
+                        f"post_batch_cleanup_{feature_batch_count}"
+                    )
+                self._drain_columnar_writes()
         if self.cfg.use_wandb:
             wandb.sdk.finish()
 
@@ -2149,9 +2257,7 @@ class NeuronpediaRunner:
         if missing:
             raise ValueError(
                 "--output-neuronpedia-exports requires all of: "
-                + ", ".join(
-                    f"--{name.replace('_', '-')}" for name in missing
-                )
+                + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
             )
         if not self.cfg.np_set_name:
             raise ValueError(
@@ -2191,9 +2297,7 @@ class NeuronpediaRunner:
             hf_weights_repo_id=(
                 self.cfg.neuronpedia_hf_weights_repo_id or self.cfg.sae_set
             ),
-            hf_weights_path=(
-                self.cfg.neuronpedia_hf_weights_path or self.cfg.sae_path
-            ),
+            hf_weights_path=(self.cfg.neuronpedia_hf_weights_path or self.cfg.sae_path),
             hook_point=derive_hook_point_from_hook_name(str(self.hook_name)),
             layer_num=self.layer,
             prompts_huggingface_dataset_path=self.cfg.huggingface_dataset_path,
@@ -2247,9 +2351,21 @@ def main():
             "compatibility."
         ),
     )
-    parser.add_argument("--dataset-config-name", "--prompt-dataset-name", dest="dataset_config_name", default=None)
-    parser.add_argument("--dataset-split", "--prompt-dataset-split", dest="dataset_split", default=None)
-    parser.add_argument("--dataset-text-field", "--prompt-dataset-text-field", dest="dataset_text_field", default=None)
+    parser.add_argument(
+        "--dataset-config-name",
+        "--prompt-dataset-name",
+        dest="dataset_config_name",
+        default=None,
+    )
+    parser.add_argument(
+        "--dataset-split", "--prompt-dataset-split", dest="dataset_split", default=None
+    )
+    parser.add_argument(
+        "--dataset-text-field",
+        "--prompt-dataset-text-field",
+        dest="dataset_text_field",
+        default=None,
+    )
     parser.add_argument("--prompt-dataset-data-files", nargs="+", default=None)
     parser.add_argument("--prompt-dataset-data-dir", default=None)
     parser.add_argument("--prompt-dataset-metadata-path", default=None)
@@ -2558,6 +2674,16 @@ def main():
         help="Optional modelId override used when emitting activation_copy_rows.",
     )
     parser.add_argument(
+        "--overlap-batch-packaging",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Overlap each columnar batch's CPU packaging tail and artifact writes with "
+            "the next batch's forward/encode (single ordered background writer; "
+            "batch-level resume semantics unchanged)."
+        ),
+    )
+    parser.add_argument(
         "--torch-profile",
         action="store_true",
         help="Capture a torch.profiler Chrome trace for each generated batch.",
@@ -2772,18 +2898,13 @@ def main():
         "--neuronpedia-hf-weights-repo-id",
         type=str,
         default=None,
-        help=(
-            "HuggingFace repo ID for the SAE weights. Defaults to --sae-set."
-        ),
+        help=("HuggingFace repo ID for the SAE weights. Defaults to --sae-set."),
     )
     parser.add_argument(
         "--neuronpedia-hf-weights-path",
         type=str,
         default=None,
-        help=(
-            "HuggingFace path to the SAE weights folder. Defaults to "
-            "--sae-path."
-        ),
+        help=("HuggingFace path to the SAE weights folder. Defaults to " "--sae-path."),
     )
     parser.add_argument(
         "--neuronpedia-zero-out-bos-token",
@@ -2798,7 +2919,9 @@ def main():
     args = parser.parse_args()
 
     if args.dataset_path is None and args.pretokenized_dataset_path is None:
-        parser.error("Provide --dataset-path/--prompt-dataset-path or --pretokenized-dataset-path.")
+        parser.error(
+            "Provide --dataset-path/--prompt-dataset-path or --pretokenized-dataset-path."
+        )
 
     prompt_bucket_ceilings: tuple[int, ...] = ()
     if args.prompt_bucket_ceilings:
@@ -2880,6 +3003,7 @@ def main():
         columnar_artifact_format=args.columnar_artifact_format,
         columnar_emit_sequence_rows=args.columnar_emit_sequence_rows,
         columnar_emit_activation_rows=args.columnar_emit_activation_rows,
+        overlap_batch_packaging=args.overlap_batch_packaging,
         columnar_emit_activation_copy_rows=args.columnar_emit_activation_copy_rows,
         columnar_activation_copy_model_id=args.columnar_activation_copy_model_id,
         torch_profile=args.torch_profile,

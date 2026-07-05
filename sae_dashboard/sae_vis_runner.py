@@ -5,9 +5,10 @@ import math
 import random
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Union, cast
+from typing import Any, Callable, Iterable, List, Union, cast
 
 import einops
 import numpy as np
@@ -189,6 +190,17 @@ class FeatureDataGeneratorFactory:
         )
 
 
+@dataclass
+class _DeferredColumnarBatchWrite:
+    """Placeholder for a columnar feature batch whose CPU packaging tail and artifact
+    writes are deferred; `write()` produces the real SaeVisColumnarBatch."""
+
+    feature_batch_index: int
+    feature_indices: list[int]
+    artifact_dir: Path
+    write: "Callable[[], SaeVisColumnarBatch]"
+
+
 class SaeVisRunner:
     def __init__(self, cfg: SaeVisConfig) -> None:
         self.cfg = cfg
@@ -301,6 +313,15 @@ class SaeVisRunner:
         if isinstance(tokens, str):
             return [tokens]
         return [str(token) for token in tokens]
+
+    def adopt_token_string_caches(self, other: "SaeVisRunner | None") -> None:
+        """Adopt another runner instance's token-string caches so detokenization work
+        (and its one-time unique pass) amortizes across per-batch runner instances."""
+        if other is None:
+            return
+        self._token_str_cache = other._token_str_cache
+        self._token_string_vocab = other._token_string_vocab
+        self._token_string_known = other._token_string_known
 
     def _decode_token_ids_array_cached(
         self, model: HookedSAETransformer, flat_token_ids: "np.ndarray"
@@ -1145,19 +1166,33 @@ class SaeVisRunner:
                 ],
                 pyarrow=pyarrow,
             )
-        return self._write_columnar_batch(
-            feature_batch_index=feature_batch_index,
-            feature_indices=[int(feature) for feature in features],
-            feature_stats_input=feature_stats_input,
-            feature_stats=feature_stats,
-            feature_statistics_table=feature_statistics_table,
-            feature_tables_data=feature_tables_data,
-            logits_histogram_table=logits_histogram_table,
-            activation_histogram_table=activation_histogram_table,
-            logits_table_rows=logits_table_rows,
-            sequence_coordinate_tables=sequence_coordinate_tables,
-            model=model,
-        )
+        write_kwargs: dict[str, Any] = {
+            "feature_batch_index": feature_batch_index,
+            "feature_indices": [int(feature) for feature in features],
+            "feature_stats_input": feature_stats_input,
+            "feature_stats": feature_stats,
+            "feature_statistics_table": feature_statistics_table,
+            "feature_tables_data": feature_tables_data,
+            "logits_histogram_table": logits_histogram_table,
+            "activation_histogram_table": activation_histogram_table,
+            "logits_table_rows": logits_table_rows,
+            "sequence_coordinate_tables": sequence_coordinate_tables,
+            "model": model,
+        }
+        if self.cfg.columnar_defer_batch_write:
+            # Everything captured here is host-resident (Arrow tables, CPU coordinate
+            # tables, Python rows); the deferred callable performs the CPU packaging
+            # tail and all file writes when invoked.
+            return _DeferredColumnarBatchWrite(
+                feature_batch_index=feature_batch_index,
+                feature_indices=[int(feature) for feature in features],
+                artifact_dir=(
+                    (self.cfg.columnar_artifact_dir or Path())
+                    / f"feature_batch_{feature_batch_index}"
+                ),
+                write=lambda: self._write_columnar_batch(**write_kwargs),
+            )
+        return self._write_columnar_batch(**write_kwargs)
 
     def _run_object_feature_batch(
         self,
@@ -1546,6 +1581,36 @@ class SaeVisRunner:
         sae_vis_data.encoder = encoder
 
         if self._columnar_enabled:
+            deferred_batches = [
+                batch
+                for batch in columnar_batches
+                if isinstance(batch, _DeferredColumnarBatchWrite)
+            ]
+            if deferred_batches:
+                if len(deferred_batches) != len(columnar_batches):
+                    raise RuntimeError(
+                        "columnar_defer_batch_write produced a mixed deferred/immediate "
+                        "batch list; this is a bug."
+                    )
+
+                def _finalize() -> SaeVisColumnarData:
+                    written_batches = [batch.write() for batch in deferred_batches]
+                    manifest_path = self._write_columnar_root_manifest(written_batches)
+                    return SaeVisColumnarData(
+                        cfg=self.cfg,
+                        artifact_dir=self.cfg.columnar_artifact_dir or Path(),
+                        manifest_path=manifest_path,
+                        batches=written_batches,
+                    )
+
+                return SaeVisColumnarData(
+                    cfg=self.cfg,
+                    artifact_dir=self.cfg.columnar_artifact_dir or Path(),
+                    manifest_path=(self.cfg.columnar_artifact_dir or Path())
+                    / "manifest.json",
+                    batches=[],
+                    pending_finalize=_finalize,
+                )
             manifest_path = self._write_columnar_root_manifest(columnar_batches)
             return SaeVisColumnarData(
                 cfg=self.cfg,
