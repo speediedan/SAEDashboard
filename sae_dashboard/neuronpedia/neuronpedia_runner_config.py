@@ -1,7 +1,30 @@
-from dataclasses import dataclass
-from typing import List, Optional
+import warnings
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
+DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
+DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT = 4.0
+DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO = 8
+LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE = (
+    "The legacy JSON dashboard path (dashboard_output_format='legacy_json' with "
+    "sequence_selection_backend='legacy') is deprecated and retained only for compatibility/baseline checks. "
+    "Prefer dashboard_output_format='columnar' with sequence_selection_backend='columnar_gpu' for new runs."
+)
+
+
+def is_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> bool:
+    return (
+        cfg.dashboard_output_format == "legacy_json"
+        and cfg.sequence_selection_backend == "legacy"
+    )
+
+
+def warn_if_deprecated_legacy_dashboard_path(cfg: "NeuronpediaRunnerConfig") -> None:
+    if is_legacy_dashboard_path(cfg):
+        warnings.warn(
+            LEGACY_DASHBOARD_PATH_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2
+        )
 
 
 @dataclass
@@ -16,12 +39,48 @@ class NeuronpediaRunnerConfig:
     from_local_sae: bool = False
     sparsity_threshold: int = DEFAULT_SPARSITY_THRESHOLD
     huggingface_dataset_path: str = ""
+    huggingface_dataset_config_name: Optional[str] = None
+    huggingface_dataset_split: Optional[str] = None
+    huggingface_dataset_text_field: Optional[str] = None
+    # Prompt dataset contract:
+    # - load_dataset for Hub datasets and local/file-backed builders
+    # - load_from_disk for local Dataset.save_to_disk() prompt caches
+    # - legacy_jsonl only for deprecated JSONL dashboard exports
+    # pretokenized_dataset_path still implies load_from_disk when reused as prompt_dataset_path.
+    prompt_dataset_mode: str = "load_dataset"
+    prompt_dataset_path: Optional[str] = None
+    prompt_dataset_name: Optional[str] = None
+    prompt_dataset_split: Optional[str] = None
+    prompt_dataset_text_field: Optional[str] = None
+    prompt_dataset_data_files: tuple[str, ...] = field(default_factory=tuple)
+    prompt_dataset_data_dir: Optional[str] = None
+    prompt_dataset_metadata_path: Optional[str] = None
+    prompt_dataset_trust_remote_code: Optional[bool] = None
+    pretokenized_dataset_path: Optional[str] = None
+    # shared_tokens_file points at the staged tokens_*.pt tensor used by all layer runs. If omitted and
+    # pretokenized_dataset_path is set, the runner generates tokens_*.pt, tokens_*.effective_lengths.pt, and
+    # tokens_*.metadata.json beside that pretokenized dataset.
+    shared_tokens_file: Optional[str] = None
+    deduplicate_shared_prompt_tokens: bool = True
+    strict_shared_prompt_count: bool = False
+    # prompt_bucket_schedule_file is an explicit schedule artifact. auto_prompt_bucket_schedule derives the same
+    # scheduling structure directly from the staged effective-length sidecar when no schedule file is supplied.
+    prompt_bucket_schedule_file: Optional[str] = None
+    auto_prompt_bucket_schedule: bool = False
+    # Optional explicit inclusive ceilings for auto prompt bucketing. When left empty, the runner derives ceilings
+    # from prompt-length quantiles in the staged effective-length sidecar.
+    prompt_bucket_ceilings: tuple[int, ...] = field(default_factory=tuple)
+    prompt_bucket_scale_limit: float = DEFAULT_PROMPT_BUCKET_SCALE_LIMIT
+    prompt_primary_acts_scale_limit: float = DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT
+    prompt_batch_size_round_to: int = DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO
+    dataset_streaming: bool = True
 
     # ACTIVATION STORE PARAMETERS
     # token pars
     n_prompts_total: int = 24576
     n_tokens_in_prompt: int = 128
     n_prompts_in_forward_pass: int = 32
+    primary_acts_batch_size: Optional[int] = None
 
     # batching
     n_features_at_a_time: int = 128
@@ -73,6 +132,40 @@ class NeuronpediaRunnerConfig:
     free_unused_model_layers: bool = False
 
     hf_model_path: Optional[str] = None
+    model_wrapper: str = "hooked"
+    bridge_enable_compatibility_mode: bool = True
+    bridge_compatibility_mode_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"no_processing": True}
+    )
+    log_resource_snapshots: bool = False
+    log_hook_aliases: bool = False
+    log_performance: bool = False
+    profile_rolling_substages: bool = False
+    cleanup_each_minibatch: bool = False
+    correlation_accumulation_device: str = "auto"
+    rolling_coefficient_num_threads: Optional[int] = None
+    activation_significance_floor: float = 0.0
+    converter_input_artifact_dir: Optional[str] = None
+    sequence_replay_artifact_dir: Optional[str] = None
+    feature_statistics_backend: str = "arrow"
+    logits_histogram_backend: str = "arrow"
+    activation_histogram_backend: str = "torch"
+    defer_component_construction: bool = False
+    sequence_selection_backend: str = "legacy"
+    dashboard_output_format: str = "legacy_json"
+    columnar_artifact_format: str = "arrow"
+    columnar_emit_sequence_rows: bool = False
+    columnar_emit_activation_rows: bool = True
+    columnar_emit_activation_copy_rows: bool = False
+    # Overlap each batch's CPU packaging tail and artifact writes with the next batch's
+    # forward/encode via a single background writer (columnar mode only). Batch
+    # completion markers (per-batch root manifests) are still written in order, so
+    # batch-level resume — including across GPUs — is unchanged.
+    overlap_batch_packaging: bool = False
+    columnar_activation_copy_model_id: Optional[str] = None
+    torch_profile: bool = False
+    torch_profile_dir: Optional[str] = None
+    use_cached_activations: bool = True
 
     # If true, we load a Transcoder (inherits from SAE) instead of a standard SAE.
     use_transcoder: bool = False

@@ -27,7 +27,6 @@ typer = "^0.12.3"
 sae-lens = "^6.43.0"
 decode-clt = "^0.0.1"
 hf-transfer = "^0.1.9"
-orjson = "^3.11.9"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
@@ -50,6 +49,7 @@ priority = "explicit"
 
 [tool.poetry.scripts]
 neuronpedia-runner = "sae_dashboard.neuronpedia.neuronpedia_runner:main"
+neuronpedia-pretokenize = "sae_dashboard.neuronpedia.prompt_pretokenization:main"
 
 [tool.isort]
 profile = "black"
