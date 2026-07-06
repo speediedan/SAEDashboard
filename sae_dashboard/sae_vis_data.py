@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Literal
 
 from dataclasses_json import dataclass_json
 from rich import print as rprint
@@ -20,9 +20,37 @@ SAE_CONFIG_DICT = dict(
 if not then we use all of `tokens`",
     minibatch_size_tokens="The minibatch size we'll use to split up the full batch during forward passes, to avoid \
 OOMs.",
+    prompt_minibatch_schedule="Optional runner-resolved prompt schedule used to trim shorter prompt buckets during \
+activation capture while preserving the original full-width output layout.",
+    primary_acts_batch_size="Optional internal activation-capture chunk size used inside each token minibatch, to \
+reduce peak model-forward memory without changing the dashboard minibatch shape.",
     minibatch_size_features="The feature minibatch size we'll use to split up our features, to avoid OOM errors",
     seed="Random seed, for reproducibility (e.g. sampling quantiles)",
     verbose="Whether to print out progress messages and other info during the data gathering process",
+    log_performance="Whether to emit per-stage performance timings for dashboard generation",
+    profile_rolling_substages="Whether to emit nested rolling-correlation substage timings and runtime metrics. Disabled by default so normal timing runs keep only the aggregate rolling stage.",
+    cleanup_each_minibatch="Whether to run gc.collect() and torch.cuda.empty_cache() after each activation minibatch. This can reduce peak memory in constrained runs but is disabled by default because it slows benchmark generation.",
+    sequence_replay_artifact_dir="Optional directory where per-feature-batch sequence replay bundles are written for offline get_indices_dict(...) replay.",
+    torch_profile="Whether the Neuronpedia runner should wrap this run in torch.profiler",
+    torch_profile_dir="Optional directory for torch profiler traces",
+    correlation_accumulation_device="Policy for where correlation accumulators should live during packaging.",
+    rolling_coefficient_num_threads="Optional torch intra-op thread count override applied only during rolling correlation updates.",
+    feature_statistics_backend="Backend used to build columnar feature statistics when dashboard_output_format is columnar.",
+    logits_histogram_backend="Backend used to build columnar logits histograms when dashboard_output_format is columnar.",
+    activation_histogram_backend="Backend used to build positive-only activation histograms when dashboard_output_format is columnar.",
+    defer_component_construction="Whether columnar/dashboard callers should avoid rebuilding the legacy nested component graph when not needed.",
+    columnar_defer_batch_write="When set, SaeVisRunner.run returns SaeVisColumnarData with a pending_finalize callable that performs the CPU-side activation-row builds and all artifact/manifest writes when invoked, enabling callers to overlap them with the next batch's forward/encode.",
+    sequence_selection_backend="Candidate-selection backend for sequence packaging.",
+    dashboard_output_format="Output mode for dashboard generation: legacy JSON or importer-compatible columnar bundles.",
+    columnar_artifact_dir="Root directory for columnar bundle output when dashboard_output_format is columnar.",
+    columnar_artifact_format="On-disk format for columnar tables: Arrow IPC or Parquet.",
+    columnar_emit_activation_rows="Whether to emit semantic activation_rows tables alongside sequence_rows in columnar mode.",
+    columnar_emit_activation_copy_rows="Whether to emit Neuronpedia Activation COPY-shaped activation_copy_rows in columnar mode.",
+    columnar_activation_copy_model_id="Optional modelId override for activation_copy_rows payloads.",
+    columnar_activation_copy_layer="Optional Neuronpedia source/layer id embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_creator_id="Optional creator id embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_created_at="Optional createdAt timestamp embedded into activation_copy_rows payloads.",
+    columnar_activation_copy_id_prefix="Prefix used when synthesizing activation_copy_rows ids.",
 )
 
 OUT_OF_RANGE_TOKEN = "<|outofrange|>"
@@ -36,6 +64,8 @@ class SaeVisConfig:
     features: Iterable[int]
     minibatch_size_features: int = 256
     minibatch_size_tokens: int = 64
+    prompt_minibatch_schedule: list[dict[str, Any]] | None = None
+    primary_acts_batch_size: int | None = None
     quantile_feature_batch_size: int = 64
     perform_ablation_experiments: bool = False
     device: str = "cpu"
@@ -67,6 +97,32 @@ class SaeVisConfig:
     # Misc
     seed: int | None = 0
     verbose: bool = False
+    log_performance: bool = False
+    profile_rolling_substages: bool = False
+    cleanup_each_minibatch: bool = False
+    sequence_replay_artifact_dir: Path | None = None
+    torch_profile: bool = False
+    torch_profile_dir: Path | None = None
+    correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
+    rolling_coefficient_num_threads: int | None = None
+    activation_significance_floor: float = 0.0
+    feature_statistics_backend: Literal["object", "arrow"] = "object"
+    logits_histogram_backend: Literal["object", "arrow"] = "object"
+    activation_histogram_backend: Literal["torch"] = "torch"
+    defer_component_construction: bool = False
+    columnar_defer_batch_write: bool = False
+    sequence_selection_backend: Literal["legacy", "columnar_gpu"] = "legacy"
+    dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
+    columnar_artifact_dir: Path | None = None
+    columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
+    columnar_emit_sequence_rows: bool = False
+    columnar_emit_activation_rows: bool = False
+    columnar_emit_activation_copy_rows: bool = False
+    columnar_activation_copy_model_id: str | None = None
+    columnar_activation_copy_layer: str | None = None
+    columnar_activation_copy_creator_id: str | None = None
+    columnar_activation_copy_created_at: str | None = None
+    columnar_activation_copy_id_prefix: str = "columnar-activation"
     cache_dir: Path | None = None  # Path to cache the data
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,6 +161,27 @@ class SaeVisConfig:
         self.prompt_centric_layout.help(
             title="SaeVisLayoutConfig: prompt-centric vis", key=False
         )
+
+
+@dataclass
+class SaeVisColumnarBatch:
+    feature_batch_index: int
+    feature_indices: list[int]
+    artifact_dir: Path
+    manifest_path: Path
+    row_counts: dict[str, int]
+
+
+@dataclass
+class SaeVisColumnarData:
+    cfg: SaeVisConfig
+    artifact_dir: Path
+    manifest_path: Path
+    batches: list[SaeVisColumnarBatch]
+    # When columnar_defer_batch_write is enabled, no artifacts have been written yet and
+    # `batches` is empty; invoking pending_finalize performs the deferred CPU packaging
+    # and all writes (root manifest last) and returns the completed SaeVisColumnarData.
+    pending_finalize: "Callable[[], SaeVisColumnarData] | None" = None
 
 
 @dataclass_json

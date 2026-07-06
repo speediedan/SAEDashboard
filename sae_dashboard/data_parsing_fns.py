@@ -126,6 +126,30 @@ def get_logits_table_data(
     return logits_table_data
 
 
+def get_logits_table_data_batch(
+    logits: Float[Tensor, "feats d_vocab"], n_rows: int  # noqa: F821
+) -> list[LogitsTableData]:
+    """Batched `get_logits_table_data`: one top-k / bottom-k pair over the whole
+    feature batch and a single device transfer instead of per-feature top-k calls."""
+    logits32 = logits.float()
+    k = min(n_rows, int(logits32.shape[-1]))
+    top_values, top_indices = logits32.topk(k=k, dim=-1, largest=True)
+    bottom_values, bottom_indices = logits32.topk(k=k, dim=-1, largest=False)
+    top_values_np = utils.to_numpy(top_values)
+    top_indices_np = utils.to_numpy(top_indices)
+    bottom_values_np = utils.to_numpy(bottom_values)
+    bottom_indices_np = utils.to_numpy(bottom_indices)
+    return [
+        LogitsTableData(
+            bottom_logits=bottom_values_np[row_index].tolist(),
+            bottom_token_ids=bottom_indices_np[row_index].tolist(),
+            top_logits=top_values_np[row_index].tolist(),
+            top_token_ids=top_indices_np[row_index].tolist(),
+        )
+        for row_index in range(int(logits32.shape[0]))
+    ]
+
+
 # @torch.inference_mode()
 # def get_feature_data(
 #     encoder: AutoEncoder,

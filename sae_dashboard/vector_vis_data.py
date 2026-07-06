@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from dataclasses_json import dataclass_json
 from rich import print as rprint
@@ -58,6 +58,7 @@ class VectorVisConfig:
     # Misc
     seed: int | None = 0
     verbose: bool = False
+    correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
     cache_dir: Path | None = None  # Path to cache the data
 
     def to_dict(self) -> dict[str, Any]:
