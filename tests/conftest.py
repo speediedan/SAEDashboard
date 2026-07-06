@@ -1,3 +1,8 @@
+import json
+import os
+from pathlib import Path
+from typing import Any
+
 import pytest
 import torch
 from jaxtyping import Int
@@ -52,3 +57,26 @@ def autoencoder() -> StandardSAE:
     )
 
     return autoencoder
+
+
+GOLDEN_BATCHES_DIR = Path(__file__).resolve().parent / "acceptance" / "golden_batches"
+
+
+def _golden_batch_paths(dataset_family: str) -> tuple[Path, Path, Path, Path]:
+    family_dir = GOLDEN_BATCHES_DIR / dataset_family
+    return (
+        family_dir / "batch-0.json",
+        family_dir / "batch-1.json",
+        family_dir / "run_settings.json",
+        family_dir / "sae_lens.json",
+    )
+
+
+def load_golden_batch_outputs(dataset_family: str) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    batch0_path, batch1_path, run_settings_path, sae_lens_path = _golden_batch_paths(dataset_family)
+    if not batch0_path.exists():
+        pytest.skip(f"Golden batches not found for {dataset_family}. Regenerate with SAE_DASHBOARD_REGENERATE_GOLDEN_BATCHES=1")
+    batch0 = json.loads(batch0_path.read_text())
+    batch1 = json.loads(batch1_path.read_text())
+    sae_lens = json.loads(sae_lens_path.read_text())
+    return [batch0, batch1], json.loads(run_settings_path.read_text()), sae_lens

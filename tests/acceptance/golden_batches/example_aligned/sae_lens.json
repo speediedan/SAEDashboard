@@ -1,0 +1,1 @@
+{"windowing_mode": "max-prompt-pad", "prompt_windowing_family": "example_aligned_pad_enabled", "effective_context_size": 64, "context_size": 64, "tokenizer_name": "gpt2", "dataset_path": "custom-example-aligned"}
