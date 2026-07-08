@@ -265,10 +265,16 @@ def to_resid_direction(
     elif ("pre" in model.activation_config.primary_hook_point) or (
         "post" in model.activation_config.primary_hook_point
     ):
-        return direction @ model.W_out[model.hook_layer]
+        return direction @ model.W_out[model.hook_layer].to(
+            device=direction.device, dtype=direction.dtype
+        )
 
     elif "hook_z" in model.activation_config.primary_hook_point:
-        return direction @ model.W_O[model.hook_layer].flatten(0, 1).to(direction.dtype)
+        # device= as well as dtype=: with the SAE and model on different CUDA devices
+        # (multi-GPU hosts) the weight must follow the direction's device.
+        return direction @ model.W_O[model.hook_layer].flatten(0, 1).to(
+            device=direction.device, dtype=direction.dtype
+        )
 
     # For hook_mlp_out (output of MLP)
     elif "hook_mlp_out" in model.activation_config.primary_hook_point:
