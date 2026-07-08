@@ -2101,6 +2101,10 @@ class NeuronpediaRunner:
                         activation_histogram_backend=self.cfg.activation_histogram_backend,
                         defer_component_construction=self.cfg.defer_component_construction,
                         sequence_selection_backend=self.cfg.sequence_selection_backend,
+                        sequence_top_acts_positive_only=self.cfg.sequence_top_acts_positive_only,
+                        sequence_dedup_across_groups=self.cfg.sequence_dedup_across_groups,
+                        sequence_skip_dead_features=self.cfg.sequence_skip_dead_features,
+                        logits_table_mask_token_pattern=self.cfg.logits_table_mask_token_pattern,
                         dashboard_output_format=self.cfg.dashboard_output_format,
                         columnar_defer_batch_write=(
                             self.cfg.dashboard_output_format == "columnar"
@@ -2640,6 +2644,42 @@ def main():
         help="Sequence candidate-selection backend.",
     )
     parser.add_argument(
+        "--sequence-top-acts-positive-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Opt-in (columnar backend only): restrict TOP-ACTIVATIONS candidates to strictly "
+            "positive activations instead of zero/negative tie-fill."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-dedup-across-groups",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Opt-in (columnar backend only): exclude already-selected coordinates from later "
+            "group sampling so a sequence position appears in at most one group."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-skip-dead-features",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Opt-in (columnar backend only): emit no sequence rows for features with no "
+            "positive activation on the eval set instead of degenerate zero-row groups."
+        ),
+    )
+    parser.add_argument(
+        "--logits-table-mask-token-pattern",
+        type=str,
+        default=None,
+        help=(
+            "Optional regex over token strings; matching vocab rows are excluded from logits "
+            "tables on the columnar path (e.g. '^<(0x[0-9A-Fa-f]{2}|unused\\d+)>$')."
+        ),
+    )
+    parser.add_argument(
         "--dashboard-output-format",
         choices=("legacy_json", "columnar"),
         default="legacy_json",
@@ -3002,6 +3042,10 @@ def main():
         activation_histogram_backend=args.activation_histogram_backend,
         defer_component_construction=args.defer_component_construction,
         sequence_selection_backend=args.sequence_selection_backend,
+        sequence_top_acts_positive_only=args.sequence_top_acts_positive_only,
+        sequence_dedup_across_groups=args.sequence_dedup_across_groups,
+        sequence_skip_dead_features=args.sequence_skip_dead_features,
+        logits_table_mask_token_pattern=args.logits_table_mask_token_pattern,
         dashboard_output_format=args.dashboard_output_format,
         columnar_artifact_format=args.columnar_artifact_format,
         columnar_emit_sequence_rows=args.columnar_emit_sequence_rows,

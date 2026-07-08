@@ -152,6 +152,15 @@ class NeuronpediaRunnerConfig:
     activation_histogram_backend: str = "torch"
     defer_component_construction: bool = False
     sequence_selection_backend: str = "legacy"
+    # Opt-in selection hygiene (columnar backend only; the legacy lane keeps its
+    # historical selection semantics). All default off to preserve the
+    # preserved-baseline selection/parity contract.
+    sequence_top_acts_positive_only: bool = False
+    sequence_dedup_across_groups: bool = False
+    sequence_skip_dead_features: bool = False
+    # Optional regex over token strings; matching vocab rows are excluded from logits
+    # tables on the columnar path (e.g. Gemma byte-fallback/unused rows).
+    logits_table_mask_token_pattern: Optional[str] = None
     dashboard_output_format: str = "legacy_json"
     columnar_artifact_format: str = "arrow"
     columnar_emit_sequence_rows: bool = False

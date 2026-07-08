@@ -1591,6 +1591,41 @@ class SequenceDataGenerator:
         )
         return quantiles, interval_positions, interval_offsets, interval_counts
 
+    @staticmethod
+    def _filter_unselected_positions(positions, selected_mask):
+        """Drop positions already claimed by an earlier group (no-op when dedup is off)."""
+        if selected_mask is None:
+            return positions
+        return positions[~selected_mask[positions]]
+
+    @staticmethod
+    def _build_feature_selected_mask(
+        dedup_across_groups: bool,
+        interval_positions_flat: Tensor | None,
+        candidate_token_count: int,
+        top_feature_positions: Tensor,
+    ) -> Tensor | None:
+        """Per-feature cross-group exclusion mask seeded with the TOP-group selections."""
+        if (
+            not dedup_across_groups
+            or interval_positions_flat is None
+            or candidate_token_count == 0
+        ):
+            return None
+        selected_mask = torch.zeros(
+            candidate_token_count,
+            dtype=torch.bool,
+            device=interval_positions_flat.device,
+        )
+        selected_mask[top_feature_positions.to(interval_positions_flat.device)] = True
+        return selected_mask
+
+    @staticmethod
+    def _mark_selected_positions(positions, selected_mask) -> None:
+        """Record positions in the running cross-group exclusion mask (no-op when dedup is off)."""
+        if selected_mask is not None:
+            selected_mask[positions] = True
+
     def get_indices_dict_columnar_gpu(
         self,
         buffer: tuple[int, int] | None,
@@ -1623,6 +1658,17 @@ class SequenceDataGenerator:
             perf_counter() - candidate_extract_start if profile_enabled else 0.0
         )
 
+        top_positive_only = bool(
+            getattr(self.cfg, "sequence_top_acts_positive_only", False)
+        )
+        dedup_across_groups = bool(
+            getattr(self.cfg, "sequence_dedup_across_groups", False)
+        )
+        if getattr(self.cfg, "sequence_skip_dead_features", False) and feat_max <= 0.0:
+            empty_indices = torch.zeros((0, 2), dtype=torch.long)
+            indices_dict = {f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}": empty_indices}
+            return indices_dict, empty_indices.clone(), 0
+
         candidate_token_count = int(candidate_values.numel())
         candidate_positive_count = 0
         candidate_zero_count = 0
@@ -1637,13 +1683,28 @@ class SequenceDataGenerator:
         topk_start = perf_counter() if profile_enabled else 0.0
         if candidate_values.numel() > 0:
             top_k = min(self.seq_cfg.top_acts_group_size, candidate_values.numel())
-            top_indices = candidate_indices[
-                candidate_values.topk(k=top_k, largest=True).indices
-            ].cpu()
+            top_positions = candidate_values.topk(k=top_k, largest=True).indices
+            if top_positive_only:
+                # topk is value-descending, so the positive selections are exactly the
+                # leading min(top_k, n_positive) entries — no zero/negative tie-fill.
+                positive_count = int((candidate_values > 0).sum().item())
+                top_positions = top_positions[: min(top_k, positive_count)]
+            top_indices = candidate_indices[top_positions].cpu()
         else:
+            top_positions = torch.zeros(
+                0, dtype=torch.long, device=candidate_values.device
+            )
             top_indices = torch.zeros((0, 2), dtype=torch.long)
         topk_wall_s = perf_counter() - topk_start if profile_enabled else 0.0
         indices_dict = {f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}": top_indices}
+        selected_position_mask: Tensor | None = None
+        selected_position_mask_np: np.ndarray | None = None
+        if dedup_across_groups and candidate_token_count > 0:
+            selected_position_mask = torch.zeros(
+                candidate_token_count, dtype=torch.bool, device=candidate_values.device
+            )
+            selected_position_mask[top_positions] = True
+            selected_position_mask_np = selected_position_mask.cpu().numpy()
 
         interval_scan_wall_s = 0.0
         interval_where_wall_s = 0.0
@@ -1679,13 +1740,17 @@ class SequenceDataGenerator:
                             lowest_interval_count = interval_count
                         if interval_count > 0:
                             nonempty_interval_group_count += 1
-                    if interval_count > self.seq_cfg.quantile_group_size:
+                    interval_positions_np = self._filter_unselected_positions(
+                        interval_positions_np, selected_position_mask_np
+                    )
+                    pool_count = int(interval_positions_np.shape[0])
+                    if pool_count > self.seq_cfg.quantile_group_size:
                         interval_sample_start = (
                             perf_counter() if profile_enabled else 0.0
                         )
                         sampled_relative_positions_np: np.ndarray = (
                             sample_unique_indices(
-                                interval_count,
+                                pool_count,
                                 self.seq_cfg.quantile_group_size,
                             ).numpy()
                         )
@@ -1696,6 +1761,9 @@ class SequenceDataGenerator:
                             interval_sample_wall_s += (
                                 perf_counter() - interval_sample_start
                             )
+                    self._mark_selected_positions(
+                        interval_positions_np, selected_position_mask_np
+                    )
                     indices = candidate_indices[
                         torch.as_tensor(interval_positions_np, dtype=torch.long)
                     ]
@@ -1734,25 +1802,33 @@ class SequenceDataGenerator:
                             lowest_interval_count = interval_count
                         if interval_count > 0:
                             nonempty_interval_group_count += 1
-                    if interval_count > self.seq_cfg.quantile_group_size:
+                    interval_positions = self._filter_unselected_positions(
+                        interval_positions, selected_position_mask
+                    )
+                    pool_count = int(interval_positions.numel())
+                    if pool_count > self.seq_cfg.quantile_group_size:
                         interval_sample_start = (
                             perf_counter() if profile_enabled else 0.0
                         )
                         sampled_relative_positions_tensor: Tensor = (
                             sample_unique_indices(
-                                interval_count,
+                                pool_count,
                                 self.seq_cfg.quantile_group_size,
                             ).to(interval_positions.device)
                         )
-                        indices = candidate_indices[
-                            interval_positions[sampled_relative_positions_tensor]
+                        interval_positions = interval_positions[
+                            sampled_relative_positions_tensor
                         ]
+                        indices = candidate_indices[interval_positions]
                         if profile_enabled:
                             interval_sample_wall_s += (
                                 perf_counter() - interval_sample_start
                             )
                     else:
                         indices = candidate_indices[interval_positions]
+                    self._mark_selected_positions(
+                        interval_positions, selected_position_mask
+                    )
                     sampled_index_count += int(indices.shape[0])
                     indices_dict[
                         f"INTERVAL {lower:.3f} - {upper:.3f}<br>CONTAINS {pct:.3%}"
@@ -1865,6 +1941,16 @@ class SequenceDataGenerator:
         profile_enabled = bool(getattr(self.cfg, "log_performance", False))
         batched_start = perf_counter() if profile_enabled else 0.0
 
+        top_positive_only = bool(
+            getattr(self.cfg, "sequence_top_acts_positive_only", False)
+        )
+        dedup_across_groups = bool(
+            getattr(self.cfg, "sequence_dedup_across_groups", False)
+        )
+        skip_dead_features = bool(
+            getattr(self.cfg, "sequence_skip_dead_features", False)
+        )
+
         n_features = int(all_feat_acts.shape[-1])
         if n_features == 0:
             return []
@@ -1919,9 +2005,17 @@ class SequenceDataGenerator:
                     top_positions_chunk = torch.zeros(
                         (0, chunk_width), dtype=torch.long
                     )
+                if top_positive_only:
+                    positive_counts_chunk = [
+                        int(count)
+                        for count in (chunk_vals > 0).sum(dim=0).cpu().tolist()
+                    ]
+                else:
+                    positive_counts_chunk = None
             else:
                 feat_max_chunk = [0.0] * chunk_width
                 top_positions_chunk = torch.zeros((0, chunk_width), dtype=torch.long)
+                positive_counts_chunk = [0] * chunk_width if top_positive_only else None
 
             quantile_values_chunk: list[list[float]] = []
             interval_positions_flat: Tensor | None = None
@@ -1963,17 +2057,41 @@ class SequenceDataGenerator:
             selected_position_groups: list[Tensor] = []
             for local_index in range(chunk_width):
                 feat_max = feat_max_chunk[local_index]
+                if skip_dead_features and feat_max <= 0.0:
+                    chunk_plans.append(
+                        [
+                            (
+                                f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}",
+                                torch.zeros(0, dtype=torch.long),
+                                -1,
+                            )
+                        ]
+                    )
+                    continue
+                top_feature_positions = (
+                    top_positions_chunk[:, local_index]
+                    if top_positions_chunk.numel() > 0
+                    else torch.zeros(0, dtype=torch.long)
+                )
+                if positive_counts_chunk is not None:
+                    # topk is value-descending, so the positive selections are exactly the
+                    # leading min(top_k, n_positive) entries — no zero/negative tie-fill.
+                    top_feature_positions = top_feature_positions[
+                        : min(top_k, positive_counts_chunk[local_index])
+                    ]
                 plan: list[tuple[str, Tensor | None, int]] = [
                     (
                         f"TOP ACTIVATIONS<br>MAX = {feat_max:.3f}",
-                        (
-                            top_positions_chunk[:, local_index]
-                            if top_positions_chunk.numel() > 0
-                            else torch.zeros(0, dtype=torch.long)
-                        ),
+                        top_feature_positions,
                         -1,
                     )
                 ]
+                feature_selected_mask = self._build_feature_selected_mask(
+                    dedup_across_groups,
+                    interval_positions_flat,
+                    candidate_token_count,
+                    top_feature_positions,
+                )
                 if n_quantiles > 0:
                     quantile_values = quantile_values_chunk[local_index]
                     for i in range(n_quantiles - 1, -1, -1):
@@ -1992,13 +2110,19 @@ class SequenceDataGenerator:
                             continue
                         start = interval_offsets[group_index]
                         end = interval_offsets[group_index + 1]
-                        group_positions = interval_positions_flat[start:end]
-                        if interval_count > group_size:
+                        group_positions = self._filter_unselected_positions(
+                            interval_positions_flat[start:end], feature_selected_mask
+                        )
+                        pool_count = int(group_positions.numel())
+                        if pool_count > group_size:
                             sampled_relative = sample_unique_indices(
-                                interval_count,
+                                pool_count,
                                 group_size,
                             ).to(group_positions.device)
                             group_positions = group_positions[sampled_relative]
+                        self._mark_selected_positions(
+                            group_positions, feature_selected_mask
+                        )
                         plan.append((label, None, len(selected_position_groups)))
                         selected_position_groups.append(group_positions)
                 chunk_plans.append(plan)

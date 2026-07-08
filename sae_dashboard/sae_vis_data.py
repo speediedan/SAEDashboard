@@ -112,6 +112,15 @@ class SaeVisConfig:
     defer_component_construction: bool = False
     columnar_defer_batch_write: bool = False
     sequence_selection_backend: Literal["legacy", "columnar_gpu"] = "legacy"
+    # Opt-in selection hygiene for the columnar backend only (the deprecated legacy lane keeps its
+    # historical selection semantics bit-for-bit). All three default off to preserve parity with the
+    # preserved-baseline selection contract.
+    sequence_top_acts_positive_only: bool = False
+    sequence_dedup_across_groups: bool = False
+    sequence_skip_dead_features: bool = False
+    # Optional regex over token strings (e.g. r"^<(0x[0-9A-Fa-f]{2}|unused\d+)>$"); matching vocab
+    # rows are excluded from logits tables on the columnar path. None preserves unmasked logits.
+    logits_table_mask_token_pattern: str | None = None
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"

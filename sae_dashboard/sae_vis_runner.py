@@ -212,12 +212,33 @@ class SaeVisRunner:
         self._token_str_cache: dict[int, str] = {}
         self._token_string_vocab: np.ndarray = np.empty(0, dtype=object)
         self._token_string_known: np.ndarray = np.zeros(0, dtype=bool)
+        # Vocab ids excluded from logits tables when cfg.logits_table_mask_token_pattern
+        # is set; resolved once per runner from the model tokenizer (model-constant).
+        self._logits_mask_token_ids: Tensor | None = None
+        self._logits_mask_resolved: bool = False
         if self.cfg.cache_dir is not None:
             self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg.sequence_replay_artifact_dir is not None:
             self.cfg.sequence_replay_artifact_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg.columnar_artifact_dir is not None:
             self.cfg.columnar_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_logits_mask_token_ids(self, model: Any) -> Tensor | None:
+        """Resolve cfg.logits_table_mask_token_pattern to a vocab-id tensor (once per runner)."""
+        if self._logits_mask_resolved:
+            return self._logits_mask_token_ids
+        self._logits_mask_resolved = True
+        pattern = getattr(self.cfg, "logits_table_mask_token_pattern", None)
+        if not pattern:
+            return None
+        regex = re.compile(pattern)
+        vocab: dict[str, int] = model.tokenizer.get_vocab()  # type: ignore[attr-defined]
+        mask_ids = sorted(
+            token_id for token, token_id in vocab.items() if regex.match(token)
+        )
+        if mask_ids:
+            self._logits_mask_token_ids = torch.tensor(mask_ids, dtype=torch.long)
+        return self._logits_mask_token_ids
 
     @staticmethod
     def _load_columnar_modules() -> tuple[Any, Any, Any]:
@@ -1058,6 +1079,7 @@ class SaeVisRunner:
             logits_table_rows = get_logits_table_data_batch(
                 logits,
                 n_rows=layout.logits_table_cfg.n_rows,  # type: ignore
+                masked_token_ids=self._resolve_logits_mask_token_ids(model),
             )
             for feat, logits_table_row in zip(features, logits_table_rows):
                 feature_data_dict[feat].logits_table_data = logits_table_row

@@ -599,3 +599,37 @@ def test_activation_row_batches_with_array_decoder_match_list_decoder() -> None:
     )
     for ref_batch, arr_batch in zip(reference, via_array):
         assert arr_batch.to_pydict() == ref_batch.to_pydict()
+
+
+def test_get_logits_table_data_masked_token_ids_excluded() -> None:
+    from sae_dashboard.data_parsing_fns import (
+        get_logits_table_data,
+        get_logits_table_data_batch,
+    )
+
+    # Masked ids hold both extremes so unmasked behavior would select them first.
+    logits = torch.linspace(-1.0, 1.0, 32).repeat(3, 1)
+    logits[:, 30] = 50.0
+    logits[:, 31] = 60.0
+    logits[:, 0] = -50.0
+    logits[:, 1] = -60.0
+    masked_token_ids = torch.tensor([0, 1, 30, 31], dtype=torch.long)
+
+    unmasked = get_logits_table_data_batch(logits, n_rows=4)
+    assert unmasked[0].top_token_ids[:2] == [31, 30]
+    assert unmasked[0].bottom_token_ids[:2] == [1, 0]
+
+    masked = get_logits_table_data_batch(
+        logits, n_rows=4, masked_token_ids=masked_token_ids
+    )
+    for row in masked:
+        assert not set(row.top_token_ids) & {0, 1, 30, 31}
+        assert not set(row.bottom_token_ids) & {0, 1, 30, 31}
+
+    reference = get_logits_table_data(
+        logits[0], n_rows=4, masked_token_ids=masked_token_ids
+    )
+    assert masked[0].top_token_ids == list(reference.top_token_ids)
+    assert masked[0].bottom_token_ids == list(reference.bottom_token_ids)
+    assert masked[0].top_logits == pytest.approx(reference.top_logits)
+    assert masked[0].bottom_logits == pytest.approx(reference.bottom_logits)
