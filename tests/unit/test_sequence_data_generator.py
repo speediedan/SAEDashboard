@@ -1204,3 +1204,131 @@ def test_get_sequence_coordinate_table_precomputed_selection_matches_inline() ->
             precomputed_table.to_sequence_multi_group_data()
             == inline_table.to_sequence_multi_group_data()
         )
+
+
+# ---------------------------------------------------------------------------
+# Opt-in selection hygiene (sequence_top_acts_positive_only,
+# sequence_dedup_across_groups, sequence_skip_dead_features): columnar backend
+# only, all default off — flag-off behavior is pinned by every other test in
+# this module.
+# ---------------------------------------------------------------------------
+
+
+def _coordinate_multiset(
+    indices_dict: dict[str, torch.Tensor],
+) -> list[tuple[int, int]]:
+    coordinates: list[tuple[int, int]] = []
+    for group_indices in indices_dict.values():
+        coordinates.extend((int(row), int(col)) for row, col in group_indices.tolist())
+    return coordinates
+
+
+def test_columnar_top_positive_only_drops_zero_tie_fill() -> None:
+    generator = _batched_selection_fixture_generator(
+        n_quantiles=0, top_acts_group_size=5
+    )
+    feat_acts = torch.zeros(3, 8, dtype=torch.float32)
+    feat_acts[0, 1] = 2.0
+    feat_acts[1, 3] = 1.0
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+
+    indices_dict_off, _, n_bold_off = generator.get_indices_dict_columnar_gpu(
+        generator.buffer, feat_acts, selection_mask=selection_mask
+    )
+    # Flag off: zero ties fill the remaining TOP slots (inherited behavior).
+    assert n_bold_off == 5
+
+    generator.cfg.sequence_top_acts_positive_only = True
+    indices_dict_on, _, n_bold_on = generator.get_indices_dict_columnar_gpu(
+        generator.buffer, feat_acts, selection_mask=selection_mask
+    )
+    assert n_bold_on == 2
+    top_group = next(iter(indices_dict_on.values()))
+    selected = {(int(row), int(col)) for row, col in top_group.tolist()}
+    assert selected == {(0, 1), (1, 3)}
+
+
+def test_columnar_skip_dead_features_emits_empty_selection() -> None:
+    generator = _batched_selection_fixture_generator()
+    feat_acts = torch.zeros(3, 8, dtype=torch.float32)
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+
+    indices_dict_off, _, n_bold_off = generator.get_indices_dict_columnar_gpu(
+        generator.buffer, feat_acts, selection_mask=selection_mask
+    )
+    # Flag off: degenerate zero-interval groups still emit rows (inherited behavior).
+    assert n_bold_off > 0
+
+    generator.cfg.sequence_skip_dead_features = True
+    indices_dict_on, indices_bold_on, n_bold_on = (
+        generator.get_indices_dict_columnar_gpu(
+            generator.buffer, feat_acts, selection_mask=selection_mask
+        )
+    )
+    assert n_bold_on == 0
+    assert indices_bold_on.shape == (0, 2)
+    assert list(indices_dict_on) == ["TOP ACTIVATIONS<br>MAX = 0.000"]
+    assert indices_dict_on["TOP ACTIVATIONS<br>MAX = 0.000"].shape == (0, 2)
+
+
+def test_columnar_dedup_across_groups_removes_top_interval_double_selection() -> None:
+    # Single dominant max with a sparse highest interval: without dedup the max
+    # coordinate is selected by TOP and re-emitted by its containing interval.
+    generator = _batched_selection_fixture_generator(
+        n_quantiles=4, top_acts_group_size=2, quantile_group_size=8
+    )
+    feat_acts = torch.zeros(3, 8, dtype=torch.float32)
+    feat_acts[0, 1] = 10.0
+    feat_acts[1, 3] = 9.5
+    feat_acts[2, 5] = 0.5
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+
+    indices_dict_off, _, _ = generator.get_indices_dict_columnar_gpu(
+        generator.buffer, feat_acts, selection_mask=selection_mask
+    )
+    coordinates_off = _coordinate_multiset(indices_dict_off)
+    assert coordinates_off.count((0, 1)) >= 2  # TOP ∩ interval duplicate exists
+
+    generator.cfg.sequence_dedup_across_groups = True
+    random.seed(20260707)
+    indices_dict_on, _, _ = generator.get_indices_dict_columnar_gpu(
+        generator.buffer, feat_acts, selection_mask=selection_mask
+    )
+    coordinates_on = _coordinate_multiset(indices_dict_on)
+    assert len(coordinates_on) == len(set(coordinates_on))
+    assert coordinates_on.count((0, 1)) == 1
+
+
+def test_columnar_batched_matches_sequential_with_hygiene_flags() -> None:
+    generator = _batched_selection_fixture_generator(
+        n_quantiles=4, top_acts_group_size=3, quantile_group_size=2
+    )
+    generator.cfg.sequence_top_acts_positive_only = True
+    generator.cfg.sequence_dedup_across_groups = True
+    generator.cfg.sequence_skip_dead_features = True
+
+    torch.manual_seed(20260707)
+    all_feat_acts = (torch.rand(3, 8, 5, dtype=torch.float32) + 0.01) * torch.linspace(
+        0.5, 2.0, 5
+    )
+    all_feat_acts[..., 1] = 0.0  # dead feature exercises the skip path
+    all_feat_acts[0, 2, 3] = 0.0  # sparse zeros exercise positive-only truncation
+    all_feat_acts[1, 4, 3] = 0.0
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[:, -1] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(20260707)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(20260707)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=2,
+    )
+
+    _assert_selections_equal(batched, sequential)
+    for indices_dict, _, _ in batched:
+        coordinates = _coordinate_multiset(indices_dict)
+        assert len(coordinates) == len(set(coordinates))

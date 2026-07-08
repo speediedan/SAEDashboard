@@ -104,11 +104,24 @@ def add_feature_neuron_correlations(
 
 
 def get_logits_table_data(
-    logit_vector: Float[Tensor, "d_vocab"], n_rows: int  # noqa: F821
+    logit_vector: Float[Tensor, "d_vocab"],  # noqa: F821
+    n_rows: int,
+    masked_token_ids: Tensor | None = None,
 ):
-    # Get logits table data
-    top_logits = TopK(logit_vector.float(), k=n_rows, largest=True)
-    bottom_logits = TopK(logit_vector.float(), k=n_rows, largest=False)
+    # Get logits table data. When masked_token_ids is provided, those vocab rows are
+    # excluded from both the top and bottom selections (opt-in masking for untrained
+    # byte-fallback/unused vocab rows); None preserves the unmasked behavior.
+    logit_vector32 = logit_vector.float()
+    top_source = logit_vector32
+    bottom_source = logit_vector32
+    if masked_token_ids is not None and masked_token_ids.numel() > 0:
+        mask_ids = masked_token_ids.to(logit_vector32.device)
+        top_source = logit_vector32.clone()
+        top_source[mask_ids] = float("-inf")
+        bottom_source = logit_vector32.clone()
+        bottom_source[mask_ids] = float("inf")
+    top_logits = TopK(top_source, k=n_rows, largest=True)
+    bottom_logits = TopK(bottom_source, k=n_rows, largest=False)
 
     top_logit_values = top_logits.values.tolist()
     top_token_ids = top_logits.indices.tolist()
@@ -127,14 +140,26 @@ def get_logits_table_data(
 
 
 def get_logits_table_data_batch(
-    logits: Float[Tensor, "feats d_vocab"], n_rows: int  # noqa: F821
+    logits: Float[Tensor, "feats d_vocab"],  # noqa: F821
+    n_rows: int,
+    masked_token_ids: Tensor | None = None,
 ) -> list[LogitsTableData]:
     """Batched `get_logits_table_data`: one top-k / bottom-k pair over the whole
-    feature batch and a single device transfer instead of per-feature top-k calls."""
+    feature batch and a single device transfer instead of per-feature top-k calls.
+    When ``masked_token_ids`` is provided those vocab rows are excluded from both
+    selections; None preserves the unmasked behavior."""
     logits32 = logits.float()
+    top_source = logits32
+    bottom_source = logits32
+    if masked_token_ids is not None and masked_token_ids.numel() > 0:
+        mask_ids = masked_token_ids.to(logits32.device)
+        top_source = logits32.clone()
+        top_source[:, mask_ids] = float("-inf")
+        bottom_source = logits32.clone()
+        bottom_source[:, mask_ids] = float("inf")
     k = min(n_rows, int(logits32.shape[-1]))
-    top_values, top_indices = logits32.topk(k=k, dim=-1, largest=True)
-    bottom_values, bottom_indices = logits32.topk(k=k, dim=-1, largest=False)
+    top_values, top_indices = top_source.topk(k=k, dim=-1, largest=True)
+    bottom_values, bottom_indices = bottom_source.topk(k=k, dim=-1, largest=False)
     top_values_np = utils.to_numpy(top_values)
     top_indices_np = utils.to_numpy(top_indices)
     bottom_values_np = utils.to_numpy(bottom_values)
