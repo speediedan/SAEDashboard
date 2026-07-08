@@ -964,13 +964,11 @@ def test_bfloat16_downcast_can_change_interval_membership_vs_float32_baseline() 
     assert any(group.startswith("INTERVAL 0.500 - 0.750") for group in lazy_groups)
 
 
-@pytest.mark.xfail(
-    reason="Planned half-open interval semantics are not implemented yet."
-)
 def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins() -> (
     None
 ):
     cfg: SaeVisConfig = build_sae_vis_cfg()
+    cfg.sequence_half_open_interval_bins = True
     cfg.feature_centric_layout.seq_cfg.buffer = None  # type: ignore
     cfg.feature_centric_layout.seq_cfg.top_acts_group_size = 1  # type: ignore
     cfg.feature_centric_layout.seq_cfg.n_quantiles = 4  # type: ignore
@@ -1017,8 +1015,10 @@ def test_exact_boundary_interval_membership_becomes_disjoint_with_half_open_bins
     legacy_groups = interval_groups_for_target(legacy_indices_dict)
     lazy_groups = interval_groups_for_target(lazy_indices_dict)
 
-    assert legacy_groups == ["INTERVAL 0.500 - 0.750"]
-    assert lazy_groups == ["INTERVAL 0.500 - 0.750"]
+    assert len(legacy_groups) == 1
+    assert legacy_groups[0].startswith("INTERVAL 0.500 - 0.750")
+    assert len(lazy_groups) == 1
+    assert lazy_groups[0].startswith("INTERVAL 0.500 - 0.750")
 
 
 def _batched_selection_fixture_generator(
@@ -1332,3 +1332,49 @@ def test_columnar_batched_matches_sequential_with_hygiene_flags() -> None:
     for indices_dict, _, _ in batched:
         coordinates = _coordinate_multiset(indices_dict)
         assert len(coordinates) == len(set(coordinates))
+
+
+def test_columnar_batched_matches_sequential_with_half_open_bins() -> None:
+    generator = _batched_selection_fixture_generator(
+        n_quantiles=4, top_acts_group_size=2, quantile_group_size=16
+    )
+    generator.cfg.sequence_half_open_interval_bins = True
+
+    all_feat_acts = torch.zeros(3, 8, 4, dtype=torch.float32)
+    # Feature 0: value exactly on an interior boundary of linspace(0, 1.0, 5).
+    all_feat_acts[0, 1, 0] = 1.0
+    all_feat_acts[0, 2, 0] = 0.25
+    all_feat_acts[1, 3, 0] = 0.5
+    # Feature 1: generic positive spread; feature 2: dead; feature 3: boundary at 0.75.
+    all_feat_acts[..., 1] = torch.rand(3, 8) + 0.01
+    all_feat_acts[2, 4, 3] = 2.0
+    all_feat_acts[1, 5, 3] = 1.5
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(20260708)
+    sequential = _sequential_selection_reference(generator, masked_acts, selection_mask)
+    random.seed(20260708)
+    batched = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=2,
+    )
+
+    _assert_selections_equal(batched, sequential)
+
+    # Half-open membership: each boundary coordinate belongs to exactly one interval group.
+    boundary_coordinates = [
+        torch.tensor([0, 2], dtype=torch.long),  # 0.25 on feature 0
+        torch.tensor([1, 3], dtype=torch.long),  # 0.50 on feature 0
+    ]
+    indices_dict = batched[0][0]
+    for coordinate in boundary_coordinates:
+        member_groups = [
+            group_name
+            for group_name, group_indices in indices_dict.items()
+            if group_name.startswith("INTERVAL")
+            and any(torch.equal(row, coordinate) for row in group_indices)
+        ]
+        assert len(member_groups) == 1, (coordinate.tolist(), member_groups)

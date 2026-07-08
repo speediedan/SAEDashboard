@@ -158,6 +158,9 @@ class NeuronpediaRunnerConfig:
     sequence_top_acts_positive_only: bool = False
     sequence_dedup_across_groups: bool = False
     sequence_skip_dead_features: bool = False
+    # Numpy-histogram-style interval membership ([lower, upper), highest interval closed) for the
+    # in-tree legacy and columnar selectors; the preserved pre-PR lane is untouched.
+    sequence_half_open_interval_bins: bool = False
     # Optional regex over token strings; matching vocab rows are excluded from logits
     # tables on the columnar path (e.g. Gemma byte-fallback/unused rows).
     logits_table_mask_token_pattern: Optional[str] = None

@@ -1280,9 +1280,12 @@ class SequenceDataGenerator:
             for i in range(self.seq_cfg.n_quantiles - 1, -1, -1):
                 lower = float(quantiles[i].item())
                 upper = float(quantiles[i + 1].item())
+                upper_closed = self._interval_upper_closed(i)
                 interval_where_start = perf_counter() if profile_enabled else 0.0
                 interval_member_mask = (feat_acts_view_for_intervals >= lower) & (
-                    feat_acts_view_for_intervals <= upper
+                    (feat_acts_view_for_intervals <= upper)
+                    if upper_closed
+                    else (feat_acts_view_for_intervals < upper)
                 )
                 if selection_mask_view is not None:
                     interval_member_mask &= selection_mask_view
@@ -1291,7 +1294,11 @@ class SequenceDataGenerator:
                     pct = float(
                         (
                             (full_feat_acts_for_intervals >= lower)
-                            & (full_feat_acts_for_intervals <= upper)
+                            & (
+                                (full_feat_acts_for_intervals <= upper)
+                                if upper_closed
+                                else (full_feat_acts_for_intervals < upper)
+                            )
                         )
                         .float()
                         .mean()
@@ -1313,6 +1320,7 @@ class SequenceDataGenerator:
                         k=self.seq_cfg.quantile_group_size,
                         bounds=(lower, upper),
                         buffer=buffer,
+                        upper_inclusive=upper_closed,
                     ).cpu()
                     if profile_enabled:
                         interval_sample_wall_s += perf_counter() - interval_sample_start
@@ -1571,9 +1579,23 @@ class SequenceDataGenerator:
             return quantiles, empty_positions, empty_offsets, empty_counts
 
         candidate_values_for_intervals = candidate_values.to(dtype=quantiles.dtype)
-        interval_membership = (
-            candidate_values_for_intervals.unsqueeze(0) >= quantiles[:-1].unsqueeze(1)
-        ) & (candidate_values_for_intervals.unsqueeze(0) <= quantiles[1:].unsqueeze(1))
+        lower_membership = candidate_values_for_intervals.unsqueeze(0) >= quantiles[
+            :-1
+        ].unsqueeze(1)
+        upper_membership = candidate_values_for_intervals.unsqueeze(0) <= quantiles[
+            1:
+        ].unsqueeze(1)
+        if (
+            getattr(self.cfg, "sequence_half_open_interval_bins", False)
+            and self.seq_cfg.n_quantiles > 1
+        ):
+            strict_upper = candidate_values_for_intervals.unsqueeze(0) < quantiles[
+                1:
+            ].unsqueeze(1)
+            upper_membership = torch.cat(
+                [strict_upper[:-1], upper_membership[-1:]], dim=0
+            )
+        interval_membership = lower_membership & upper_membership
         interval_ids, interval_positions = torch.where(interval_membership)
         interval_counts = torch.bincount(
             interval_ids,
@@ -1590,6 +1612,18 @@ class SequenceDataGenerator:
             ]
         )
         return quantiles, interval_positions, interval_offsets, interval_counts
+
+    def _interval_upper_closed(self, interval_index: int) -> bool:
+        """Whether interval ``interval_index``'s upper bound is inclusive.
+
+        Historical (default) semantics are double-inclusive on every interval. With
+        ``sequence_half_open_interval_bins`` each interval is ``[lower, upper)`` except the
+        highest, which stays closed so the feature max remains a member (numpy histogram
+        convention) — every value then belongs to exactly one interval.
+        """
+        if not getattr(self.cfg, "sequence_half_open_interval_bins", False):
+            return True
+        return interval_index == self.seq_cfg.n_quantiles - 1
 
     @staticmethod
     def _filter_unselected_positions(positions, selected_mask):
@@ -1726,7 +1760,12 @@ class SequenceDataGenerator:
                     lower, upper = quantile_values[i : i + 2]
                     interval_where_start = perf_counter() if profile_enabled else 0.0
                     interval_positions_np = np.flatnonzero(
-                        (candidate_values_np >= lower) & (candidate_values_np <= upper)
+                        (candidate_values_np >= lower)
+                        & (
+                            (candidate_values_np <= upper)
+                            if self._interval_upper_closed(i)
+                            else (candidate_values_np < upper)
+                        )
                     )
                     interval_count = int(interval_positions_np.shape[0])
                     pct = interval_count / valid_token_count
@@ -1920,7 +1959,9 @@ class SequenceDataGenerator:
 
         - interval boundaries are float32 CPU ``linspace`` values (bitwise-identical to the
           per-feature CPU interval path used in production), and membership uses the same
-          closed-interval ``>= lower & <= upper`` comparisons on float32-widened values;
+          closed-interval ``>= lower & <= upper`` comparisons on float32-widened values
+          (or numpy-style half-open bounds when ``sequence_half_open_interval_bins`` is set —
+          identical semantics in the sequential and batched selectors);
         - ``sample_unique_indices`` is invoked in the same feature-ascending /
           interval-descending order with the same arguments, so the shared RNG stream is
           consumed identically to a sequential feature loop;
@@ -2032,9 +2073,23 @@ class SequenceDataGenerator:
                 if chunk_vals is not None:
                     boundaries_dev = boundaries.to(device)
                     vals32 = chunk_vals.to(torch.float32).T
-                    membership = (
-                        vals32.unsqueeze(1) >= boundaries_dev[:, :-1].unsqueeze(2)
-                    ) & (vals32.unsqueeze(1) <= boundaries_dev[:, 1:].unsqueeze(2))
+                    lower_membership = vals32.unsqueeze(1) >= boundaries_dev[
+                        :, :-1
+                    ].unsqueeze(2)
+                    upper_membership = vals32.unsqueeze(1) <= boundaries_dev[
+                        :, 1:
+                    ].unsqueeze(2)
+                    if (
+                        getattr(self.cfg, "sequence_half_open_interval_bins", False)
+                        and n_quantiles > 1
+                    ):
+                        strict_upper = vals32.unsqueeze(1) < boundaries_dev[
+                            :, 1:
+                        ].unsqueeze(2)
+                        upper_membership = torch.cat(
+                            [strict_upper[:, :-1], upper_membership[:, -1:]], dim=1
+                        )
+                    membership = lower_membership & upper_membership
                     flat_membership = membership.reshape(chunk_width * n_quantiles, -1)
                     nonzero_pairs = flat_membership.nonzero()
                     group_counts = torch.bincount(
@@ -2046,7 +2101,8 @@ class SequenceDataGenerator:
                     for count in interval_counts:
                         interval_offsets.append(interval_offsets[-1] + count)
                     interval_positions_flat = nonzero_pairs[:, 1]
-                    del membership, flat_membership, vals32, nonzero_pairs
+                    del membership, lower_membership, upper_membership
+                    del flat_membership, vals32, nonzero_pairs
                 else:
                     interval_counts = [0] * (chunk_width * n_quantiles)
                     interval_offsets = [0] * (chunk_width * n_quantiles + 1)

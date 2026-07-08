@@ -172,6 +172,7 @@ def random_range_indices(
     k: int,
     bounds: tuple[float, float],
     buffer: tuple[int, int] | None = (5, -5),
+    upper_inclusive: bool = True,
 ) -> Int[Tensor, "k 2"]:
     """
     Args:
@@ -184,6 +185,9 @@ def random_range_indices(
             The range of values to consider (so we can get quantiles)
         buffer:
             Positions to avoid at the start / end of the sequence, i.e. we can include the slice buffer[0]: buffer[1]
+        upper_inclusive:
+            Whether the upper bound is inclusive (historical default). False gives numpy-histogram-style
+            half-open membership ``[lower, upper)``.
 
     Returns:
         Same thing as k_largest_indices, but the difference is that we're using quantiles rather than top/bottom k.
@@ -195,7 +199,7 @@ def random_range_indices(
     x = x[:, buffer[0] : buffer[1]]
 
     # Creat a mask for where x is in range, and get the indices as a tensor of shape (k, 2)
-    mask = (bounds[0] <= x) & (x <= bounds[1])
+    mask = (bounds[0] <= x) & ((x <= bounds[1]) if upper_inclusive else (x < bounds[1]))
     indices = torch.stack(torch.where(mask), dim=-1)
 
     # If we have more indices than we need, randomly select k of them
