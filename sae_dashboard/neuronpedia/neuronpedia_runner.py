@@ -2104,6 +2104,7 @@ class NeuronpediaRunner:
                         sequence_top_acts_positive_only=self.cfg.sequence_top_acts_positive_only,
                         sequence_dedup_across_groups=self.cfg.sequence_dedup_across_groups,
                         sequence_skip_dead_features=self.cfg.sequence_skip_dead_features,
+                        sequence_half_open_interval_bins=self.cfg.sequence_half_open_interval_bins,
                         logits_table_mask_token_pattern=self.cfg.logits_table_mask_token_pattern,
                         dashboard_output_format=self.cfg.dashboard_output_format,
                         columnar_defer_batch_write=(
@@ -2671,6 +2672,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--sequence-half-open-interval-bins",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Opt-in: numpy-histogram-style interval membership ([lower, upper), highest "
+            "interval closed) so each value belongs to exactly one quantile interval. "
+            "Applies to the in-tree legacy and columnar selectors."
+        ),
+    )
+    parser.add_argument(
         "--logits-table-mask-token-pattern",
         type=str,
         default=None,
@@ -3045,6 +3056,7 @@ def main():
         sequence_top_acts_positive_only=args.sequence_top_acts_positive_only,
         sequence_dedup_across_groups=args.sequence_dedup_across_groups,
         sequence_skip_dead_features=args.sequence_skip_dead_features,
+        sequence_half_open_interval_bins=args.sequence_half_open_interval_bins,
         logits_table_mask_token_pattern=args.logits_table_mask_token_pattern,
         dashboard_output_format=args.dashboard_output_format,
         columnar_artifact_format=args.columnar_artifact_format,

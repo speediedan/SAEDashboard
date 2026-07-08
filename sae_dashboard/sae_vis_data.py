@@ -118,6 +118,10 @@ class SaeVisConfig:
     sequence_top_acts_positive_only: bool = False
     sequence_dedup_across_groups: bool = False
     sequence_skip_dead_features: bool = False
+    # Numpy-histogram-style interval membership: [lower, upper) for all quantile intervals except the
+    # highest, which stays closed. Applies to the in-tree legacy AND columnar selectors (the preserved
+    # pre-PR lane under neuronpedia/legacy is untouched). Off = historical double-inclusive bounds.
+    sequence_half_open_interval_bins: bool = False
     # Optional regex over token strings (e.g. r"^<(0x[0-9A-Fa-f]{2}|unused\d+)>$"); matching vocab
     # rows are excluded from logits tables on the columnar path. None preserves unmasked logits.
     logits_table_mask_token_pattern: str | None = None
