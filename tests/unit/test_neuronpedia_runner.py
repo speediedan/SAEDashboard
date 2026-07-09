@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +9,8 @@ import torch
 from datasets import Dataset
 from transformer_lens import HookedTransformer
 
-from sae_dashboard.neuronpedia import neuronpedia_runner as runner_module
 import sae_dashboard.neuronpedia.neuronpedia_runner as neuronpedia_runner_module
+from sae_dashboard.neuronpedia import neuronpedia_runner as runner_module
 from sae_dashboard.neuronpedia.legacy import runner as legacy_runner
 from sae_dashboard.neuronpedia.neuronpedia_runner import NeuronpediaRunner
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
@@ -123,6 +124,8 @@ def test_run_neuronpedia_export_uses_neuronpedia_model_name(
 
     assert captured["export_cfg"].exports_dir == str(tmp_path / "exports")
     assert captured["export_cfg"].model_name == "neuronpedia-model"
+
+
 def test_legacy_get_tokens_uses_explicit_shared_tokens_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -144,7 +147,9 @@ def test_legacy_get_tokens_uses_explicit_shared_tokens_file(
     runner._log_token_snapshot = lambda *_args, **_kwargs: None
 
     def fail_generate_tokens(*_args: Any, **_kwargs: Any) -> torch.Tensor:
-        raise AssertionError("legacy explicit shared tokens should be staged before generation")
+        raise AssertionError(
+            "legacy explicit shared tokens should be staged before generation"
+        )
 
     monkeypatch.setattr(runner, "generate_tokens", fail_generate_tokens)
 
@@ -263,14 +268,11 @@ def test_legacy_preserved_baseline_contract_maps_to_deprecated_legacy_runner() -
                 )
             )
         assert resolution.loader_api == 'load_dataset("json", data_files=...)'
-        assert resolution.data_files == {
-            prompt_contract["split"]: prompt_dataset_path
-        }
+        assert resolution.data_files == {prompt_contract["split"]: prompt_dataset_path}
         assert prompt_contract["required_files"] == [
             "train.jsonl",
             "sae_lens.json",
         ]
-
 
 
 def test_initialize_model_hooked_uses_no_processing_loader(
@@ -326,7 +328,9 @@ def test_initialize_model_hooked_uses_no_processing_loader(
         model_n_devices=1,
         free_unused_model_layers=False,
     )
-    runner.sae = SimpleNamespace(cfg=SimpleNamespace(metadata={"hook_name": "blocks.5.hook_resid_pre"}))
+    runner.sae = SimpleNamespace(
+        cfg=SimpleNamespace(metadata={"hook_name": "blocks.5.hook_resid_pre"})
+    )
     runner.sae_from_pretrained_kwargs = {"fold_ln": False}
     runner.model_id = "google/gemma-3-1b-it"
     runner._log_resource_snapshot = lambda *_args, **_kwargs: None
@@ -506,7 +510,7 @@ def _make_legacy_runner_stub(tmp_path: Path) -> NeuronpediaRunner:
             metadata=SimpleNamespace(),
         )
     )
-    runner.model = SimpleNamespace()
+    runner.model = SimpleNamespace()  # pyright: ignore
     runner.tokenizer = SimpleNamespace(pad_token_id=0, bos_token_id=1, eos_token_id=2)
     runner.model_id = "google/gemma-3-1b-it"
     runner.hook_name = "blocks.5.hook_resid_pre"
@@ -523,7 +527,7 @@ def _make_legacy_runner_stub(tmp_path: Path) -> NeuronpediaRunner:
     runner._log_token_snapshot = lambda *_args, **_kwargs: None
     runner._write_converter_input_artifact = lambda *_args, **_kwargs: None
     runner._release_unused_host_memory = lambda: None
-    runner.activations_store = object()
+    runner.activations_store = object()  # pyright: ignore
     return runner
 
 
@@ -547,7 +551,7 @@ def test_run_routes_legacy_through_compatibility_module(
         calls["feature_idx"] = feature_idx
         calls["tokens"] = tokens.clone()
 
-    runner._load_prompt_bucket_schedule = fail_schedule
+    runner._load_prompt_bucket_schedule = fail_schedule  # pyright: ignore
     monkeypatch.setattr(
         "sae_dashboard.neuronpedia.neuronpedia_runner.legacy_runner.run_legacy_batch_loop",
         fake_run_legacy_batch_loop,
@@ -585,7 +589,7 @@ def test_legacy_batch_loop_uses_compatibility_vis_config(
         "sae_dashboard.neuronpedia.legacy.runner.NeuronpediaConverter.convert_to_np_json",
         lambda *args, **kwargs: '{"ok": true}',
     )
-    runner._run_feature_batch_with_optional_profile = (
+    runner._run_feature_batch_with_optional_profile = (  # pyright: ignore
         fake_run_feature_batch_with_optional_profile
     )
 
@@ -712,10 +716,12 @@ def test_legacy_get_tokens_without_shared_sidecar_generates_tokens(
     runner.model_id = "google/gemma-3-1b-it"
     runner.hook_name = "blocks.10.hook_mlp_in"
     runner.sae = SimpleNamespace(cfg=SimpleNamespace(d_sae=262144))
-    runner.activations_store = object()
+    runner.activations_store = object()  # pyright: ignore
     runner._log_token_snapshot = lambda *_args, **_kwargs: None
     runner._stage_shared_tokens_file = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("default legacy runs should not auto-stage shared token sidecars")
+        AssertionError(
+            "default legacy runs should not auto-stage shared token sidecars"
+        )
     )
 
     def fake_generate_tokens(activations_store: object, n_prompts: int) -> torch.Tensor:
@@ -723,7 +729,7 @@ def test_legacy_get_tokens_without_shared_sidecar_generates_tokens(
         assert n_prompts == 2
         return generated_tokens.clone()
 
-    runner.generate_tokens = fake_generate_tokens
+    runner.generate_tokens = fake_generate_tokens  # pyright: ignore
 
     runner._setup_output_directory()
     tokens_path = Path(runner.cfg.outputs_dir) / "tokens_2.pt"
@@ -1206,8 +1212,20 @@ def test_load_prompt_bucket_schedule_can_auto_bucket_from_quantile_ceilings(
 
     schedule = runner._load_prompt_bucket_schedule(tokens)
 
-    assert sorted(index for batch in schedule for index in batch["prompt_indices"]) == list(range(12))
-    assert {batch["seq_length"] for batch in schedule} == {60, 64, 80, 120}
+    assert sorted(
+        index
+        for batch in schedule  # pyright: ignore[reportOptionalIterable]
+        for index in batch["prompt_indices"]
+    ) == list(range(12))
+    assert {
+        batch["seq_length"]
+        for batch in schedule  # pyright: ignore[reportOptionalIterable]
+    } == {
+        60,
+        64,
+        80,
+        120,
+    }
 
 
 def test_generate_tokens_requests_cpu_batches() -> None:
@@ -1231,7 +1249,7 @@ def test_generate_tokens_requests_cpu_batches() -> None:
     runner.cfg.shuffle_tokens = False
 
     fake_store = FakeActivationsStore()
-    tokens = runner.generate_tokens(fake_store, n_prompts=2)
+    tokens = runner.generate_tokens(fake_store, n_prompts=2)  # pyright: ignore
 
     assert fake_store.move_to_model_device_args == [False]
     assert tokens.device.type == "cpu"
@@ -1248,7 +1266,9 @@ def test_write_converter_input_artifact(tmp_path: Path) -> None:
         converter_input_artifact_dir=str(artifact_dir),
     )
     runner.vocab_dict = {1: "token1"}
-    runner.model = SimpleNamespace(cfg=SimpleNamespace(d_vocab=50257))
+    runner.model = SimpleNamespace(  # pyright: ignore
+        cfg=SimpleNamespace(d_vocab=50257)
+    )
     runner.model_id = "gpt2-small"
     runner.layer = 5
     runner.hook_name = "blocks.5.hook_resid_pre"
@@ -1258,8 +1278,8 @@ def test_write_converter_input_artifact(tmp_path: Path) -> None:
     artifact_path = runner._write_converter_input_artifact(feature_data, batch_num=3)
 
     assert artifact_path == artifact_dir / "converter_input_batch_3.pt"
-    assert artifact_path.is_file()
-    snapshot = torch.load(artifact_path, weights_only=False)
+    assert artifact_path.is_file()  # pyright: ignore[reportOptionalMemberAccess]
+    snapshot = torch.load(artifact_path, weights_only=False)  # pyright: ignore
     assert snapshot["feature_data_dict"] == feature_data.feature_data_dict
     assert snapshot["runner_cfg"].converter_input_artifact_dir == str(artifact_dir)
     assert snapshot["vocab_dict"] == {1: "token1"}
@@ -1308,10 +1328,10 @@ def test_run_feature_batch_with_optional_profile_writes_trace(
         torch_profile_dir=str(trace_dir),
     )
     runner.sae = SimpleNamespace()
-    runner.model = SimpleNamespace()
+    runner.model = SimpleNamespace()  # pyright: ignore
 
     result = runner._run_feature_batch_with_optional_profile(
-        feature_vis_config_gpt=SimpleNamespace(),
+        feature_vis_config_gpt=SimpleNamespace(),  # pyright: ignore
         tokens=torch.ones(1, 2, dtype=torch.long),
         feature_batch_count=4,
     )

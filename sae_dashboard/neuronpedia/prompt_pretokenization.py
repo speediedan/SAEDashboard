@@ -40,7 +40,10 @@ WINDOWING_MODES: tuple[WindowingMode, ...] = (
     "fixed-context-pad",
 )
 PACKED_WINDOWING_MODES: tuple[WindowingMode, ...] = ("concatenate", "filter-truncate")
-EXAMPLE_ALIGNED_WINDOWING_MODES: tuple[WindowingMode, ...] = ("max-prompt-pad", "fixed-context-pad")
+EXAMPLE_ALIGNED_WINDOWING_MODES: tuple[WindowingMode, ...] = (
+    "max-prompt-pad",
+    "fixed-context-pad",
+)
 DEFAULT_WINDOWING_MODE: WindowingMode = "concatenate"
 
 
@@ -111,7 +114,9 @@ def windowing_mode_supports_streaming(windowing_mode: WindowingMode) -> bool:
 
 
 def build_base_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Pretokenize datasets for Neuronpedia dashboard generation.")
+    parser = argparse.ArgumentParser(
+        description="Pretokenize datasets for Neuronpedia dashboard generation."
+    )
     parser.add_argument(
         "--custom-dataset-module",
         help=(
@@ -192,7 +197,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     known_args, _ = base_parser.parse_known_args(argv)
     custom_module = None
     if known_args.custom_dataset_module:
-        custom_module = load_custom_pretokenization_module(known_args.custom_dataset_module)
+        custom_module = load_custom_pretokenization_module(
+            known_args.custom_dataset_module
+        )
     maybe_configure_custom_parser(custom_module, base_parser)
     args = base_parser.parse_args(argv)
     args.custom_module = custom_module
@@ -202,8 +209,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_pretokenize_config(args: argparse.Namespace) -> PretokenizeRunnerConfig:
     save_path = args.save_path or args.output_dir
     windowing_mode = cast(WindowingMode, args.windowing_mode)
-    disable_concat_sequences = args.disable_concat_sequences or windowing_mode_disables_concat_sequences(
-        windowing_mode
+    disable_concat_sequences = (
+        args.disable_concat_sequences
+        or windowing_mode_disables_concat_sequences(windowing_mode)
     )
     return PretokenizeRunnerConfig(
         tokenizer_name=args.tokenizer_name,
@@ -244,7 +252,9 @@ def run_dashboard_pretokenization(
 
     if args.custom_module is not None:
         settings = maybe_load_custom_pretokenization_settings(args.custom_module, args)
-        result = args.custom_module.pretokenize_custom_dataset(dataset, tokenizer, cfg, settings)
+        result = args.custom_module.pretokenize_custom_dataset(
+            dataset, tokenizer, cfg, settings
+        )
         custom_metadata = maybe_build_custom_metadata(
             args.custom_module,
             args=args,
@@ -256,13 +266,17 @@ def run_dashboard_pretokenization(
     else:
         if is_example_aligned_windowing(windowing_mode):
             result = pretokenize_prompt_token_sequences(
-                _iter_dataset_prompt_token_sequences(dataset, tokenizer=tokenizer, cfg=cfg),
+                _iter_dataset_prompt_token_sequences(
+                    dataset, tokenizer=tokenizer, cfg=cfg
+                ),
                 tokenizer=tokenizer,
                 cfg=cfg,
                 windowing_mode=windowing_mode,
             )
         else:
-            tokenized_dataset = pretokenize_dataset(cast(Dataset, dataset), tokenizer, cfg)
+            tokenized_dataset = pretokenize_dataset(
+                cast(Dataset, dataset), tokenizer, cfg
+            )
             result = PretokenizationResult(
                 tokenized_dataset=materialize_tokenized_dataset(
                     tokenized_dataset,
@@ -276,12 +290,19 @@ def run_dashboard_pretokenization(
             )
         custom_metadata = {}
 
-    if args.max_tokenized_rows is not None and len(result.tokenized_dataset) > args.max_tokenized_rows:
+    if (
+        args.max_tokenized_rows is not None
+        and len(result.tokenized_dataset) > args.max_tokenized_rows
+    ):
         result = replace(
             result,
-            tokenized_dataset=result.tokenized_dataset.select(range(args.max_tokenized_rows)),
+            tokenized_dataset=result.tokenized_dataset.select(
+                range(args.max_tokenized_rows)
+            ),
             prompt_lengths=(
-                result.prompt_lengths[: args.max_tokenized_rows] if result.prompt_lengths is not None else None
+                result.prompt_lengths[: args.max_tokenized_rows]
+                if result.prompt_lengths is not None
+                else None
             ),
         )
 
@@ -337,14 +358,17 @@ def build_windowing_metadata(
         "windowing_mode": windowing_mode,
         "prompt_windowing_family": (
             "example_aligned_pad_enabled"
-            if windowing_mode is not None and is_example_aligned_windowing(windowing_mode)
+            if windowing_mode is not None
+            and is_example_aligned_windowing(windowing_mode)
             else "packed_legacy"
         ),
         "effective_context_size": result.effective_context_size or cfg.context_size,
         "prompt_lengths_available": result.prompt_lengths is not None,
         "prompt_length_min": min(prompt_lengths) if prompt_lengths else None,
         "prompt_length_max": max(prompt_lengths) if prompt_lengths else None,
-        "prompt_length_mean": (sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else None),
+        "prompt_length_mean": (
+            sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else None
+        ),
         "pad_token_id": result.pad_token_id,
         "disable_concat_sequences": (
             result.disable_concat_sequences
@@ -352,7 +376,9 @@ def build_windowing_metadata(
             else cfg.disable_concat_sequences
         ),
         "streaming_supported": (
-            windowing_mode_supports_streaming(windowing_mode) if windowing_mode is not None else None
+            windowing_mode_supports_streaming(windowing_mode)
+            if windowing_mode is not None
+            else None
         ),
     }
 
@@ -373,6 +399,7 @@ def load_dashboard_dataset(
     )
     if isinstance(dataset, DatasetDict):
         raise ValueError("Dataset has multiple splits. Must provide a 'split' param.")
+    dataset = cast("Dataset | IterableDataset", dataset)
     if max_rows is None:
         return dataset
     if isinstance(dataset, Dataset):
@@ -426,13 +453,17 @@ def load_custom_pretokenization_module(module_path: str) -> ModuleType:
     return importlib.import_module(module_path)
 
 
-def maybe_configure_custom_parser(module: ModuleType | None, parser: argparse.ArgumentParser) -> None:
+def maybe_configure_custom_parser(
+    module: ModuleType | None, parser: argparse.ArgumentParser
+) -> None:
     configure_parser = getattr(module, "configure_parser", None)
     if callable(configure_parser):
         configure_parser(parser)
 
 
-def maybe_load_custom_pretokenization_settings(module: ModuleType | None, args: argparse.Namespace) -> Any | None:
+def maybe_load_custom_pretokenization_settings(
+    module: ModuleType | None, args: argparse.Namespace
+) -> Any | None:
     load_settings = getattr(module, "load_custom_pretokenization_settings", None)
     if callable(load_settings):
         return load_settings(args)
@@ -450,7 +481,9 @@ def maybe_build_custom_metadata(
 ) -> dict[str, Any]:
     build_metadata = getattr(module, "build_custom_metadata", None)
     if callable(build_metadata):
-        return build_metadata(args, settings, result, tokenizer, cfg)
+        return cast(
+            "dict[str, Any]", build_metadata(args, settings, result, tokenizer, cfg)
+        )
     return {}
 
 
@@ -464,7 +497,11 @@ def build_dashboard_metadata(
     metadata = asdict(metadata_from_config(cfg))
     if result is not None:
         metadata.update(build_windowing_metadata(result, cfg=cfg))
-        if result.pad_token_id is None and tokenizer is not None and result.prompt_lengths is not None:
+        if (
+            result.pad_token_id is None
+            and tokenizer is not None
+            and result.prompt_lengths is not None
+        ):
             metadata["pad_token_id"] = getattr(tokenizer, "pad_token_id", None)
     if custom_metadata:
         metadata["custom"] = custom_metadata
@@ -477,7 +514,10 @@ def materialize_tokenized_dataset(
     max_tokenized_rows: int | None = None,
 ) -> Dataset:
     if isinstance(tokenized_dataset, Dataset):
-        if max_tokenized_rows is not None and len(tokenized_dataset) > max_tokenized_rows:
+        if (
+            max_tokenized_rows is not None
+            and len(tokenized_dataset) > max_tokenized_rows
+        ):
             tokenized_dataset = tokenized_dataset.select(range(max_tokenized_rows))
         return ensure_torch_dataset_format(tokenized_dataset)
 
@@ -496,7 +536,9 @@ def materialize_tokenized_dataset(
 
 def ensure_torch_dataset_format(dataset: Dataset) -> Dataset:
     tensor_columns = [
-        column_name for column_name in ("input_ids", "tokens", "attention_mask") if column_name in dataset.column_names
+        column_name
+        for column_name in ("input_ids", "tokens", "attention_mask")
+        if column_name in dataset.column_names
     ]
     if tensor_columns:
         dataset.set_format(type="torch", columns=tensor_columns)
@@ -505,7 +547,9 @@ def ensure_torch_dataset_format(dataset: Dataset) -> Dataset:
 
 def metadata_as_upstream_type(metadata: dict[str, Any]) -> PretokenizedDatasetMetadata:
     upstream_fields = {field.name for field in fields(PretokenizedDatasetMetadata)}
-    upstream_metadata = {key: value for key, value in metadata.items() if key in upstream_fields}
+    upstream_metadata = {
+        key: value for key, value in metadata.items() if key in upstream_fields
+    }
     return PretokenizedDatasetMetadata(**upstream_metadata)
 
 
@@ -546,8 +590,10 @@ def _tokenize_prompt_value(
 def resolve_pad_token_id(tokenizer: PreTrainedTokenizerBase) -> int:
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
-        raise ValueError("Tokenizer must define pad_token_id for example-aligned dashboard pretokenization.")
-    return int(pad_token_id)
+        raise ValueError(
+            "Tokenizer must define pad_token_id for example-aligned dashboard pretokenization."
+        )
+    return int(cast(int, pad_token_id))
 
 
 def pad_to_context_size(
@@ -588,7 +634,9 @@ def _pretokenize_example_aligned_prompt_sequences(
         raise ValueError("Prompt dataset did not yield any prompts to pretokenize.")
 
     prompt_lengths = tuple(int(tokens.numel()) for tokens in prompt_tokens)
-    effective_context_size = max(prompt_lengths) if windowing_mode == "max-prompt-pad" else cfg.context_size
+    effective_context_size = (
+        max(prompt_lengths) if windowing_mode == "max-prompt-pad" else cfg.context_size
+    )
     pad_token_id = resolve_pad_token_id(tokenizer)
     tokenized_dataset = Dataset.from_dict(
         {
@@ -601,7 +649,9 @@ def _pretokenize_example_aligned_prompt_sequences(
                 for tokens in prompt_tokens
             ],
             "attention_mask": [
-                attention_mask_for_prompt(length=int(tokens.numel()), context_size=effective_context_size)
+                attention_mask_for_prompt(
+                    length=int(tokens.numel()), context_size=effective_context_size
+                )
                 for tokens in prompt_tokens
             ],
         }
@@ -625,21 +675,35 @@ def _pretokenize_packed_prompt_sequences(
 ) -> PretokenizationResult:
     token_rows = list(
         concat_and_batch_sequences(
-            tokens_iterator=iter(as_1d_token_tensor(tokens) for tokens in token_sequences),
+            tokens_iterator=iter(
+                as_1d_token_tensor(tokens) for tokens in token_sequences
+            ),
             context_size=cfg.context_size,
-            begin_batch_token_id=get_special_token_from_cfg(cfg.begin_batch_token, tokenizer),
-            begin_sequence_token_id=get_special_token_from_cfg(cfg.begin_sequence_token, tokenizer),
-            sequence_separator_token_id=get_special_token_from_cfg(cfg.sequence_separator_token, tokenizer),
-            disable_concat_sequences=windowing_mode_disables_concat_sequences(windowing_mode),
+            begin_batch_token_id=get_special_token_from_cfg(
+                cfg.begin_batch_token, tokenizer
+            ),
+            begin_sequence_token_id=get_special_token_from_cfg(
+                cfg.begin_sequence_token, tokenizer
+            ),
+            sequence_separator_token_id=get_special_token_from_cfg(
+                cfg.sequence_separator_token, tokenizer
+            ),
+            disable_concat_sequences=windowing_mode_disables_concat_sequences(
+                windowing_mode
+            ),
         )
     )
-    tokenized_dataset = Dataset.from_dict({"input_ids": [tokens.tolist() for tokens in token_rows]})
+    tokenized_dataset = Dataset.from_dict(
+        {"input_ids": [tokens.tolist() for tokens in token_rows]}
+    )
     return PretokenizationResult(
         tokenized_dataset=ensure_torch_dataset_format(tokenized_dataset),
         effective_context_size=cfg.context_size,
         prompt_lengths=None,
         windowing_mode=windowing_mode,
-        disable_concat_sequences=windowing_mode_disables_concat_sequences(windowing_mode),
+        disable_concat_sequences=windowing_mode_disables_concat_sequences(
+            windowing_mode
+        ),
         pad_token_id=None,
     )
 
@@ -650,7 +714,9 @@ def _to_python_value(value: Any) -> Any:
             return value.item()
         return value.tolist()
     if isinstance(value, dict):
-        return {key: _to_python_value(inner_value) for key, inner_value in value.items()}
+        return {
+            key: _to_python_value(inner_value) for key, inner_value in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_to_python_value(inner_value) for inner_value in value]
     return value
@@ -664,7 +730,9 @@ def main(argv: list[str] | None = None) -> int:
         and args.legacy_output_dir is None
         and args.hf_repo_id is None
     ):
-        raise ValueError("Provide --save-path/--output-dir, --legacy-output-dir, and/or --hf-repo-id.")
+        raise ValueError(
+            "Provide --save-path/--output-dir, --legacy-output-dir, and/or --hf-repo-id."
+        )
 
     result, cfg, metadata = run_dashboard_pretokenization(args)
     persist_dashboard_dataset(

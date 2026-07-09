@@ -261,16 +261,15 @@ class FeatureDataGenerator:
             return token_minibatches
 
         # Get tokens into minibatches, for the fwd pass
-        token_minibatches = (
+        tensor_minibatches = list(
             (tokens,)
             if self.cfg.minibatch_size_tokens is None
             else tokens.split(self.cfg.minibatch_size_tokens)
         )
-        token_minibatches = list(token_minibatches)
 
         prompt_minibatch_specs: list[PromptTokenMinibatch] = []
         prompt_offset = 0
-        for token_minibatch in token_minibatches:
+        for token_minibatch in tensor_minibatches:
             prompt_count = int(token_minibatch.shape[0])
             prompt_minibatch_specs.append(
                 PromptTokenMinibatch(

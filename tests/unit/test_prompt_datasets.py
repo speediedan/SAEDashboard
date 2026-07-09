@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import json
 from pathlib import Path
 
@@ -18,14 +19,18 @@ def test_prompt_dataset_modes_are_canonical_only() -> None:
 
 
 def test_prompt_dataset_config_defaults_to_load_dataset() -> None:
-    resolution = resolve_prompt_dataset(PromptDatasetConfig(dataset_path="aps/super_glue", dataset_name="rte"))
+    resolution = resolve_prompt_dataset(
+        PromptDatasetConfig(dataset_path="aps/super_glue", dataset_name="rte")
+    )
 
     assert resolution.mode == "load_dataset"
     assert resolution.loader_api == "load_dataset"
 
 
 def test_load_dataset_with_text_field_materializes_text_column(monkeypatch) -> None:
-    dataset = Dataset.from_dict({"prompt": ["Already rendered prompt."], "other": ["ignored"]})
+    dataset = Dataset.from_dict(
+        {"prompt": ["Already rendered prompt."], "other": ["ignored"]}
+    )
 
     def fake_load_dataset(
         path: str,
@@ -189,6 +194,11 @@ def test_write_pretokenized_prompt_artifacts_writes_modern_and_legacy_outputs(
 
     assert (save_to_disk_path / "sae_lens.json").is_file()
     assert (legacy_output_dir / "sae_lens.json").is_file()
-    legacy_rows = (legacy_output_dir / "train.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    legacy_rows = (
+        (legacy_output_dir / "train.jsonl")
+        .read_text(encoding="utf-8")
+        .strip()
+        .splitlines()
+    )
     assert len(legacy_rows) == 1
     assert json.loads(legacy_rows[0])["input_ids"] == [1, 2, 3, 0]

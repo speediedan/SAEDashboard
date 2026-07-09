@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 """Integration tests for transcoder functionality."""
 
 import os

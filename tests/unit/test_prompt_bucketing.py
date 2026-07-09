@@ -12,7 +12,9 @@ def test_derive_prompt_bucket_ceilings_uses_quantiles_when_not_explicit() -> Non
     assert ceilings == (60, 64, 80, 120)
 
 
-def test_derive_prompt_bucket_ceilings_preserves_explicit_values_and_max_effective_length() -> None:
+def test_derive_prompt_bucket_ceilings_preserves_explicit_values_and_max_effective_length() -> (
+    None
+):
     ceilings = derive_prompt_bucket_ceilings(
         [40, 50, 60, 64, 64, 64, 65, 70, 80, 90, 110, 120],
         max_context_size=128,

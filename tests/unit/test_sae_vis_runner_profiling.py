@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import importlib
 import json
 from pathlib import Path
@@ -464,7 +465,7 @@ def test_SaeVisRunner_deferred_columnar_write_matches_immediate(
         )
 
     def _run(cfg: SaeVisConfig) -> SaeVisColumnarData:
-        return SaeVisRunner(cfg).run(
+        return SaeVisRunner(cfg).run(  # pyright: ignore
             encoder=cast(SAE[Any], _FakeEncoder()),
             model=cast(
                 HookedSAETransformer,

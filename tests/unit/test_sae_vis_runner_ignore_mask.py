@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 from types import SimpleNamespace
 from typing import cast
 
@@ -96,8 +97,8 @@ def test_legacy_ignore_mask_preserves_baseline_histogram_density(
     sae_vis_data = cast(
         SaeVisData,
         SaeVisRunner(cfg).run(
-            encoder=fake_encoder,
-            model=fake_model,
+            encoder=fake_encoder,  # pyright: ignore
+            model=fake_model,  # pyright: ignore
             tokens=tokens,
         ),
     )
@@ -155,8 +156,8 @@ def test_SaeVisRunner_routes_legacy_through_compatibility_module(
     sae_vis_data = cast(
         SaeVisData,
         SaeVisRunner(cfg).run(
-            encoder=fake_encoder,
-            model=fake_model,
+            encoder=fake_encoder,  # pyright: ignore
+            model=fake_model,  # pyright: ignore
             tokens=tokens,
         ),
     )

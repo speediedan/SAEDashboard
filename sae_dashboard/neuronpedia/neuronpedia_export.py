@@ -229,6 +229,7 @@ class FastPseudoCuid:
 # JSON helpers
 # ---------------------------------------------------------------------------
 
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()

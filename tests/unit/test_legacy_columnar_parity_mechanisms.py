@@ -12,7 +12,6 @@ All tests use synthetic values — no model inference is required, making
 them suitable for fast CI execution.
 """
 
-import pytest
 import torch
 
 
@@ -73,9 +72,9 @@ class TestBfloat16DowncastMechanisms:
             bf16_val = bfloat16_round(val)
             rel_error = abs(val - bf16_val) / val if val != 0 else 0
             # bfloat16 has ~7 bits of mantissa, so relative error ~1/128 ≈ 0.78%
-            assert rel_error < 0.01, (
-                f"bfloat16 relative error {rel_error:.6f} exceeds 1% at magnitude {val}"
-            )
+            assert (
+                rel_error < 0.01
+            ), f"bfloat16 relative error {rel_error:.6f} exceeds 1% at magnitude {val}"
 
 
 class TestIntervalBoundaryMechanisms:
@@ -91,13 +90,15 @@ class TestIntervalBoundaryMechanisms:
 
         # Closed-interval semantics (legacy path)
         closed_in_bin = bin_min <= value <= bin_max
-        assert closed_in_bin, f"Value {value} should be in closed bin [{bin_min}, {bin_max}]"
+        assert (
+            closed_in_bin
+        ), f"Value {value} should be in closed bin [{bin_min}, {bin_max}]"
 
         # Half-open semantics (columnar_gpu path)
         half_open_in_bin = bin_min <= value < bin_max
-        assert not half_open_in_bin, (
-            f"Value {value} should NOT be in half-open bin [{bin_min}, {bin_max})"
-        )
+        assert (
+            not half_open_in_bin
+        ), f"Value {value} should NOT be in half-open bin [{bin_min}, {bin_max})"
 
     def test_value_just_below_bin_edge_consistent(self):
         """Both interval semantics agree for values clearly within bins."""
@@ -107,9 +108,9 @@ class TestIntervalBoundaryMechanisms:
 
         closed_in = bin_min <= value <= bin_max
         half_open_in = bin_min <= value < bin_max
-        assert closed_in and half_open_in, (
-            f"Value {value} should be in both interval types for bin [{bin_min}, {bin_max}]"
-        )
+        assert (
+            closed_in and half_open_in
+        ), f"Value {value} should be in both interval types for bin [{bin_min}, {bin_max}]"
 
     def test_value_at_bin_min_included_in_both(self):
         """Both interval types include the lower bound."""
@@ -119,9 +120,9 @@ class TestIntervalBoundaryMechanisms:
 
         closed_in = bin_min <= value <= bin_max
         half_open_in = bin_min <= value < bin_max
-        assert closed_in and half_open_in, (
-            f"Value {value} at bin_min should be in both interval types"
-        )
+        assert (
+            closed_in and half_open_in
+        ), f"Value {value} at bin_min should be in both interval types"
 
     def test_interval_semantics_cause_row_count_delta(self):
         """Demonstrate how interval semantics can cause different row counts."""
@@ -150,7 +151,9 @@ class TestIntervalBoundaryMechanisms:
             f"Closed-interval should have more records than half-open "
             f"when values land on bin edges (got delta={delta})"
         )
-        print(f"  Interval semantics delta: closed={closed_count} vs half_open={half_open_count}")
+        print(
+            f"  Interval semantics delta: closed={closed_count} vs half_open={half_open_count}"
+        )
 
 
 class TestCombinedMechanisms:
@@ -167,7 +170,7 @@ class TestCombinedMechanisms:
         #   - Half-open [0.0, 5.0): value=5.0 is NOT included
         value = 5.0
         bin_lo, bin_hi = 0.0, 5.0
-        closed_in = bin_lo <= value <= bin_hi   # True
+        closed_in = bin_lo <= value <= bin_hi  # True
         half_open_in = bin_lo <= value < bin_hi  # False (5.0 < 5.0 is False)
         discrepancy = closed_in != half_open_in
         assert discrepancy, (
@@ -182,8 +185,8 @@ class TestCombinedMechanisms:
         value = 1.001
         bf16_val = bfloat16_round(value)
         bin_lo, bin_hi = 0.0, 1.0
-        float32_closed = bin_lo <= value <= bin_hi           # False (1.001 > 1.0)
-        bf16_closed = bin_lo <= bf16_val <= bin_hi           # True (1.0 <= 1.0)
+        float32_closed = bin_lo <= value <= bin_hi  # False (1.001 > 1.0)
+        bf16_closed = bin_lo <= bf16_val <= bin_hi  # True (1.0 <= 1.0)
         discrepancy = float32_closed != bf16_closed
         assert discrepancy, (
             f"bfloat16 downcast should cause discrepancy: "

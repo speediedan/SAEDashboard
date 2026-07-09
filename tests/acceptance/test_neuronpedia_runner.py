@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from typing import Any, List, Type, TypeVar
 
+import pytest
+
 from sae_dashboard.neuronpedia.neuronpedia_dashboard import NeuronpediaDashboardBatch
 from sae_dashboard.neuronpedia.neuronpedia_runner import (
     NeuronpediaRunner,
@@ -45,7 +47,7 @@ def compare_values_with_tolerance(
     val2: Any,
     tolerance: float = CORRECT_VALUE_TOLERANCE,
     path: str = "",
-    extra_skip_fields: frozenset = frozenset(),
+    extra_skip_fields: frozenset[str] = frozenset(),
 ) -> List[str]:
     """
     Recursively compare two values with tolerance for floats.
@@ -80,7 +82,7 @@ def compare_values_with_tolerance(
         and all(isinstance(item, dict) for item in val1 + val2)
     ):
 
-        def activation_sort_key(record: dict) -> tuple:
+        def activation_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
             return (
                 tuple(record.get("tokens") or ()),
                 record.get("qualifying_token_index") or 0,
@@ -142,7 +144,7 @@ def compare_batches_with_tolerance(
     batch1: NeuronpediaDashboardBatch,
     batch2: NeuronpediaDashboardBatch,
     tolerance: float = CORRECT_VALUE_TOLERANCE,
-    extra_skip_fields: frozenset = frozenset(),
+    extra_skip_fields: frozenset[str] = frozenset(),
 ) -> List[str]:
     """
     Compare two NeuronpediaDashboardBatch objects with tolerance for numerical values.
@@ -423,7 +425,7 @@ def test_huggingface_neuronpedia_runner():
     os.system(f"rm -rf {ACT_CACHE_FOLDER}")
 
     # Common config settings
-    common_config = dict(
+    common_config: dict[str, Any] = dict(
         sae_set=SAE_SET,
         sae_path=SAE_PATH,
         np_set_name="res-jb",
@@ -542,7 +544,7 @@ GOLDEN_BATCH_FEATURE_COUNT_TOLERANCE = (
 
 
 def test_current_legacy_matches_golden_dense_packed():
-    batch0_path, batch1_path, run_settings_path, sae_lens_path = _golden_batch_paths(
+    batch0_path, batch1_path, run_settings_path, _sae_lens_path = _golden_batch_paths(
         "dense_packed"
     )
     if not batch0_path.exists():
@@ -633,7 +635,7 @@ def test_current_legacy_matches_golden_dense_packed():
 
 
 def test_current_legacy_matches_golden_example_aligned():
-    batch0_path, batch1_path, run_settings_path, sae_lens_path = _golden_batch_paths(
+    batch0_path, batch1_path, run_settings_path, _sae_lens_path = _golden_batch_paths(
         "example_aligned"
     )
     if not batch0_path.exists():

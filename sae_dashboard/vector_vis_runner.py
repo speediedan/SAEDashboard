@@ -33,10 +33,7 @@ from sae_dashboard.transformer_lens_wrapper import (
     ActivationConfig,
     TransformerLensWrapper,
 )
-from sae_dashboard.utils_fns import (
-    FeatureStatistics,
-    build_activation_histogram_titles,
-)
+from sae_dashboard.utils_fns import FeatureStatistics, build_activation_histogram_titles
 from sae_dashboard.vector_data_generator import VectorDataGenerator
 from sae_dashboard.vector_vis_data import VectorVisConfig, VectorVisData
 

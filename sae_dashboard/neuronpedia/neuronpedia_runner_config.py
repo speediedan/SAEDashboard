@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
@@ -142,16 +142,16 @@ class NeuronpediaRunnerConfig:
     log_performance: bool = False
     profile_rolling_substages: bool = False
     cleanup_each_minibatch: bool = False
-    correlation_accumulation_device: str = "auto"
+    correlation_accumulation_device: Literal["auto", "cpu", "cuda"] = "auto"
     rolling_coefficient_num_threads: Optional[int] = None
     activation_significance_floor: float = 0.0
     converter_input_artifact_dir: Optional[str] = None
     sequence_replay_artifact_dir: Optional[str] = None
-    feature_statistics_backend: str = "arrow"
-    logits_histogram_backend: str = "arrow"
-    activation_histogram_backend: str = "torch"
+    feature_statistics_backend: Literal["object", "arrow"] = "arrow"
+    logits_histogram_backend: Literal["object", "arrow"] = "arrow"
+    activation_histogram_backend: Literal["torch"] = "torch"
     defer_component_construction: bool = False
-    sequence_selection_backend: str = "legacy"
+    sequence_selection_backend: Literal["legacy", "columnar_gpu"] = "legacy"
     # Opt-in selection hygiene (columnar backend only; the legacy lane keeps its
     # historical selection semantics). All default off to preserve the
     # preserved-baseline selection/parity contract.
@@ -164,8 +164,8 @@ class NeuronpediaRunnerConfig:
     # Optional regex over token strings; matching vocab rows are excluded from logits
     # tables on the columnar path (e.g. Gemma byte-fallback/unused rows).
     logits_table_mask_token_pattern: Optional[str] = None
-    dashboard_output_format: str = "legacy_json"
-    columnar_artifact_format: str = "arrow"
+    dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
+    columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = True
     columnar_emit_activation_copy_rows: bool = False

@@ -615,8 +615,6 @@ def test_histogram_data_from_data_batch_positive_only_sparse_matches_scalar_path
         assert batch_histogram.title == scalar_histogram.title
 
 
-
-
 def test_histogram_data_from_data_batch_arrow_table_matches_object_path():
     pytest.importorskip("pyarrow")
 

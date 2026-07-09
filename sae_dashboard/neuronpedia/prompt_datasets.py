@@ -20,7 +20,7 @@ import shutil
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Sequence, cast
 
 from datasets import Dataset, DatasetDict, IterableDataset, load_dataset, load_from_disk
 from huggingface_hub import HfApi, hf_hub_download
@@ -90,7 +90,9 @@ def resolve_prompt_dataset(config: PromptDatasetConfig) -> PromptDatasetResoluti
     if not dataset_path:
         raise ValueError("A prompt dataset path is required.")
 
-    resolved_mode: Literal["load_dataset", "load_from_disk", "legacy_jsonl"] = config.mode
+    resolved_mode: Literal["load_dataset", "load_from_disk", "legacy_jsonl"] = (
+        config.mode
+    )
 
     split = config.split or "train"
     loader_api = {
@@ -156,15 +158,27 @@ def load_prompt_dataset(
             trust_remote_code=resolution.trust_remote_code,
         )
 
-    if isinstance(dataset_source, Dataset) and max_rows is not None and len(dataset_source) > max_rows:
+    if (
+        isinstance(dataset_source, Dataset)
+        and max_rows is not None
+        and len(dataset_source) > max_rows
+    ):
         dataset_source = dataset_source.select(range(max_rows))
 
     metadata, metadata_path = _load_prompt_dataset_metadata(resolution)
-    token_column, attention_mask_column, text_column = _infer_columns(dataset_source, resolution.text_field)
+    token_column, attention_mask_column, text_column = _infer_columns(
+        dataset_source, resolution.text_field
+    )
 
-    if token_column is None and resolution.text_field and resolution.text_field != "text":
+    if (
+        token_column is None
+        and resolution.text_field
+        and resolution.text_field != "text"
+    ):
         dataset_source = _map_text_column(dataset_source, resolution.text_field)
-        token_column, attention_mask_column, text_column = _infer_columns(dataset_source, "text")
+        token_column, attention_mask_column, text_column = _infer_columns(
+            dataset_source, "text"
+        )
 
     pad_token_id_raw = None if metadata is None else metadata.get("pad_token_id")
     pad_token_id = int(pad_token_id_raw) if pad_token_id_raw is not None else None
@@ -207,7 +221,10 @@ def write_pretokenized_prompt_artifacts(
         dataset_for_export = dataset.with_format(type=None)
         with data_path.open("w", encoding="utf-8") as handle:
             for row in dataset_for_export:
-                serialized_row = {key: _coerce_json_value(value) for key, value in row.items()}
+                serialized_row = {
+                    key: _coerce_json_value(value)
+                    for key, value in cast("dict[str, Any]", row).items()
+                }
                 handle.write(json.dumps(serialized_row, ensure_ascii=False))
                 handle.write("\n")
         write_prompt_dataset_metadata(output_dir, metadata)
@@ -225,7 +242,9 @@ def write_pretokenized_prompt_artifacts(
         )
 
 
-def write_prompt_dataset_metadata(output_dir: str | Path, metadata: dict[str, Any]) -> Path:
+def write_prompt_dataset_metadata(
+    output_dir: str | Path, metadata: dict[str, Any]
+) -> Path:
     metadata_dir = Path(output_dir)
     metadata_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = metadata_dir / "sae_lens.json"
@@ -248,7 +267,9 @@ def _prepare_output_dir(output_dir: Path, *, force: bool) -> None:
 
 def _upload_prompt_dataset_metadata(*, repo_id: str, metadata: dict[str, Any]) -> None:
     metadata_io = io.BytesIO()
-    metadata_io.write(json.dumps(metadata, indent=2, ensure_ascii=False).encode("utf-8"))
+    metadata_io.write(
+        json.dumps(metadata, indent=2, ensure_ascii=False).encode("utf-8")
+    )
     metadata_io.seek(0)
     HfApi().upload_file(
         path_or_fileobj=metadata_io,
@@ -286,7 +307,7 @@ def _resolve_legacy_jsonl_data_files(
     dataset_path: str,
     split: str,
     data_files: PromptDatasetDataFiles | None,
-) -> dict[str, str | list[str]]:
+) -> dict[str, str | Sequence[str]]:
     if data_files is not None:
         return _normalize_data_files(split=split, data_files=data_files)
 
@@ -301,9 +322,9 @@ def _normalize_data_files(
     *,
     split: str,
     data_files: PromptDatasetDataFiles,
-) -> dict[str, str | list[str]]:
+) -> dict[str, str | Sequence[str]]:
     if isinstance(data_files, dict):
-        normalized: dict[str, str | list[str]] = {}
+        normalized: dict[str, str | Sequence[str]] = {}
         for key, value in data_files.items():
             if isinstance(value, (list, tuple)):
                 normalized[key] = [str(path) for path in value]
@@ -397,7 +418,11 @@ def _looks_like_hub_dataset_id(dataset_path: str) -> bool:
     path = Path(dataset_path)
     if path.is_absolute() or dataset_path.startswith((".", "~")):
         return False
-    return not path.exists() and "/" in dataset_path and not dataset_path.endswith(".jsonl")
+    return (
+        not path.exists()
+        and "/" in dataset_path
+        and not dataset_path.endswith(".jsonl")
+    )
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -409,8 +434,12 @@ def _infer_columns(
     preferred_text_field: str | None,
 ) -> tuple[str | None, str | None, str | None]:
     column_names = list(getattr(dataset_source, "column_names", []) or [])
-    token_column = next((column for column in ("input_ids", "tokens") if column in column_names), None)
-    attention_mask_column = "attention_mask" if "attention_mask" in column_names else None
+    token_column = next(
+        (column for column in ("input_ids", "tokens") if column in column_names), None
+    )
+    attention_mask_column = (
+        "attention_mask" if "attention_mask" in column_names else None
+    )
     if preferred_text_field and preferred_text_field in column_names:
         text_column = preferred_text_field
     elif "text" in column_names:

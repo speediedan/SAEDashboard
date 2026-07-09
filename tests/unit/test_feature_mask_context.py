@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import torch
 from sae_lens import SAE
 from torch import nn
@@ -31,23 +32,25 @@ def test_feature_mask_context_restores_original_parameters(autoencoder: SAE):  #
     original_b_enc = autoencoder.b_enc
     original_w_dec_value = original_w_dec.detach().clone()
     original_w_enc_value = original_w_enc.detach().clone()
-    original_b_enc_value = original_b_enc.detach().clone()
+    original_b_enc_value = original_b_enc.detach().clone()  # pyright: ignore
 
     with FeatureMaskingContext(autoencoder, feature_indices):
         assert autoencoder.W_dec.shape[0] == len(feature_indices)
         assert autoencoder.W_enc.shape[1] == len(feature_indices)
-        assert autoencoder.b_enc.shape[0] == len(feature_indices)
+        assert autoencoder.b_enc.shape[0] == len(  # pyright: ignore[reportIndexIssue]
+            feature_indices
+        )
 
         autoencoder.W_dec.data.zero_()
         autoencoder.W_enc.data.zero_()
-        autoencoder.b_enc.data.zero_()
+        autoencoder.b_enc.data.zero_()  # pyright: ignore
 
     assert autoencoder.W_dec is original_w_dec
     assert autoencoder.W_enc is original_w_enc
     assert autoencoder.b_enc is original_b_enc
     assert torch.equal(autoencoder.W_dec, original_w_dec_value)
     assert torch.equal(autoencoder.W_enc, original_w_enc_value)
-    assert torch.equal(autoencoder.b_enc, original_b_enc_value)
+    assert torch.equal(autoencoder.b_enc, original_b_enc_value)  # pyright: ignore
 
 
 class _DummyJumpReLUSkipCfg:
@@ -71,7 +74,7 @@ def test_feature_mask_context_restores_jumprelu_skip_threshold():
     original_threshold = sae.threshold
     original_threshold_value = sae.threshold.detach().clone()
 
-    with FeatureMaskingContext(sae, feature_indices):
+    with FeatureMaskingContext(sae, feature_indices):  # pyright: ignore
         assert sae.threshold.shape[0] == len(feature_indices)
         sae.threshold.data.zero_()
 
@@ -96,7 +99,7 @@ def test_get_model_acts_uses_primary_acts_batch_size():
             return tuple(activation_dict["hook"].shape[:2]) == tuple(tokens.shape[:2])
 
     generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
-    generator.cfg = type(
+    generator.cfg = type(  # pyright: ignore
         "Cfg",
         (),
         {
@@ -106,7 +109,7 @@ def test_get_model_acts_uses_primary_acts_batch_size():
             "log_performance": False,
         },
     )()
-    generator.model = _FakeModel()
+    generator.model = _FakeModel()  # pyright: ignore
 
     activation_dict = generator.get_model_acts(
         0,

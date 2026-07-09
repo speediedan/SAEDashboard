@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,13 +18,19 @@ def test_convert_to_np_json_matches_reference_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     feature = NeuronpediaDashboardFeature(
-        feature_index=np.int64(7),
-        neg_values=[np.float32(-1.25)],
-        pos_values=[np.float32(2.5)],
+        feature_index=np.int64(7),  # pyright: ignore
+        neg_values=[np.float32(-1.25)],  # pyright: ignore
+        pos_values=[np.float32(2.5)],  # pyright: ignore
         logits_hist_data_bar_heights=[1, 2],
-        logits_hist_data_bar_values=[np.float32(-0.5), np.float32(0.5)],
+        logits_hist_data_bar_values=[
+            np.float32(-0.5),
+            np.float32(0.5),
+        ],  # pyright: ignore
         freq_hist_data_bar_heights=[2, 1],
-        freq_hist_data_bar_values=[np.float32(0.25), np.float32(0.75)],
+        freq_hist_data_bar_values=[
+            np.float32(0.25),
+            np.float32(0.75),
+        ],  # pyright: ignore
         activations=[
             {
                 "bin_min": np.float32(0.0),
@@ -34,7 +41,7 @@ def test_convert_to_np_json_matches_reference_batch(
                 "qualifying_token_index": np.int64(1),
             }
         ],
-        vector=np.array([np.float32(1.25), np.float32(2.5)]),
+        vector=np.array([np.float32(1.25), np.float32(2.5)]),  # pyright: ignore
     )
     runner_cfg = NeuronpediaRunnerConfig(
         sae_set="gemma-scope-2-1b-it-transcoders-all",
@@ -52,7 +59,7 @@ def test_convert_to_np_json_matches_reference_batch(
     )
     fake_vis_data = cast(Any, SimpleNamespace(feature_data_dict={7: object()}))
     payload = converter_module.NeuronpediaConverter.convert_to_np_json(
-        model=None,
+        model=None,  # pyright: ignore
         vis_data=fake_vis_data,
         np_cfg=runner_cfg,
         vocab_dict={},
@@ -67,13 +74,19 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     feature = NeuronpediaDashboardFeature(
-        feature_index=np.int64(7),
-        neg_values=[np.float32(-1.25)],
-        pos_values=[np.float32(2.5)],
+        feature_index=np.int64(7),  # pyright: ignore
+        neg_values=[np.float32(-1.25)],  # pyright: ignore
+        pos_values=[np.float32(2.5)],  # pyright: ignore
         logits_hist_data_bar_heights=[1, 2],
-        logits_hist_data_bar_values=[np.float32(-0.5), np.float32(0.5)],
+        logits_hist_data_bar_values=[
+            np.float32(-0.5),
+            np.float32(0.5),
+        ],  # pyright: ignore
         freq_hist_data_bar_heights=[2, 1],
-        freq_hist_data_bar_values=[np.float32(0.25), np.float32(0.75)],
+        freq_hist_data_bar_values=[
+            np.float32(0.25),
+            np.float32(0.75),
+        ],  # pyright: ignore
         activations=[
             {
                 "bin_min": np.float32(0.0),
@@ -84,7 +97,7 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
                 "qualifying_token_index": np.int64(1),
             }
         ],
-        vector=np.array([np.float32(1.25), np.float32(2.5)]),
+        vector=np.array([np.float32(1.25), np.float32(2.5)]),  # pyright: ignore
     )
     runner_cfg = NeuronpediaRunnerConfig(
         sae_set="gemma-scope-2-1b-it-transcoders-all",
@@ -103,7 +116,7 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
     fake_vis_data = cast(Any, SimpleNamespace(feature_data_dict={7: object()}))
 
     payload = converter_module.NeuronpediaConverter.convert_to_np_json(
-        model=None,
+        model=None,  # pyright: ignore
         vis_data=fake_vis_data,
         np_cfg=runner_cfg,
         vocab_dict={},
@@ -115,8 +128,7 @@ def test_convert_to_np_json_deterministic_matches_reference_batch(
     )
 
 
-def test_encode_batch_payload_deterministic_matches_reference_batch(
-) -> None:
+def test_encode_batch_payload_deterministic_matches_reference_batch() -> None:
     fixture_text = (FIXTURE_DIR / "neuronpedia_reference_batch.json").read_text(
         encoding="utf-8"
     )
@@ -145,13 +157,19 @@ def test_convert_preserved_snapshot_to_np_json_reuses_full_converter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     feature = NeuronpediaDashboardFeature(
-        feature_index=np.int64(7),
-        neg_values=[np.float32(-1.25)],
-        pos_values=[np.float32(2.5)],
+        feature_index=np.int64(7),  # pyright: ignore
+        neg_values=[np.float32(-1.25)],  # pyright: ignore
+        pos_values=[np.float32(2.5)],  # pyright: ignore
         logits_hist_data_bar_heights=[1, 2],
-        logits_hist_data_bar_values=[np.float32(-0.5), np.float32(0.5)],
+        logits_hist_data_bar_values=[
+            np.float32(-0.5),
+            np.float32(0.5),
+        ],  # pyright: ignore
         freq_hist_data_bar_heights=[2, 1],
-        freq_hist_data_bar_values=[np.float32(0.25), np.float32(0.75)],
+        freq_hist_data_bar_values=[
+            np.float32(0.25),
+            np.float32(0.75),
+        ],  # pyright: ignore
         activations=[],
     )
     runner_cfg = NeuronpediaRunnerConfig(
@@ -224,7 +242,7 @@ def test_create_activation_trims_trailing_pad_tokens() -> None:
         0.0,
         1.0,
         0.5,
-        feature_data,
+        feature_data,  # pyright: ignore
         fake_model,
         {0: "<pad>", 1: "Alpha", 2: "Beta"},
         feature_index=7,
@@ -266,7 +284,7 @@ def test_create_activation_can_preserve_trailing_pad_tokens() -> None:
         0.0,
         1.0,
         0.5,
-        feature_data,
+        feature_data,  # pyright: ignore
         fake_model,
         {0: "<pad>", 1: "Alpha", 2: "Beta"},
         feature_index=7,

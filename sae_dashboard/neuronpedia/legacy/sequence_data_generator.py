@@ -53,10 +53,7 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
             for i in range(self.seq_cfg.n_quantiles - 1, -1, -1):
                 lower, upper = quantiles[i : i + 2].tolist()
                 pct = float(
-                    ((feat_acts >= lower) & (feat_acts <= upper))
-                    .float()
-                    .mean()
-                    .item()
+                    ((feat_acts >= lower) & (feat_acts <= upper)).float().mean().item()
                 )
                 indices = random_range_indices(
                     feat_acts,
@@ -201,7 +198,7 @@ class LegacySequenceDataGenerator(SequenceDataGenerator):
         )
 
     @torch.inference_mode()
-    def get_sequence_coordinate_table(
+    def get_sequence_coordinate_table(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         feat_acts: Float[Tensor, "batch seq"],
         feat_logits: Float[Tensor, "d_vocab"],

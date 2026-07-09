@@ -25,8 +25,6 @@ from sae_dashboard.neuronpedia.neuronpedia_runner import (
     NeuronpediaRunner,
     NeuronpediaRunnerConfig,
 )
-from sae_dashboard.neuronpedia.neuronpedia_dashboard import NeuronpediaDashboardBatch
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,8 +39,9 @@ def bfloat16_round(value: float) -> float:
     return float(t.to(torch.bfloat16).to(torch.float32)[0])
 
 
-def _run_legacy_runner(tmpdir: str, n_features: int = 4, n_prompts: int = 64,
-                        n_batches: int = 2) -> Path:
+def _run_legacy_runner(
+    tmpdir: str, n_features: int = 4, n_prompts: int = 64, n_batches: int = 2
+) -> Path:
     """Run the current legacy (JSON) path and return batch output directory."""
     cfg = NeuronpediaRunnerConfig(
         sae_set="gpt2-small-res-jb",
@@ -70,8 +69,9 @@ def _run_legacy_runner(tmpdir: str, n_features: int = 4, n_prompts: int = 64,
     return batch_dir
 
 
-def _run_columnar_runner(tmpdir: str, n_features: int = 4, n_prompts: int = 64,
-                          n_batches: int = 2) -> Path:
+def _run_columnar_runner(
+    tmpdir: str, n_features: int = 4, n_prompts: int = 64, n_batches: int = 2
+) -> Path:
     """Run the columnar_gpu path and return batch output directory."""
     cfg = NeuronpediaRunnerConfig(
         sae_set="gpt2-small-res-jb",
@@ -177,12 +177,15 @@ class TestLegacyColumnarIntegrationParity:
         sampling of the ~3% expected discrepancy rate.
         """
         N_FEATURES = 128  # per batch
-        N_PROMPTS = 128    # more prompts = more activations
-        N_BATCHES = 2
+        N_PROMPTS = 128  # more prompts = more activations
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            legacy_dir = _run_legacy_runner(tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS)
-            columnar_dir = _run_columnar_runner(tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS)
+            legacy_dir = _run_legacy_runner(
+                tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS
+            )
+            columnar_dir = _run_columnar_runner(
+                tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS
+            )
 
             # Load legacy batch outputs
             results: dict[str, int] = {
@@ -202,8 +205,7 @@ class TestLegacyColumnarIntegrationParity:
 
                 # Find columnar batch directory
                 col_batch_dirs = sorted(
-                    d for d in os.listdir(str(columnar_dir))
-                    if d.startswith("batch-")
+                    d for d in os.listdir(str(columnar_dir)) if d.startswith("batch-")
                 )
                 if batch_i >= len(col_batch_dirs):
                     continue
@@ -214,7 +216,8 @@ class TestLegacyColumnarIntegrationParity:
                 manifest_path = col_batch / "manifest.json"
                 if not manifest_path.exists():
                     subdirs = [
-                        d for d in os.listdir(str(col_batch))
+                        d
+                        for d in os.listdir(str(col_batch))
                         if os.path.isdir(str(col_batch / d))
                     ]
                     if subdirs:
@@ -293,12 +296,16 @@ class TestLegacyColumnarIntegrationParity:
             )
 
             # Find batch directories
-            col_dirs1 = sorted(d for d in os.listdir(str(dir1)) if d.startswith("batch-"))
-            col_dirs2 = sorted(d for d in os.listdir(str(dir2)) if d.startswith("batch-"))
-
-            assert len(col_dirs1) == len(col_dirs2), (
-                f"Batch count mismatch: {len(col_dirs1)} vs {len(col_dirs2)}"
+            col_dirs1 = sorted(
+                d for d in os.listdir(str(dir1)) if d.startswith("batch-")
             )
+            col_dirs2 = sorted(
+                d for d in os.listdir(str(dir2)) if d.startswith("batch-")
+            )
+
+            assert len(col_dirs1) == len(
+                col_dirs2
+            ), f"Batch count mismatch: {len(col_dirs1)} vs {len(col_dirs2)}"
 
             for i, (bd1, bd2) in enumerate(zip(col_dirs1, col_dirs2)):
                 m1_path = dir1 / bd1 / "manifest.json"
@@ -306,13 +313,19 @@ class TestLegacyColumnarIntegrationParity:
 
                 # If manifests are in subdirectories, find them
                 if not m1_path.exists():
-                    subs = [d for d in os.listdir(str(dir1 / bd1))
-                            if os.path.isdir(str(dir1 / bd1 / d))]
+                    subs = [
+                        d
+                        for d in os.listdir(str(dir1 / bd1))
+                        if os.path.isdir(str(dir1 / bd1 / d))
+                    ]
                     if subs:
                         m1_path = dir1 / bd1 / subs[0] / "manifest.json"
                 if not m2_path.exists():
-                    subs = [d for d in os.listdir(str(dir2 / bd2))
-                            if os.path.isdir(str(dir2 / bd2 / d))]
+                    subs = [
+                        d
+                        for d in os.listdir(str(dir2 / bd2))
+                        if os.path.isdir(str(dir2 / bd2 / d))
+                    ]
                     if subs:
                         m2_path = dir2 / bd2 / subs[0] / "manifest.json"
 
@@ -344,8 +357,12 @@ class TestLegacyColumnarIntegrationParity:
         N_PROMPTS = 128
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            legacy_dir = _run_legacy_runner(tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS)
-            columnar_dir = _run_columnar_runner(tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS)
+            legacy_dir = _run_legacy_runner(
+                tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS
+            )
+            columnar_dir = _run_columnar_runner(
+                tmpdir, n_features=N_FEATURES, n_prompts=N_PROMPTS
+            )
 
             legacy_total = 0
             col_total = 0
@@ -361,8 +378,7 @@ class TestLegacyColumnarIntegrationParity:
 
                 # Columnar row count from manifest
                 col_batch_dirs = sorted(
-                    d for d in os.listdir(str(columnar_dir))
-                    if d.startswith("batch-")
+                    d for d in os.listdir(str(columnar_dir)) if d.startswith("batch-")
                 )
                 if batch_i < len(col_batch_dirs):
                     col_batch = columnar_dir / col_batch_dirs[batch_i]
@@ -397,15 +413,14 @@ class TestLegacyColumnarIntegrationParity:
                             fs = manifest.get("feature_statistics", {})
                             if isinstance(fs, dict):
                                 rg = fs.get("row_groups", [])
-                                col_total += sum(
-                                    g.get("num_rows", 0) for g in rg
-                                )
+                                col_total += sum(g.get("num_rows", 0) for g in rg)
 
             # If columnar total is still 0, try loading from batch directories
             if col_total == 0:
                 for batch_i in range(2):
                     col_batch_dirs = sorted(
-                        d for d in os.listdir(str(columnar_dir))
+                        d
+                        for d in os.listdir(str(columnar_dir))
                         if d.startswith("batch-")
                     )
                     if batch_i < len(col_batch_dirs):
@@ -417,6 +432,7 @@ class TestLegacyColumnarIntegrationParity:
                                 for f in os.listdir(str(sub_path)):
                                     if f.startswith("activation_rows"):
                                         import pyarrow as pa
+
                                         try:
                                             table = pa.ipc.open_file(
                                                 str(sub_path / f)

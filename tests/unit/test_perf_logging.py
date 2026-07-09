@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import re
 from contextlib import nullcontext
 
@@ -41,11 +42,14 @@ def test_timed_stage_skips_nested_cuda_synchronization(
         "synchronize",
         lambda device=None: sync_calls.append(device),
     )
-    monkeypatch.setattr(perf_logging.torch.cuda, "current_stream", lambda device: device)
+    monkeypatch.setattr(
+        perf_logging.torch.cuda, "current_stream", lambda device: device
+    )
     monkeypatch.setattr(
         perf_logging.torch.cuda,
         "Event",
-        lambda enable_timing=True: event_instances.append(_FakeEvent()) or event_instances[-1],
+        lambda enable_timing=True: event_instances.append(_FakeEvent())
+        or event_instances[-1],
     )
     monkeypatch.setattr(
         perf_logging.torch.cuda.nvtx,
@@ -113,9 +117,15 @@ def test_timed_stage_emits_runtime_metrics_when_enabled(
         "log_perf_event",
         lambda event, /, **fields: perf_events.append({"event": event, **fields}),
     )
-    monkeypatch.setattr(perf_logging, "runtime_snapshot", lambda: runtime_snapshots.pop(0))
-    monkeypatch.setattr(perf_logging, "process_io_snapshot", lambda: io_snapshots.pop(0))
-    monkeypatch.setattr(perf_logging, "rusage_snapshot", lambda: rusage_snapshots.pop(0))
+    monkeypatch.setattr(
+        perf_logging, "runtime_snapshot", lambda: runtime_snapshots.pop(0)
+    )
+    monkeypatch.setattr(
+        perf_logging, "process_io_snapshot", lambda: io_snapshots.pop(0)
+    )
+    monkeypatch.setattr(
+        perf_logging, "rusage_snapshot", lambda: rusage_snapshots.pop(0)
+    )
     monkeypatch.setattr(perf_logging.time, "process_time", lambda: next(process_times))
     monkeypatch.setattr(perf_logging.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -131,7 +141,10 @@ def test_timed_stage_emits_runtime_metrics_when_enabled(
     assert event["event"] == "stage_timing"
     assert event["stage"] == "rolling"
     assert event["process_time_s"] == 0.75
-    assert event["runtime_start"] == {"torch_num_threads": 4, "cpu_affinity": [0, 1, 2, 3]}
+    assert event["runtime_start"] == {
+        "torch_num_threads": 4,
+        "cpu_affinity": [0, 1, 2, 3],
+    }
     assert event["runtime_end"] == {
         "torch_num_threads": 4,
         "process_threads": 8,
@@ -169,9 +182,15 @@ def test_timed_stage_preserves_zero_rusage_fields(
         "log_perf_event",
         lambda event, /, **fields: perf_events.append({"event": event, **fields}),
     )
-    monkeypatch.setattr(perf_logging, "runtime_snapshot", lambda: runtime_snapshots.pop(0))
-    monkeypatch.setattr(perf_logging, "process_io_snapshot", lambda: io_snapshots.pop(0))
-    monkeypatch.setattr(perf_logging, "rusage_snapshot", lambda: rusage_snapshots.pop(0))
+    monkeypatch.setattr(
+        perf_logging, "runtime_snapshot", lambda: runtime_snapshots.pop(0)
+    )
+    monkeypatch.setattr(
+        perf_logging, "process_io_snapshot", lambda: io_snapshots.pop(0)
+    )
+    monkeypatch.setattr(
+        perf_logging, "rusage_snapshot", lambda: rusage_snapshots.pop(0)
+    )
     monkeypatch.setattr(perf_logging.time, "process_time", lambda: next(process_times))
     monkeypatch.setattr(perf_logging.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
@@ -197,7 +216,9 @@ def test_temporary_torch_num_threads_restores_previous_value(
     current_num_threads = {"value": 8}
     set_calls: list[int] = []
 
-    monkeypatch.setattr(perf_logging.torch, "get_num_threads", lambda: current_num_threads["value"])
+    monkeypatch.setattr(
+        perf_logging.torch, "get_num_threads", lambda: current_num_threads["value"]
+    )
 
     def _set_num_threads(value: int) -> None:
         set_calls.append(value)
