@@ -150,6 +150,17 @@ class HuggingFaceModelWrapper(nn.Module):
         """The tokenizer for this model."""
         return self._tokenizer
 
+    @staticmethod
+    def _activation_shapes_match_tokens(
+        activation_dict: Dict[str, Tensor],
+        tokens: Int[Tensor, "batch seq"],
+    ) -> bool:
+        from sae_dashboard.transformer_lens_wrapper import (
+            activation_shapes_match_tokens,
+        )
+
+        return activation_shapes_match_tokens(activation_dict, tokens)
+
     @torch.inference_mode()
     def forward(
         self,
@@ -185,9 +196,9 @@ class HuggingFaceModelWrapper(nn.Module):
             stop_handle = self._register_stop_hook()
             handles.append(stop_handle)
 
-            # Run forward pass
+            # Run forward pass (activations are captured by hooks; the output is unused)
             try:
-                outputs = self.model(input_ids=tokens, output_hidden_states=False)
+                self.model(input_ids=tokens, output_hidden_states=False)
             except StopForward:
                 # Expected - we stopped early
                 pass
@@ -307,11 +318,7 @@ def to_resid_direction_hf(
     # contain the substrings ``resid`` / ``_out``.
     hook_type = model.primary_hook_info.hook_type
 
-    if (
-        "resid" in hook_type
-        or "_out" in hook_type
-        or "hook_mlp_in" in hook_type
-    ):
+    if "resid" in hook_type or "_out" in hook_type or "hook_mlp_in" in hook_type:
         return direction
 
     # For other hook types, we would need to apply transformations
