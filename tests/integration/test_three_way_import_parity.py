@@ -37,24 +37,23 @@ from typing import Any
 import pytest
 import torch
 
-from sae_dashboard.neuronpedia.neuronpedia_dashboard import NeuronpediaDashboardBatch
 from sae_dashboard.neuronpedia.neuronpedia_runner import (
     NeuronpediaRunner,
     NeuronpediaRunnerConfig,
 )
-from tests.conftest import GOLDEN_BATCHES_DIR, _golden_batch_paths
+from tests.conftest import _golden_batch_paths, _golden_prompt_cache
 
 # ---------------------------------------------------------------------------
 # Tolerances
 # ---------------------------------------------------------------------------
 
-DET_VS_CUR_ROW_DELTA = 0       # exact match
-DET_VS_CUR_FRAC_TOL  = 1e-6
-DET_VS_CUR_MAX_TOL   = 1e-6
-CUR_VS_COL_ROW_DELTA = 2500   # RTE contract tolerance
-CUR_VS_COL_FRAC_TOL  = 0.01
-CUR_VS_COL_MAX_TOL   = 0.01
-COL_SELF_ROW_DELTA   = 0
+DET_VS_CUR_ROW_DELTA = 0  # exact match
+DET_VS_CUR_FRAC_TOL = 1e-6
+DET_VS_CUR_MAX_TOL = 1e-6
+CUR_VS_COL_ROW_DELTA = 2500  # RTE contract tolerance
+CUR_VS_COL_FRAC_TOL = 0.01
+CUR_VS_COL_MAX_TOL = 0.01
+COL_SELF_ROW_DELTA = 0
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +105,7 @@ def _run_legacy_runner(
 def _run_current_legacy_matching_golden(
     tmpdir: str,
     golden_settings: dict[str, Any],
+    pretokenized_dataset_path: str | None = None,
 ) -> Path:
     """Run the current legacy path with config mirrored from golden batches.
 
@@ -113,8 +113,15 @@ def _run_current_legacy_matching_golden(
     ``test_current_legacy_matches_golden_dense_packed`` — it reads the golden
     batch `run_settings.json` and creates a matching ``NeuronpediaRunnerConfig``
     so the fresh run is apples-to-apples with the committed golden batch.
+    For families generated from a committed prompt cache (example_aligned),
+    pass ``pretokenized_dataset_path`` so the rerun consumes the same cache.
     """
     dev = _device()
+    extra_kwargs: dict[str, Any] = {}
+    if pretokenized_dataset_path is not None:
+        extra_kwargs["pretokenized_dataset_path"] = pretokenized_dataset_path
+        if golden_settings.get("n_tokens_in_prompt"):
+            extra_kwargs["n_tokens_in_prompt"] = golden_settings["n_tokens_in_prompt"]
     cfg = NeuronpediaRunnerConfig(
         sae_set=golden_settings.get("sae_set", "gpt2-small-res-jb"),
         sae_path=golden_settings.get("sae_path", "blocks.0.hook_resid_pre"),
@@ -131,6 +138,7 @@ def _run_current_legacy_matching_golden(
         shuffle_tokens=False,
         sae_device=dev,
         model_device=dev,
+        **extra_kwargs,
     )
     runner = NeuronpediaRunner(cfg)
     runner.run()
@@ -148,9 +156,16 @@ def _run_columnar_runner(
     n_features: int = 4,
     n_prompts: int = 64,
     n_batches: int = 2,
+    pretokenized_dataset_path: str | None = None,
+    n_tokens_in_prompt: int | None = None,
 ) -> Path:
     """Run the columnar_gpu path and return batch output directory."""
     dev = _device()
+    extra_kwargs: dict[str, Any] = {}
+    if pretokenized_dataset_path is not None:
+        extra_kwargs["pretokenized_dataset_path"] = pretokenized_dataset_path
+    if n_tokens_in_prompt is not None:
+        extra_kwargs["n_tokens_in_prompt"] = n_tokens_in_prompt
     cfg = NeuronpediaRunnerConfig(
         sae_set="gpt2-small-res-jb",
         sae_path="blocks.0.hook_resid_pre",
@@ -173,6 +188,7 @@ def _run_columnar_runner(
         columnar_artifact_format="arrow",
         sae_device=dev,
         model_device=dev,
+        **extra_kwargs,
     )
     runner = NeuronpediaRunner(cfg)
     runner.run()
@@ -254,7 +270,8 @@ def _columnar_row_count(batch_dir: Path, n_batches: int) -> int:
 
 
 def _columnar_feature_stats(
-    batch_dir: Path, n_batches: int,
+    batch_dir: Path,
+    n_batches: int,
 ) -> tuple[list[float], list[float]]:
     """Return (frac_nonzero_list, max_value_list) from columnar feature-statistics tables."""
     import pyarrow as pa
@@ -360,7 +377,6 @@ class TestThreeWayGenerationParity:
     def test_three_way_generation_parity_dense_packed(self):
         """L1: Validate row counts and feature statistics across all three
         generation paths using the ``dense_packed`` golden batch family."""
-        N_FEATURES = 4
         N_PROMPTS = 64
         N_BATCHES = 2
         DATASET_FAMILY = "dense_packed"
@@ -373,18 +389,26 @@ class TestThreeWayGenerationParity:
         # 2. Run current legacy matching golden batch config
         with tempfile.TemporaryDirectory() as tmpdir:
             legacy_dir = _run_current_legacy_matching_golden(
-                tmpdir, golden_settings,
+                tmpdir,
+                golden_settings,
             )
             legacy_rows = _legacy_row_count(legacy_dir, n_batches=N_BATCHES)
-            legacy_frac, legacy_max = _legacy_feature_stats(legacy_dir, n_batches=N_BATCHES)
+            legacy_frac, legacy_max = _legacy_feature_stats(
+                legacy_dir, n_batches=N_BATCHES
+            )
 
         # 3. Run columnar_gpu (2 features — columnar path has heavier serialization)
         with tempfile.TemporaryDirectory() as tmpdir:
             columnar_dir = _run_columnar_runner(
-                tmpdir, n_features=2, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                tmpdir,
+                n_features=2,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
             )
             col_rows = _columnar_row_count(columnar_dir, n_batches=N_BATCHES)
-            col_frac, col_max = _columnar_feature_stats(columnar_dir, n_batches=N_BATCHES)
+            col_frac, col_max = _columnar_feature_stats(
+                columnar_dir, n_batches=N_BATCHES
+            )
 
         # 4. Validate det vs cur row count (exact match)
         assert abs(legacy_rows - golden_rows) <= DET_VS_CUR_ROW_DELTA, (
@@ -410,12 +434,12 @@ class TestThreeWayGenerationParity:
         min_len_cc = min(len(legacy_frac), len(col_frac))
         assert min_len_cc > 0, "No columnar features to compare"
         for i in range(min_len_cc):
-            assert abs(legacy_frac[i] - col_frac[i]) <= CUR_VS_COL_FRAC_TOL, (
-                f"Feature {i} frac_nonzero: legacy={legacy_frac[i]}, col={col_frac[i]}"
-            )
-            assert abs(legacy_max[i] - col_max[i]) <= CUR_VS_COL_MAX_TOL, (
-                f"Feature {i} max_value: legacy={legacy_max[i]}, col={col_max[i]}"
-            )
+            assert (
+                abs(legacy_frac[i] - col_frac[i]) <= CUR_VS_COL_FRAC_TOL
+            ), f"Feature {i} frac_nonzero: legacy={legacy_frac[i]}, col={col_frac[i]}"
+            assert (
+                abs(legacy_max[i] - col_max[i]) <= CUR_VS_COL_MAX_TOL
+            ), f"Feature {i} max_value: legacy={legacy_max[i]}, col={col_max[i]}"
 
     # ------------------------------------------------------------------
     # L2: example_aligned three-way parity
@@ -427,7 +451,6 @@ class TestThreeWayGenerationParity:
     )
     def test_three_way_generation_parity_example_aligned(self):
         """L2: Example-aligned variant of the three-way generation parity test."""
-        N_FEATURES = 4
         N_PROMPTS = 64
         N_BATCHES = 2
         DATASET_FAMILY = "example_aligned"
@@ -435,13 +458,24 @@ class TestThreeWayGenerationParity:
         golden_rows = _golden_row_count(DATASET_FAMILY)
         golden_frac, golden_max = _golden_feature_stats(DATASET_FAMILY)
         golden_settings = _golden_run_settings(DATASET_FAMILY)
+        # The example_aligned family is generated from a committed max-prompt-pad prompt
+        # cache (in-tree current-legacy provenance); reruns must consume the same cache.
+        prompt_cache = _golden_prompt_cache(DATASET_FAMILY)
+        assert prompt_cache is not None, (
+            "example_aligned golden family requires its committed prompt_cache; "
+            "regenerate with tests/acceptance/generate_golden_batches.py"
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             legacy_dir = _run_current_legacy_matching_golden(
-                tmpdir, golden_settings,
+                tmpdir,
+                golden_settings,
+                pretokenized_dataset_path=str(prompt_cache),
             )
             legacy_rows = _legacy_row_count(legacy_dir, n_batches=N_BATCHES)
-            legacy_frac, legacy_max = _legacy_feature_stats(legacy_dir, n_batches=N_BATCHES)
+            legacy_frac, legacy_max = _legacy_feature_stats(
+                legacy_dir, n_batches=N_BATCHES
+            )
 
         assert abs(legacy_rows - golden_rows) <= DET_VS_CUR_ROW_DELTA
 
@@ -454,10 +488,17 @@ class TestThreeWayGenerationParity:
         # 3. Run columnar_gpu (2 features — columnar path has heavier serialization)
         with tempfile.TemporaryDirectory() as tmpdir:
             columnar_dir = _run_columnar_runner(
-                tmpdir, n_features=2, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                tmpdir,
+                n_features=2,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
+                pretokenized_dataset_path=str(prompt_cache),
+                n_tokens_in_prompt=golden_settings.get("n_tokens_in_prompt"),
             )
             col_rows = _columnar_row_count(columnar_dir, n_batches=N_BATCHES)
-            col_frac, col_max = _columnar_feature_stats(columnar_dir, n_batches=N_BATCHES)
+            col_frac, col_max = _columnar_feature_stats(
+                columnar_dir, n_batches=N_BATCHES
+            )
 
         row_delta_cc = abs(legacy_rows - col_rows)
         assert row_delta_cc <= CUR_VS_COL_ROW_DELTA

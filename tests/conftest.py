@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -72,10 +71,27 @@ def _golden_batch_paths(dataset_family: str) -> tuple[Path, Path, Path, Path]:
     )
 
 
-def load_golden_batch_outputs(dataset_family: str) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    batch0_path, batch1_path, run_settings_path, sae_lens_path = _golden_batch_paths(dataset_family)
+def _golden_prompt_cache(dataset_family: str) -> Path | None:
+    """Committed pretokenized prompt cache for families with genuine windowing provenance.
+
+    The example_aligned family is generated from a committed max-prompt-pad cache (the
+    preserved baseline cannot produce example-aligned windowing); reruns that compare
+    against that family must consume the same cache.
+    """
+    cache_dir = GOLDEN_BATCHES_DIR / dataset_family / "prompt_cache"
+    return cache_dir if cache_dir.exists() else None
+
+
+def load_golden_batch_outputs(
+    dataset_family: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    batch0_path, batch1_path, run_settings_path, sae_lens_path = _golden_batch_paths(
+        dataset_family
+    )
     if not batch0_path.exists():
-        pytest.skip(f"Golden batches not found for {dataset_family}. Regenerate with SAE_DASHBOARD_REGENERATE_GOLDEN_BATCHES=1")
+        pytest.skip(
+            f"Golden batches not found for {dataset_family}. Regenerate with SAE_DASHBOARD_REGENERATE_GOLDEN_BATCHES=1"
+        )
     batch0 = json.loads(batch0_path.read_text())
     batch1 = json.loads(batch1_path.read_text())
     sae_lens = json.loads(sae_lens_path.read_text())
