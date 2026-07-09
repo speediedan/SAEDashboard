@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator
 
 import torch
 
@@ -153,7 +153,9 @@ def _thread_context_switch_snapshot(tid_path: Path) -> dict[str, int]:
 
     snapshot: dict[str, int] = {}
     for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("voluntary_ctxt_switches:") or line.startswith("nonvoluntary_ctxt_switches:"):
+        if line.startswith("voluntary_ctxt_switches:") or line.startswith(
+            "nonvoluntary_ctxt_switches:"
+        ):
             key, raw_value = line.split(":", 1)
             raw_value = raw_value.strip()
             if raw_value.isdigit():
@@ -204,19 +206,29 @@ def thread_fault_delta(
             end_value = end_values.get(key, 0)
             if isinstance(start_value, int) and isinstance(end_value, int):
                 delta[key] = end_value - start_value
-        if any(isinstance(value, int) and value for key, value in delta.items() if key != "tid"):
+        if any(
+            isinstance(value, int) and value
+            for key, value in delta.items()
+            if key != "tid"
+        ):
             active_threads.append(delta)
 
     active_threads.sort(key=lambda item: int(item.get("minor_faults", 0)), reverse=True)
-    total_minor_faults = sum(int(item.get("minor_faults", 0)) for item in active_threads)
-    total_major_faults = sum(int(item.get("major_faults", 0)) for item in active_threads)
+    total_minor_faults = sum(
+        int(item.get("minor_faults", 0)) for item in active_threads
+    )
+    total_major_faults = sum(
+        int(item.get("major_faults", 0)) for item in active_threads
+    )
     return {
         "thread_count_start": len(start),
         "thread_count_end": len(end),
         "active_thread_count": len(active_threads),
         "total_minor_faults": total_minor_faults,
         "total_major_faults": total_major_faults,
-        "max_thread_minor_faults": int(active_threads[0].get("minor_faults", 0)) if active_threads else 0,
+        "max_thread_minor_faults": (
+            int(active_threads[0].get("minor_faults", 0)) if active_threads else 0
+        ),
         "active_threads": active_threads[:64],
         "active_threads_truncated": len(active_threads) > 64,
     }
@@ -244,7 +256,9 @@ def tensor_runtime_metadata(tensor: torch.Tensor) -> dict[str, Any]:
     }
 
 
-def _flatten_numeric_mapping(prefix: str, value: Any, output: dict[str, int | float]) -> None:
+def _flatten_numeric_mapping(
+    prefix: str, value: Any, output: dict[str, int | float]
+) -> None:
     if isinstance(value, dict):
         for key, nested_value in value.items():
             nested_prefix = f"{prefix}_{key}" if prefix else str(key)
@@ -291,7 +305,7 @@ def io_delta(start: dict[str, int], end: dict[str, int]) -> dict[str, int]:
 
 
 @contextmanager
-def temporary_torch_num_threads(num_threads: int | None) -> Iterator[None]:
+def temporary_torch_num_threads(num_threads: int | None) -> Generator[None, None, None]:
     if num_threads is None:
         yield
         return
@@ -318,7 +332,7 @@ def timed_stage(
     device: str | torch.device | None = None,
     capture_runtime_metrics: bool = False,
     **fields: Any,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     if not enabled:
         yield
         return
@@ -328,8 +342,7 @@ def timed_stage(
     torch_device = torch.device(device) if device is not None else None
     use_cuda_events = (
         stage_depth == 0
-        and
-        torch_device is not None
+        and torch_device is not None
         and torch_device.type == "cuda"
         and torch.cuda.is_available()
     )
@@ -345,7 +358,9 @@ def timed_stage(
     start_io = process_io_snapshot() if capture_runtime_metrics else None
     start_rusage = rusage_snapshot() if capture_runtime_metrics else None
     start_thread_faults = thread_fault_snapshot() if capture_runtime_metrics else None
-    start_torch_host_allocator = torch_host_allocator_snapshot() if capture_runtime_metrics else None
+    start_torch_host_allocator = (
+        torch_host_allocator_snapshot() if capture_runtime_metrics else None
+    )
     start_process_time = time.process_time() if capture_runtime_metrics else None
     start_time = time.perf_counter()
     try:
@@ -372,7 +387,9 @@ def timed_stage(
                 end_thread_faults = thread_fault_snapshot()
                 end_torch_host_allocator = torch_host_allocator_snapshot()
                 if start_process_time is not None:
-                    log_fields["process_time_s"] = time.process_time() - start_process_time
+                    log_fields["process_time_s"] = (
+                        time.process_time() - start_process_time
+                    )
                 if start_runtime is not None:
                     log_fields["runtime_start"] = start_runtime
                 log_fields["runtime_end"] = end_runtime
@@ -381,13 +398,19 @@ def timed_stage(
                     if runtime_rusage_delta:
                         log_fields["rusage_delta"] = runtime_rusage_delta
                 if start_thread_faults is not None:
-                    runtime_thread_fault_delta = thread_fault_delta(start_thread_faults, end_thread_faults)
+                    runtime_thread_fault_delta = thread_fault_delta(
+                        start_thread_faults, end_thread_faults
+                    )
                     if runtime_thread_fault_delta:
                         log_fields["thread_fault_delta"] = runtime_thread_fault_delta
                 if start_torch_host_allocator is not None:
-                    runtime_allocator_delta = rusage_delta(start_torch_host_allocator, end_torch_host_allocator)
+                    runtime_allocator_delta = rusage_delta(
+                        start_torch_host_allocator, end_torch_host_allocator
+                    )
                     if runtime_allocator_delta:
-                        log_fields["torch_host_allocator_delta"] = runtime_allocator_delta
+                        log_fields["torch_host_allocator_delta"] = (
+                            runtime_allocator_delta
+                        )
                 if start_io is not None:
                     runtime_io_delta = io_delta(start_io, end_io)
                     if runtime_io_delta:
@@ -398,7 +421,7 @@ def timed_stage(
 
 
 @contextmanager
-def elapsed_timer() -> Iterator[dict[str, float]]:
+def elapsed_timer() -> Generator[dict[str, float], None, None]:
     timing: dict[str, float] = {}
     start_time = time.perf_counter()
     try:

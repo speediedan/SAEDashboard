@@ -37,7 +37,9 @@ class RollingCorrCoef:
         self._x_buf: Tensor | None = None
         self._y_buf: Tensor | None = None
 
-    def _ensure_cpu_buffer(self, rows: int, cols: int, existing: Tensor | None) -> Tensor:
+    def _ensure_cpu_buffer(
+        self, rows: int, cols: int, existing: Tensor | None
+    ) -> Tensor:
         if (
             existing is None
             or existing.shape[0] != rows
@@ -65,13 +67,19 @@ class RollingCorrCoef:
         assert x.ndim == 2 and y.ndim == 2, "Both x and y should be 2D"
         X, Nx = x.shape
         Y, Ny = y.shape
-        assert Nx == Ny, "Error: x and y should have the same size in the last dimension"
+        assert (
+            Nx == Ny
+        ), "Error: x and y should have the same size in the last dimension"
         if self.with_self:
             assert X == Y, "If with_self is True, then x and y should be the same shape"
         if self.X is not None:
-            assert X == self.X, "Error: updating a corrcoef object with different sized dataset."
+            assert (
+                X == self.X
+            ), "Error: updating a corrcoef object with different sized dataset."
         if self.Y is not None:
-            assert Y == self.Y, "Error: updating a corrcoef object with different sized dataset."
+            assert (
+                Y == self.Y
+            ), "Error: updating a corrcoef object with different sized dataset."
         self.X = X
         self.Y = Y
 

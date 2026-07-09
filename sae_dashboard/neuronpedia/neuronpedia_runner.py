@@ -141,7 +141,7 @@ class NeuronpediaRunner:
     ):
         self.cfg = cfg
         self._columnar_write_executor: ThreadPoolExecutor | None = None
-        self._pending_columnar_writes: deque[tuple[int, int, Future]] = deque()
+        self._pending_columnar_writes: deque[tuple[int, int, Future[Any]]] = deque()
         self._last_sae_vis_runner: Any | None = None
         warn_if_deprecated_legacy_dashboard_path(cfg)
 
@@ -857,7 +857,7 @@ class NeuronpediaRunner:
             or self.cfg.use_clt
             or "hook_mlp_in" in self.hook_name  # type: ignore
         ) and hasattr(self.model, "set_use_hook_mlp_in"):
-            self.model.set_use_hook_mlp_in(True)
+            cast(Any, self.model).set_use_hook_mlp_in(True)
 
         if self.cfg.free_unused_model_layers and self.cfg.model_wrapper != "bridge":
             self._free_unused_model_layers()
@@ -1592,7 +1592,7 @@ class NeuronpediaRunner:
                 "feature_data_dict": feature_data.feature_data_dict,
                 "runner_cfg": self.cfg,
                 "vocab_dict": self.vocab_dict,
-                "model_d_vocab": int(self.model.cfg.d_vocab),
+                "model_d_vocab": int(cast(Any, self.model).cfg.d_vocab),
                 "model_id": self.model_id,
                 "layer": self.layer,
                 "hook_name": self.hook_name,
@@ -2180,7 +2180,10 @@ class NeuronpediaRunner:
                             feature_count=len(features_to_process),
                         ):
                             json_object = NeuronpediaConverter.convert_to_np_json(
-                                self.model, feature_data, self.cfg, self.vocab_dict
+                                cast(Any, self.model),
+                                cast(Any, feature_data),
+                                self.cfg,
+                                self.vocab_dict,
                             )
                         write_start_io = process_io_snapshot()
                         with elapsed_timer() as write_timing:

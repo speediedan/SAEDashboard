@@ -1,7 +1,7 @@
 import re
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -145,8 +145,13 @@ class TransformerLensWrapper(nn.Module):
             )
 
         hooks_context = getattr(self.model, "hooks", None)
-        context_manager = (
-            hooks_context(fwd_hooks=hooks) if callable(hooks_context) else nullcontext()
+        context_manager = cast(
+            AbstractContextManager[Any],
+            (
+                hooks_context(fwd_hooks=hooks)
+                if callable(hooks_context)
+                else nullcontext()
+            ),
         )
         with context_manager:
             if self.disable_kv_cache:
@@ -192,7 +197,7 @@ class TransformerLensWrapper(nn.Module):
         build_act_dict(hooks)
 
         if return_logits:
-            activation_dict["output"] = output
+            activation_dict["output"] = cast(Tensor, output)
         else:
             del output
 

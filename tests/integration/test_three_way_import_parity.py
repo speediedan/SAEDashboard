@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 """Three-way generation parity tests (L1, L2).
 
 Validates generation-layer parity across the three dashboard generation paths:

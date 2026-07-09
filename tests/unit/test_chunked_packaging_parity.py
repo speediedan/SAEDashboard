@@ -1,8 +1,9 @@
+# pyright: basic, reportPrivateImportUsage=false
 # pyright: reportMissingTypeStubs=false
 """Parity tests for the chunked-device feature-statistics / activation-histogram
 builders (Phase 6.2 slice 2) and the memoized activation-row detokenization."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -11,6 +12,9 @@ import torch
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.utils_fns import FeatureStatistics, HistogramData
 from tests.helpers import build_sae_vis_cfg
+
+if TYPE_CHECKING:
+    from sae_dashboard.sequence_data_generator import SequenceCoordinateTable
 
 
 def _stats_fixture(
@@ -523,7 +527,9 @@ def test_resolve_feature_acts_output_device_decision() -> None:
     generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
     generator.full_sequence_length = 128
 
-    generator.cfg = SimpleNamespace(dashboard_output_format="json", device="cuda")
+    generator.cfg = SimpleNamespace(  # pyright: ignore
+        dashboard_output_format="json", device="cuda"
+    )
     assert (
         generator._resolve_feature_acts_output_device(
             total_prompt_count=2490, feature_count=1024
@@ -531,7 +537,9 @@ def test_resolve_feature_acts_output_device_decision() -> None:
         == "cpu"
     )
 
-    generator.cfg = SimpleNamespace(dashboard_output_format="columnar", device="cpu")
+    generator.cfg = SimpleNamespace(  # pyright: ignore
+        dashboard_output_format="columnar", device="cpu"
+    )
     assert (
         generator._resolve_feature_acts_output_device(
             total_prompt_count=2490, feature_count=1024
@@ -539,7 +547,9 @@ def test_resolve_feature_acts_output_device_decision() -> None:
         == "cpu"
     )
 
-    generator.cfg = SimpleNamespace(dashboard_output_format="columnar", device="cuda")
+    generator.cfg = SimpleNamespace(  # pyright: ignore
+        dashboard_output_format="columnar", device="cuda"
+    )
     over_budget = generator._resolve_feature_acts_output_device(
         total_prompt_count=2490, feature_count=1_000_000
     )

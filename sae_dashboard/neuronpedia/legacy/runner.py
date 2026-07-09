@@ -86,9 +86,7 @@ def _build_legacy_vis_config(
         cleanup_each_minibatch=runner.cfg.cleanup_each_minibatch,
         torch_profile=runner.cfg.torch_profile,
         torch_profile_dir=(
-            Path(runner.cfg.torch_profile_dir)
-            if runner.cfg.torch_profile_dir
-            else None
+            Path(runner.cfg.torch_profile_dir) if runner.cfg.torch_profile_dir else None
         ),
         device=runner.cfg.sae_device or "cpu",
         feature_centric_layout=_build_legacy_layout(runner),
@@ -239,7 +237,5 @@ def run_legacy_batch_loop(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             runner._release_unused_host_memory()
-            runner._log_resource_snapshot(
-                f"post_batch_cleanup_{feature_batch_count}"
-            )
+            runner._log_resource_snapshot(f"post_batch_cleanup_{feature_batch_count}")
             print(logline)

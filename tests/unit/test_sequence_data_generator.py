@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 # pyright: reportMissingTypeStubs=false
 
 import random
@@ -1238,7 +1239,7 @@ def test_columnar_top_positive_only_drops_zero_tie_fill() -> None:
     # Flag off: zero ties fill the remaining TOP slots (inherited behavior).
     assert n_bold_off == 5
 
-    generator.cfg.sequence_top_acts_positive_only = True
+    generator.cfg.sequence_top_acts_positive_only = True  # pyright: ignore
     indices_dict_on, _, n_bold_on = generator.get_indices_dict_columnar_gpu(
         generator.buffer, feat_acts, selection_mask=selection_mask
     )
@@ -1259,7 +1260,7 @@ def test_columnar_skip_dead_features_emits_empty_selection() -> None:
     # Flag off: degenerate zero-interval groups still emit rows (inherited behavior).
     assert n_bold_off > 0
 
-    generator.cfg.sequence_skip_dead_features = True
+    generator.cfg.sequence_skip_dead_features = True  # pyright: ignore
     indices_dict_on, indices_bold_on, n_bold_on = (
         generator.get_indices_dict_columnar_gpu(
             generator.buffer, feat_acts, selection_mask=selection_mask
@@ -1289,7 +1290,7 @@ def test_columnar_dedup_across_groups_removes_top_interval_double_selection() ->
     coordinates_off = _coordinate_multiset(indices_dict_off)
     assert coordinates_off.count((0, 1)) >= 2  # TOP ∩ interval duplicate exists
 
-    generator.cfg.sequence_dedup_across_groups = True
+    generator.cfg.sequence_dedup_across_groups = True  # pyright: ignore
     random.seed(20260707)
     indices_dict_on, _, _ = generator.get_indices_dict_columnar_gpu(
         generator.buffer, feat_acts, selection_mask=selection_mask
@@ -1303,9 +1304,9 @@ def test_columnar_batched_matches_sequential_with_hygiene_flags() -> None:
     generator = _batched_selection_fixture_generator(
         n_quantiles=4, top_acts_group_size=3, quantile_group_size=2
     )
-    generator.cfg.sequence_top_acts_positive_only = True
-    generator.cfg.sequence_dedup_across_groups = True
-    generator.cfg.sequence_skip_dead_features = True
+    generator.cfg.sequence_top_acts_positive_only = True  # pyright: ignore
+    generator.cfg.sequence_dedup_across_groups = True  # pyright: ignore
+    generator.cfg.sequence_skip_dead_features = True  # pyright: ignore
 
     torch.manual_seed(20260707)
     all_feat_acts = (torch.rand(3, 8, 5, dtype=torch.float32) + 0.01) * torch.linspace(
@@ -1338,7 +1339,7 @@ def test_columnar_batched_matches_sequential_with_half_open_bins() -> None:
     generator = _batched_selection_fixture_generator(
         n_quantiles=4, top_acts_group_size=2, quantile_group_size=16
     )
-    generator.cfg.sequence_half_open_interval_bins = True
+    generator.cfg.sequence_half_open_interval_bins = True  # pyright: ignore
 
     all_feat_acts = torch.zeros(3, 8, 4, dtype=torch.float32)
     # Feature 0: value exactly on an interior boundary of linspace(0, 1.0, 5).

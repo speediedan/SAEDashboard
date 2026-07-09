@@ -17,14 +17,14 @@ class LegacyFeatureDataGenerator(FeatureDataGenerator):
     def _uses_full_feature_encode_path(self) -> bool:
         return self.encoder.cfg.architecture() in ["topk", "batchtopk", "temporal"]
 
-    def _create_corrcoef_neurons(
+    def _create_corrcoef_neurons(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         *,
         correlation_device: torch.device,
     ):
         return legacy_utils_fns.RollingCorrCoef(device=torch.device("cpu"))
 
-    def _create_corrcoef_encoder(
+    def _create_corrcoef_encoder(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         *,
         feature_indices: list[int],

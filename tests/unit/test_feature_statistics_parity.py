@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 """Feature-level statistics parity tests.
 
 Validates that per-feature ``frac_nonzero`` and ``maxValue`` match between
@@ -31,7 +32,6 @@ from typing import Any
 import pytest
 import torch
 
-from sae_dashboard.neuronpedia.neuronpedia_dashboard import NeuronpediaDashboardBatch
 from sae_dashboard.neuronpedia.neuronpedia_runner import (
     NeuronpediaRunner,
     NeuronpediaRunnerConfig,
@@ -63,7 +63,7 @@ def _load_golden_batch_features(dataset_family: str) -> list[dict[str, Any]]:
         )
     batch0 = json.loads(batch0_path.read_text())
     batch1 = json.loads(batch1_path.read_text())
-    return batch0["features"], batch1["features"]
+    return batch0["features"], batch1["features"]  # pyright: ignore
 
 
 def _run_legacy_runner(
@@ -179,7 +179,9 @@ def _extract_max_value_from_legacy(batch_dir: Path, n_batches: int) -> list[floa
     return max_values
 
 
-def _extract_frac_nonzero_from_columnar(columnar_dir: Path, n_batches: int) -> list[float]:
+def _extract_frac_nonzero_from_columnar(
+    columnar_dir: Path, n_batches: int
+) -> list[float]:
     """Extract per-feature frac_nonzero from columnar Arrow feature-statistics table."""
     import pyarrow as pa
 
@@ -264,8 +266,14 @@ class TestFeatureStatisticsParityDetVsCur:
 
     def test_feature_frac_nonzero_matches_detached_vs_current_legacy_dense_packed(self):
         """M1 (det-vs-cur): frac_nonzero matches between golden batch and fresh run."""
-        golden_features_b0, golden_features_b1 = _load_golden_batch_features("dense_packed")
-        golden_frac = [f["frac_nonzero"] for f in golden_features_b0 + golden_features_b1]
+        golden_features_b0, golden_features_b1 = _load_golden_batch_features(
+            "dense_packed"
+        )
+        golden_frac = [
+            f["frac_nonzero"]
+            for f in golden_features_b0
+            + golden_features_b1  # pyright: ignore[reportOperatorIssue]
+        ]
 
         # Run current legacy path with same config
         golden_run_settings = json.loads(
@@ -280,9 +288,9 @@ class TestFeatureStatisticsParityDetVsCur:
             )
             current_frac = _extract_frac_nonzero_from_legacy(legacy_dir, n_batches=2)
 
-        assert len(current_frac) == len(golden_frac), (
-            f"Feature count mismatch: current={len(current_frac)} vs golden={len(golden_frac)}"
-        )
+        assert len(current_frac) == len(
+            golden_frac
+        ), f"Feature count mismatch: current={len(current_frac)} vs golden={len(golden_frac)}"
         for i, (cur, gold) in enumerate(zip(current_frac, golden_frac)):
             assert abs(cur - gold) <= DET_VS_CUR_FRAC_NONZERO_TOL, (
                 f"Feature {i} frac_nonzero mismatch: current={cur} vs golden={gold} "
@@ -291,11 +299,15 @@ class TestFeatureStatisticsParityDetVsCur:
 
     def test_feature_max_value_matches_detached_vs_current_legacy_dense_packed(self):
         """M2 (det-vs-cur): max activation value matches between golden batch and fresh run."""
-        golden_features_b0, golden_features_b1 = _load_golden_batch_features("dense_packed")
+        golden_features_b0, golden_features_b1 = _load_golden_batch_features(
+            "dense_packed"
+        )
 
         # Extract max from golden batch (max across all activation values per feature)
         golden_max: list[float] = []
-        for feature in golden_features_b0 + golden_features_b1:
+        for feature in (
+            golden_features_b0 + golden_features_b1
+        ):  # pyright: ignore[reportOperatorIssue]
             feature_max = 0.0
             for act in feature["activations"]:
                 values = act.get("values", [])
@@ -315,9 +327,9 @@ class TestFeatureStatisticsParityDetVsCur:
             )
             current_max = _extract_max_value_from_legacy(legacy_dir, n_batches=2)
 
-        assert len(current_max) == len(golden_max), (
-            f"Feature count mismatch: current={len(current_max)} vs golden={len(golden_max)}"
-        )
+        assert len(current_max) == len(
+            golden_max
+        ), f"Feature count mismatch: current={len(current_max)} vs golden={len(golden_max)}"
         for i, (cur, gold) in enumerate(zip(current_max, golden_max)):
             assert abs(cur - gold) <= DET_VS_CUR_MAX_VALUE_TOL, (
                 f"Feature {i} max_value mismatch: current={cur} vs golden={gold} "
@@ -349,11 +361,15 @@ class TestFeatureStatisticsParityCurVsCol:
         with tempfile.TemporaryDirectory() as tmpdir:
             legacy_dir = _run_legacy_runner(
                 os.path.join(tmpdir, "legacy"),
-                n_features=N_FEATURES, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                n_features=N_FEATURES,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
             )
             columnar_dir = _run_columnar_runner(
                 os.path.join(tmpdir, "columnar"),
-                n_features=N_FEATURES, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                n_features=N_FEATURES,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
             )
 
             legacy_frac = _extract_frac_nonzero_from_legacy(legacy_dir, N_BATCHES)
@@ -393,11 +409,15 @@ class TestFeatureStatisticsParityCurVsCol:
         with tempfile.TemporaryDirectory() as tmpdir:
             legacy_dir = _run_legacy_runner(
                 os.path.join(tmpdir, "legacy"),
-                n_features=N_FEATURES, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                n_features=N_FEATURES,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
             )
             columnar_dir = _run_columnar_runner(
                 os.path.join(tmpdir, "columnar"),
-                n_features=N_FEATURES, n_prompts=N_PROMPTS, n_batches=N_BATCHES,
+                n_features=N_FEATURES,
+                n_prompts=N_PROMPTS,
+                n_batches=N_BATCHES,
             )
 
             legacy_max = _extract_max_value_from_legacy(legacy_dir, N_BATCHES)

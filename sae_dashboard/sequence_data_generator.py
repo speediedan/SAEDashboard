@@ -2,7 +2,7 @@ import importlib
 from dataclasses import dataclass
 from os import PathLike
 from time import perf_counter
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TypeVar
 
 import einops
 import numpy as np
@@ -25,6 +25,8 @@ from sae_dashboard.utils_fns import (
     sample_unique_indices,
 )
 from sae_dashboard.vector_vis_data import VectorVisConfig
+
+_PositionArrayT = TypeVar("_PositionArrayT", Tensor, "np.ndarray[Any, np.dtype[Any]]")
 
 SequenceSelectionBackend = Literal["legacy", "columnar_gpu"]
 
@@ -1626,11 +1628,13 @@ class SequenceDataGenerator:
         return interval_index == self.seq_cfg.n_quantiles - 1
 
     @staticmethod
-    def _filter_unselected_positions(positions, selected_mask):
+    def _filter_unselected_positions(
+        positions: _PositionArrayT, selected_mask: _PositionArrayT | None
+    ) -> _PositionArrayT:
         """Drop positions already claimed by an earlier group (no-op when dedup is off)."""
         if selected_mask is None:
             return positions
-        return positions[~selected_mask[positions]]
+        return positions[~selected_mask[positions]]  # pyright: ignore[reportReturnType]
 
     @staticmethod
     def _build_feature_selected_mask(
@@ -1655,7 +1659,9 @@ class SequenceDataGenerator:
         return selected_mask
 
     @staticmethod
-    def _mark_selected_positions(positions, selected_mask) -> None:
+    def _mark_selected_positions(
+        positions: _PositionArrayT, selected_mask: _PositionArrayT | None
+    ) -> None:
         """Record positions in the running cross-group exclusion mask (no-op when dedup is off)."""
         if selected_mask is not None:
             selected_mask[positions] = True
@@ -1670,7 +1676,7 @@ class SequenceDataGenerator:
         get_indices_dict_start = perf_counter() if profile_enabled else 0.0
 
         mask_setup_start = perf_counter() if profile_enabled else 0.0
-        candidate_mask, candidate_indices, candidate_flat_indices = (
+        _candidate_mask, candidate_indices, candidate_flat_indices = (
             self._get_candidate_mask_and_indices(
                 feat_acts,
                 buffer,

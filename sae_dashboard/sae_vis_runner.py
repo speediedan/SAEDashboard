@@ -43,9 +43,7 @@ from sae_dashboard.neuronpedia.legacy import (
     feature_data_generator as legacy_feature_data_generator,
 )
 from sae_dashboard.neuronpedia.legacy import sae_vis_runner as legacy_sae_vis_runner
-from sae_dashboard.neuronpedia.legacy.runner import (
-    is_preserved_legacy_path,
-)
+from sae_dashboard.neuronpedia.legacy.runner import is_preserved_legacy_path
 from sae_dashboard.neuronpedia.legacy.sequence_data_generator import (
     LegacySequenceDataGenerator,
 )
@@ -174,10 +172,10 @@ class FeatureDataGeneratorFactory:
                 ),
             )
             wrapped_model = TransformerLensWrapper(
-                model,
+                cast(HookedSAETransformer, model),
                 activation_config,
                 disable_kv_cache=not is_preserved_legacy_path(cfg),
-            )  # type: ignore
+            )
 
         feature_data_generator_cls = (
             FeatureDataGeneratorFactory.resolve_feature_data_generator_cls(cfg)
@@ -1205,7 +1203,7 @@ class SaeVisRunner:
             # Everything captured here is host-resident (Arrow tables, CPU coordinate
             # tables, Python rows); the deferred callable performs the CPU packaging
             # tail and all file writes when invoked.
-            return _DeferredColumnarBatchWrite(
+            return _DeferredColumnarBatchWrite(  # pyright: ignore[reportReturnType]
                 feature_batch_index=feature_batch_index,
                 feature_indices=[int(feature) for feature in features],
                 artifact_dir=(
@@ -1504,9 +1502,9 @@ class SaeVisRunner:
         )
 
         unembed_matrix = (
-            self._get_hf_unembed_matrix(model)
+            self._get_hf_unembed_matrix(cast(AutoModelForCausalLM, model))
             if self.cfg.use_huggingface
-            else _resolve_unembed_matrix(model)
+            else _resolve_unembed_matrix(cast(HookedSAETransformer, model))
         )
         sequence_data_generator_cls = (
             LegacySequenceDataGenerator
@@ -1529,7 +1527,7 @@ class SaeVisRunner:
                         feature_batch_index=feature_batch_index,
                         features=features,
                         tokens=tokens,
-                        model=model,
+                        model=cast(HookedSAETransformer, model),
                         encoder=encoder,
                         unembed_matrix=unembed_matrix,
                         feature_data_generator=feature_data_generator,

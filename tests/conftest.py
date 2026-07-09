@@ -71,7 +71,9 @@ def _golden_batch_paths(dataset_family: str) -> tuple[Path, Path, Path, Path]:
     )
 
 
-def _golden_prompt_cache(dataset_family: str) -> Path | None:
+def _golden_prompt_cache(  # pyright: ignore[reportUnusedFunction]
+    dataset_family: str,
+) -> Path | None:
     """Committed pretokenized prompt cache for families with genuine windowing provenance.
 
     The example_aligned family is generated from a committed max-prompt-pad cache (the

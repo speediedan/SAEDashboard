@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 from __future__ import annotations
 
 import argparse
@@ -57,7 +58,9 @@ def test_parse_args_has_no_default_custom_dataset_module() -> None:
     assert args.windowing_mode == DEFAULT_WINDOWING_MODE
 
 
-def test_build_pretokenize_config_uses_windowing_mode_to_disable_concat_sequences() -> None:
+def test_build_pretokenize_config_uses_windowing_mode_to_disable_concat_sequences() -> (
+    None
+):
     args = prompt_pretokenization.parse_args(
         [
             "--dataset-path",
@@ -84,16 +87,22 @@ def test_custom_pretokenization_module_hooks_are_optional(monkeypatch) -> None:
     def configure_parser(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--custom-flag", default="default")
 
-    def load_custom_pretokenization_settings(args: argparse.Namespace) -> dict[str, str]:
+    def load_custom_pretokenization_settings(
+        args: argparse.Namespace,
+    ) -> dict[str, str]:
         return {"custom_flag": args.custom_flag}
 
-    def pretokenize_custom_dataset(dataset, tokenizer, cfg, settings) -> PretokenizationResult:
+    def pretokenize_custom_dataset(
+        dataset, tokenizer, cfg, settings
+    ) -> PretokenizationResult:
         seen["dataset"] = dataset
         seen["settings"] = settings
         seen["tokenizer_max_length"] = tokenizer.model_max_length
         seen["context_size"] = cfg.context_size
         return PretokenizationResult(
-            tokenized_dataset=Dataset.from_dict({"input_ids": [[1, 2, 0]], "attention_mask": [[1, 1, 0]]}),
+            tokenized_dataset=Dataset.from_dict(
+                {"input_ids": [[1, 2, 0]], "attention_mask": [[1, 1, 0]]}
+            ),
             effective_context_size=3,
             prompt_lengths=(2,),
             windowing_mode="max-prompt-pad",
@@ -102,19 +111,30 @@ def test_custom_pretokenization_module_hooks_are_optional(monkeypatch) -> None:
         )
 
     def build_custom_metadata(args, settings, result, tokenizer, cfg) -> dict[str, Any]:
-        return {"custom_flag": settings["custom_flag"], "rows": len(result.tokenized_dataset)}
+        return {
+            "custom_flag": settings["custom_flag"],
+            "rows": len(result.tokenized_dataset),
+        }
 
-    fake_module.configure_parser = configure_parser
-    fake_module.load_custom_pretokenization_settings = load_custom_pretokenization_settings
-    fake_module.pretokenize_custom_dataset = pretokenize_custom_dataset
-    fake_module.build_custom_metadata = build_custom_metadata
+    fake_module.configure_parser = configure_parser  # pyright: ignore
+    fake_module.load_custom_pretokenization_settings = (  # pyright: ignore
+        load_custom_pretokenization_settings
+    )
+    fake_module.pretokenize_custom_dataset = (  # pyright: ignore
+        pretokenize_custom_dataset
+    )
+    fake_module.build_custom_metadata = build_custom_metadata  # pyright: ignore
     monkeypatch.setitem(sys.modules, module_name, fake_module)
     monkeypatch.setattr(
         prompt_pretokenization,
         "load_dashboard_dataset",
         lambda cfg, max_rows: Dataset.from_dict({"text": ["alpha"]}),
     )
-    monkeypatch.setattr(prompt_pretokenization.AutoTokenizer, "from_pretrained", lambda _: DummyTokenizer())
+    monkeypatch.setattr(
+        prompt_pretokenization.AutoTokenizer,
+        "from_pretrained",
+        lambda _: DummyTokenizer(),
+    )
 
     args = prompt_pretokenization.parse_args(
         [
@@ -159,12 +179,14 @@ def test_materialize_tokenized_dataset_truncates_iterable_rows() -> None:
     assert materialized[1]["attention_mask"].tolist() == [1, 1]
 
 
-def test_pretokenize_prompt_token_sequences_max_prompt_pad_materializes_attention_masks() -> None:
+def test_pretokenize_prompt_token_sequences_max_prompt_pad_materializes_attention_masks() -> (
+    None
+):
     cfg = _build_cfg(context_size=8)
 
     result = pretokenize_prompt_token_sequences(
         [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6, 7, 8])],
-        tokenizer=DummyTokenizer(),
+        tokenizer=DummyTokenizer(),  # pyright: ignore
         cfg=cfg,
         windowing_mode="max-prompt-pad",
     )
@@ -176,12 +198,14 @@ def test_pretokenize_prompt_token_sequences_max_prompt_pad_materializes_attentio
     assert result.tokenized_dataset[0]["attention_mask"].tolist() == [1, 1, 1, 0, 0]
 
 
-def test_pretokenize_prompt_token_sequences_fixed_context_pad_uses_requested_context() -> None:
+def test_pretokenize_prompt_token_sequences_fixed_context_pad_uses_requested_context() -> (
+    None
+):
     cfg = _build_cfg(context_size=6)
 
     result = pretokenize_prompt_token_sequences(
         [torch.tensor([1, 2, 3]), torch.tensor([4, 5])],
-        tokenizer=DummyTokenizer(),
+        tokenizer=DummyTokenizer(),  # pyright: ignore
         cfg=cfg,
         windowing_mode="fixed-context-pad",
     )
@@ -192,7 +216,9 @@ def test_pretokenize_prompt_token_sequences_fixed_context_pad_uses_requested_con
     assert result.tokenized_dataset[1]["attention_mask"].tolist() == [1, 1, 0, 0, 0, 0]
 
 
-def test_pretokenize_prompt_token_sequences_concatenate_preserves_packed_behavior() -> None:
+def test_pretokenize_prompt_token_sequences_concatenate_preserves_packed_behavior() -> (
+    None
+):
     cfg = _build_cfg(context_size=4)
 
     result = pretokenize_prompt_token_sequences(
@@ -202,7 +228,7 @@ def test_pretokenize_prompt_token_sequences_concatenate_preserves_packed_behavio
             torch.tensor([5, 6]),
             torch.tensor([7, 8]),
         ],
-        tokenizer=DummyTokenizer(),
+        tokenizer=DummyTokenizer(),  # pyright: ignore
         cfg=cfg,
         windowing_mode="concatenate",
     )
@@ -220,7 +246,7 @@ def test_pretokenize_prompt_token_sequences_filter_truncate_drops_short_rows() -
 
     result = pretokenize_prompt_token_sequences(
         [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6, 7, 8])],
-        tokenizer=DummyTokenizer(),
+        tokenizer=DummyTokenizer(),  # pyright: ignore
         cfg=cfg,
         windowing_mode="filter-truncate",
     )
@@ -240,7 +266,11 @@ def test_run_dashboard_pretokenization_allows_example_aligned_modes_without_cust
         "load_dashboard_dataset",
         lambda cfg, max_rows: Dataset.from_dict({"text": ["alpha", "go"]}),
     )
-    monkeypatch.setattr(prompt_pretokenization.AutoTokenizer, "from_pretrained", lambda _: DummyTokenizer())
+    monkeypatch.setattr(
+        prompt_pretokenization.AutoTokenizer,
+        "from_pretrained",
+        lambda _: DummyTokenizer(),
+    )
 
     args = prompt_pretokenization.parse_args(
         [
@@ -275,7 +305,11 @@ def test_run_dashboard_pretokenization_allows_example_aligned_chat_formatting_wi
         "load_dashboard_dataset",
         lambda cfg, max_rows: Dataset.from_dict({"prompt": ["hi", "hello"]}),
     )
-    monkeypatch.setattr(prompt_pretokenization.AutoTokenizer, "from_pretrained", lambda _: DummyTokenizer())
+    monkeypatch.setattr(
+        prompt_pretokenization.AutoTokenizer,
+        "from_pretrained",
+        lambda _: DummyTokenizer(),
+    )
 
     args = prompt_pretokenization.parse_args(
         [
@@ -295,7 +329,9 @@ def test_run_dashboard_pretokenization_allows_example_aligned_chat_formatting_wi
         ]
     )
 
-    with pytest.warns(UserWarning, match="use_chat_formatting is True but column contains strings"):
+    with pytest.warns(
+        UserWarning, match="use_chat_formatting is True but column contains strings"
+    ):
         result, _, metadata = prompt_pretokenization.run_dashboard_pretokenization(args)
 
     assert result.effective_context_size == 6

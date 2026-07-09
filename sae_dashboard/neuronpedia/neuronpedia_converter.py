@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -33,6 +33,7 @@ def _serialize_special_value(value: Any) -> Any:
     if isinstance(value, np.bool_):
         return bool(value)
     raise TypeError(f"Unsupported value for serialization: {type(value)!r}")
+
 
 # Type alias for model types
 ModelType = Union[HookedTransformer, PreTrainedModel]
@@ -176,8 +177,8 @@ class NeuronpediaConverter:
             feature_data_dict = feature_data.feature_data_dict
         vis_data_stub = SimpleNamespace(feature_data_dict=feature_data_dict)
         return NeuronpediaConverter.convert_to_np_json(
-            model=model_stub,
-            vis_data=vis_data_stub,
+            model=cast(Any, model_stub),
+            vis_data=cast(Any, vis_data_stub),
             np_cfg=snapshot["runner_cfg"],
             vocab_dict=snapshot["vocab_dict"],
             deterministic_json=deterministic_json,
@@ -211,8 +212,7 @@ class NeuronpediaConverter:
                 vocab_dict,
                 trim_trailing_pad_tokens=not (
                     getattr(np_cfg, "dashboard_output_format", None) == "legacy_json"
-                    and getattr(np_cfg, "sequence_selection_backend", None)
-                    == "legacy"
+                    and getattr(np_cfg, "sequence_selection_backend", None) == "legacy"
                 ),
             )
             NeuronpediaConverter._process_feature_decoder_weight_dist(

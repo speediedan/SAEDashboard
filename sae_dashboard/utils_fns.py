@@ -34,6 +34,7 @@ from sae_dashboard.perf_logging import (
 )
 
 T = TypeVar("T")
+HistogramDataT = TypeVar("HistogramDataT", bound="HistogramData")
 
 # from rich.progress import ProgressColumn, Task # MofNCompleteColumn
 # from rich.text import Text
@@ -626,7 +627,7 @@ class FeatureStatistics:
         batch_size: Optional[int] = None,
         use_sparse_quantiles: bool = False,
         valid_mask: Optional[torch.Tensor] = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         if not batch_size:
             batch_size = 0 if data is None else data.shape[0]
 
@@ -1767,12 +1768,12 @@ class HistogramData:
 
     @classmethod
     def from_data(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         data: Tensor,
         n_bins: int,
         tickmode: Literal["ints", "5 ticks"],
         title: str | None,
-    ) -> T:
+    ) -> HistogramDataT:
         """
         Args:
             data: 1D tensor of data which will be turned into histogram
@@ -1808,7 +1809,7 @@ class HistogramData:
 
     @classmethod
     def from_data_batch(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         data: Tensor,
         n_bins: int,
         tickmode: Literal["ints", "5 ticks"],
@@ -1817,7 +1818,7 @@ class HistogramData:
         positive_only: bool = False,
         titles: Sequence[str | None] | None = None,
         backend: Literal["torch"] = "torch",
-    ) -> list[T]:
+    ) -> list[HistogramDataT]:
         """Create one histogram per row of a 2D tensor using batched binning."""
         histogram_rows = cls._from_data_batch_rows(
             data=data,
@@ -1833,7 +1834,7 @@ class HistogramData:
 
     @classmethod
     def from_data_batch_arrow_table(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         data: Tensor,
         n_bins: int,
         tickmode: Literal["ints", "5 ticks"],
@@ -1884,7 +1885,7 @@ class HistogramData:
 
     @classmethod
     def from_flat_valid_data_batch_arrow_table(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         flat_data: Tensor,
         valid_flat_indices: Tensor,
         n_bins: int,
@@ -1964,7 +1965,7 @@ class HistogramData:
 
     @classmethod
     def _from_dense_data_batch_arrow_table(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         data: Tensor,
         n_bins: int,
         tickmode: Literal["ints", "5 ticks"],
@@ -2159,7 +2160,7 @@ class HistogramData:
         )
 
     @classmethod
-    def from_arrow_table(cls: Type[T], table: Any) -> list[T]:
+    def from_arrow_table(cls: Type[HistogramDataT], table: Any) -> list[HistogramDataT]:
         columns = table.to_pydict()
         row_count = len(columns.get("row_index", []))
         return [
@@ -2176,7 +2177,7 @@ class HistogramData:
 
     @classmethod
     def _from_data_batch_rows(
-        cls: Type[T],
+        cls: Type[HistogramDataT],
         data: Tensor,
         n_bins: int,
         tickmode: Literal["ints", "5 ticks"],

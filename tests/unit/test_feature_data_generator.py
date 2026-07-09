@@ -1,3 +1,4 @@
+# pyright: basic, reportPrivateImportUsage=false
 import pytest
 import torch
 
@@ -50,8 +51,10 @@ def test_get_feature_data_uses_configured_correlation_device(
     )
     generator.token_minibatches = []
     generator.full_sequence_length = 0
-    generator.encoder = type("Encoder", (), {"W_dec": torch.ones((1, 3))})()
-    generator.model = object()
+    generator.encoder = type(  # pyright: ignore
+        "Encoder", (), {"W_dec": torch.ones((1, 3))}
+    )()
+    generator.model = object()  # pyright: ignore
 
     monkeypatch.setattr(
         feature_data_generator, "RollingCorrCoef", CapturingRollingCorrCoef
@@ -163,7 +166,10 @@ def test_transfer_feature_acts_for_output_preserves_legacy_precision() -> None:
     assert transferred.tolist() == pytest.approx(feature_acts.tolist())
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA to verify legacy device preservation.")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires CUDA to verify legacy device preservation.",
+)
 def test_transfer_feature_acts_for_output_preserves_legacy_cuda_device() -> None:
     generator = LegacyFeatureDataGenerator.__new__(LegacyFeatureDataGenerator)
     generator.cfg = SaeVisConfig(
