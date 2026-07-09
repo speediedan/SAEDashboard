@@ -23,6 +23,34 @@ class ActivationConfig:
     auxiliary_hook_points: List[str]
 
 
+def activation_shapes_match_tokens(
+    activation_dict: Dict[str, Tensor],
+    tokens: Int[Tensor, "batch seq"],
+) -> bool:
+    """Whether every captured activation is consistent with the input token shape.
+
+    Most hooks are ``[batch, seq, ...]``. Attention pattern/score hooks are
+    ``[batch, heads, seq_q, seq_k]`` — the head axis sits where seq usually is, so they
+    are validated on the batch and the two seq axes instead of being misflagged as
+    prompt-length mismatches.
+    """
+    expected_shape = tuple(tokens.shape[:2])
+    for hook_name, activation in activation_dict.items():
+        if activation.ndim < 2:
+            continue
+        if tuple(activation.shape[:2]) == expected_shape:
+            continue
+        if (
+            hook_name.endswith(("hook_pattern", "hook_attn_scores"))
+            and activation.ndim >= 4
+            and activation.shape[0] == expected_shape[0]
+            and tuple(activation.shape[2:4]) == (expected_shape[1], expected_shape[1])
+        ):
+            continue
+        return False
+    return True
+
+
 class TransformerLensWrapper(nn.Module):
     """
     This class wraps around & extends the TransformerLens model, so that we can make sure things like the forward
@@ -73,11 +101,7 @@ class TransformerLensWrapper(nn.Module):
         activation_dict: Dict[str, Tensor],
         tokens: Int[Tensor, "batch seq"],
     ) -> bool:
-        expected_shape = tuple(tokens.shape[:2])
-        return all(
-            activation.ndim < 2 or tuple(activation.shape[:2]) == expected_shape
-            for activation in activation_dict.values()
-        )
+        return activation_shapes_match_tokens(activation_dict, tokens)
 
     @staticmethod
     def _concat_activation_dicts(
