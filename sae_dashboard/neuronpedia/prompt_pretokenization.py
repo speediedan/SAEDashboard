@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import sys
 import warnings
+from datetime import datetime, timezone
+from time import perf_counter
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
@@ -722,6 +725,26 @@ def _to_python_value(value: Any) -> Any:
     return value
 
 
+def _write_pretokenization_run_record(
+    destination: str, *, duration_s: float, rows: int, context_size: int | None
+) -> None:
+    """Record the one-time build cost beside the dataset so downstream artifacts
+    (e.g. the dashboard benchmark flow diagram) can report the pretokenization
+    runtime and cardinality instead of TBD placeholders."""
+    dest_path = Path(destination)
+    if not dest_path.is_dir():
+        return
+    record = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "duration_s": round(duration_s, 3),
+        "rows": rows,
+        "context_size": context_size,
+    }
+    (dest_path / "pretokenization_run.json").write_text(
+        json.dumps(record, indent=2), encoding="utf-8"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if (
@@ -734,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
             "Provide --save-path/--output-dir, --legacy-output-dir, and/or --hf-repo-id."
         )
 
+    start_time = perf_counter()
     result, cfg, metadata = run_dashboard_pretokenization(args)
     persist_dashboard_dataset(
         result.tokenized_dataset,
@@ -742,10 +766,19 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         legacy_output_dir=args.legacy_output_dir,
     )
+    duration_s = perf_counter() - start_time
     destination = cfg.save_path or cfg.hf_repo_id or "<in-memory>"
+    effective_context = result.effective_context_size or cfg.context_size
+    if cfg.save_path:
+        _write_pretokenization_run_record(
+            cfg.save_path,
+            duration_s=duration_s,
+            rows=len(result.tokenized_dataset),
+            context_size=effective_context,
+        )
     print(
         f"Saved {len(result.tokenized_dataset)} tokenized prompts to {destination} "
-        f"with context_size={result.effective_context_size or cfg.context_size}"
+        f"with context_size={effective_context} in {duration_s:.1f}s"
     )
     return 0
 
