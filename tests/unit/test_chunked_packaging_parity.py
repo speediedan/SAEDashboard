@@ -643,3 +643,148 @@ def test_get_logits_table_data_masked_token_ids_excluded() -> None:
     assert masked[0].bottom_token_ids == list(reference.bottom_token_ids)
     assert masked[0].top_logits == pytest.approx(reference.top_logits)
     assert masked[0].bottom_logits == pytest.approx(reference.bottom_logits)
+
+
+def test_resolve_feature_acts_output_device_budget_override() -> None:
+    from types import SimpleNamespace
+
+    from sae_dashboard.feature_data_generator import FeatureDataGenerator
+
+    generator = FeatureDataGenerator.__new__(FeatureDataGenerator)
+    generator.full_sequence_length = 128
+
+    # A zero budget forces host staging even for tiny shapes.
+    generator.cfg = SimpleNamespace(  # pyright: ignore
+        dashboard_output_format="columnar",
+        device="cuda",
+        columnar_max_device_staged_acts_bytes=0,
+    )
+    assert (
+        generator._resolve_feature_acts_output_device(
+            total_prompt_count=8, feature_count=8
+        )
+        == "cpu"
+    )
+
+    # A raised budget admits shapes the fixed 4 GiB default would reject.
+    generator.cfg = SimpleNamespace(  # pyright: ignore
+        dashboard_output_format="columnar",
+        device="cuda",
+        columnar_max_device_staged_acts_bytes=64 * 1024**3,
+    )
+    if torch.cuda.is_available():
+        assert (
+            generator._resolve_feature_acts_output_device(
+                total_prompt_count=8192, feature_count=4096
+            )
+            == "cuda"
+        )
+
+
+@pytest.mark.parametrize("row_chunk_size", [1, 3, 64])
+def test_scalar_stats_row_chunk_size_override_matches_default(
+    row_chunk_size: int,
+) -> None:
+    torch.manual_seed(11)
+    flat_data = torch.randn(9, 40).clamp(min=-0.2)
+    valid_indices = torch.arange(40)[torch.rand(40) > 0.25]
+
+    default_table = FeatureStatistics.create_scalar_arrow_table_from_flat_valid(
+        flat_data, valid_indices
+    )
+    chunked_table = FeatureStatistics.create_scalar_arrow_table_from_flat_valid(
+        flat_data, valid_indices, row_chunk_size=row_chunk_size
+    )
+    assert default_table.equals(chunked_table)
+
+
+@pytest.mark.parametrize("row_chunk_size", [1, 5, 256])
+def test_histogram_row_chunk_size_override_matches_default(
+    row_chunk_size: int,
+) -> None:
+    torch.manual_seed(13)
+    flat_data = torch.randn(7, 50)
+    valid_indices = torch.arange(50)[torch.rand(50) > 0.2]
+    titles = [f"feat {i}" for i in range(7)]
+
+    default_table = HistogramData.from_flat_valid_data_batch_arrow_table(
+        flat_data, valid_indices, n_bins=10, tickmode="5 ticks", titles=titles
+    )
+    chunked_table = HistogramData.from_flat_valid_data_batch_arrow_table(
+        flat_data,
+        valid_indices,
+        n_bins=10,
+        tickmode="5 ticks",
+        titles=titles,
+        row_chunk_size=row_chunk_size,
+    )
+    assert default_table.equals(chunked_table)
+
+
+@pytest.mark.parametrize("include_constant_row", [False, True])
+def test_dense_arrow_histogram_bf16_matches_caller_float32_cast(
+    include_constant_row: bool,
+) -> None:
+    """Raw reduced-precision input must be bit-identical to the historical
+    caller-side full-tensor float32 cast (the dense lane now casts per row batch;
+    a constant row exercises the non-dense fallback lane)."""
+    torch.manual_seed(17)
+    logits = torch.randn(6, 64, dtype=torch.bfloat16)
+    if include_constant_row:
+        logits[2] = 0.5
+
+    raw_table = HistogramData.from_data_batch_arrow_table(
+        data=logits,
+        n_bins=12,
+        tickmode="5 ticks",
+        title=None,
+        backend="torch",
+    )
+    cast_table = HistogramData.from_data_batch_arrow_table(
+        data=logits.to(torch.float32),
+        n_bins=12,
+        tickmode="5 ticks",
+        title=None,
+        backend="torch",
+    )
+    assert raw_table.equals(cast_table)
+
+
+@pytest.mark.parametrize("feature_chunk_size", [1, 2, 64])
+def test_batched_selection_feature_chunk_size_matches_default(
+    feature_chunk_size: int,
+) -> None:
+    """The columnar_row_chunk_size override reaches the batched selector as
+    feature_chunk_size; any chunk size must select identically (chunking only
+    batches the math; per-feature RNG consumption order is unchanged)."""
+    import random
+
+    from tests.unit.test_sequence_data_generator import (
+        _assert_selections_equal,
+        _batched_selection_fixture_generator,
+    )
+
+    generator = _batched_selection_fixture_generator()
+    torch.manual_seed(2027)
+    all_feat_acts = (torch.rand(3, 8, 5, dtype=torch.float32) + 0.01) * torch.linspace(
+        0.5, 2.0, 5
+    )
+    selection_mask = torch.ones(3, 8, dtype=torch.bool)
+    selection_mask[:, -1] = False
+    masked_acts = all_feat_acts * selection_mask.unsqueeze(-1)
+
+    random.seed(556)
+    default_result = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+    )
+    random.seed(556)
+    chunked_result = generator.get_indices_dicts_columnar_gpu_batched(
+        generator.buffer,
+        masked_acts,
+        selection_mask=selection_mask,
+        feature_chunk_size=feature_chunk_size,
+    )
+
+    _assert_selections_equal(chunked_result, default_result)

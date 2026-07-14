@@ -324,6 +324,19 @@ def temporary_torch_num_threads(num_threads: int | None) -> Generator[None, None
         torch.set_num_threads(previous_num_threads)
 
 
+def _cuda_memory_fields(device: torch.device | None) -> dict[str, float]:
+    """Allocator snapshot in GiB for per-stage peak-memory attribution. max_* are the
+    process-wide (unreset) peaks: a stage that raises max_* between its start and end
+    snapshots is the stage that set the current peak."""
+    gib = 1024**3
+    return {
+        "allocated_gib": torch.cuda.memory_allocated(device) / gib,
+        "reserved_gib": torch.cuda.memory_reserved(device) / gib,
+        "max_allocated_gib": torch.cuda.max_memory_allocated(device) / gib,
+        "max_reserved_gib": torch.cuda.max_memory_reserved(device) / gib,
+    }
+
+
 @contextmanager
 def timed_stage(
     enabled: bool,
@@ -348,6 +361,15 @@ def timed_stage(
     )
     start_event = torch.cuda.Event(enable_timing=True) if use_cuda_events else None
     end_event = torch.cuda.Event(enable_timing=True) if use_cuda_events else None
+
+    capture_cuda_memory = (
+        torch_device is not None
+        and torch_device.type == "cuda"
+        and torch.cuda.is_available()
+    )
+    start_cuda_memory = (
+        _cuda_memory_fields(torch_device) if capture_cuda_memory else None
+    )
 
     if use_cuda_events and start_event is not None:
         torch.cuda.synchronize(torch_device)
@@ -380,6 +402,9 @@ def timed_stage(
             log_fields.update({"stage": stage, "wall_s": wall_seconds})
             if cuda_ms is not None:
                 log_fields["cuda_ms"] = cuda_ms
+            if capture_cuda_memory and start_cuda_memory is not None:
+                log_fields["cuda_memory_start"] = start_cuda_memory
+                log_fields["cuda_memory_end"] = _cuda_memory_fields(torch_device)
             if capture_runtime_metrics:
                 end_runtime = runtime_snapshot()
                 end_io = process_io_snapshot()

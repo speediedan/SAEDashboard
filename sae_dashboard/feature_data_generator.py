@@ -144,7 +144,12 @@ class FeatureDataGenerator:
         if not device.startswith("cuda") or not torch.cuda.is_available():
             return "cpu"
         acts_bytes = total_prompt_count * self.full_sequence_length * feature_count * 2
-        if acts_bytes > FEATURE_ACTS_DEVICE_RETENTION_MAX_BYTES:
+        retention_budget = getattr(
+            self.cfg, "columnar_max_device_staged_acts_bytes", None
+        )
+        if retention_budget is None:
+            retention_budget = FEATURE_ACTS_DEVICE_RETENTION_MAX_BYTES
+        if acts_bytes > retention_budget:
             return "cpu"
         return device
 

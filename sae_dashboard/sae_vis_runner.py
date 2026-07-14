@@ -254,6 +254,14 @@ class SaeVisRunner:
     def _columnar_enabled(self) -> bool:
         return self.cfg.dashboard_output_format == "columnar"
 
+    def _staging_budget(self) -> int:
+        budget = self.cfg.columnar_max_device_staged_acts_bytes
+        return COLUMNAR_DEVICE_STAGING_MAX_BYTES if budget is None else budget
+
+    def _packaging_row_chunk_kwargs(self) -> dict[str, int]:
+        row_chunk = self.cfg.columnar_row_chunk_size
+        return {} if row_chunk is None else {"row_chunk_size": row_chunk}
+
     @property
     def _preserved_legacy_enabled(self) -> bool:
         return is_preserved_legacy_path(self.cfg)
@@ -885,10 +893,7 @@ class SaeVisRunner:
         ).flatten()
         staged_flat_acts = flat_all_feat_acts
         acts_byte_size = flat_all_feat_acts.element_size() * flat_all_feat_acts.numel()
-        if (
-            packaging_device is not None
-            and acts_byte_size <= COLUMNAR_DEVICE_STAGING_MAX_BYTES
-        ):
+        if packaging_device is not None and acts_byte_size <= self._staging_budget():
             staged_flat_acts = flat_all_feat_acts.to(packaging_device)
 
         with timed_stage(
@@ -908,6 +913,7 @@ class SaeVisRunner:
                         staged_flat_acts,
                         flat_valid_indices,
                         compute_device=packaging_device,
+                        **self._packaging_row_chunk_kwargs(),
                     ),
                     column_name="feature_index",
                     values=[int(feature) for feature in features],
@@ -965,8 +971,11 @@ class SaeVisRunner:
         ):
             if self.cfg.logits_histogram_backend == "arrow":
                 pyarrow, _, _ = self._load_columnar_modules()
+                # Pass raw logits: the dense arrow lane float32-casts per row batch,
+                # avoiding a full (feats, d_vocab) float32 copy (~4.3 GiB at a 262k
+                # vocab and 4096 features). Bit-identical to the caller-side cast.
                 logits_histogram_table = HistogramData.from_data_batch_arrow_table(
-                    data=logits.to(torch.float32),
+                    data=logits,
                     n_bins=layout.logits_hist_cfg.n_bins,  # type: ignore
                     tickmode="5 ticks",
                     title=None,
@@ -1023,6 +1032,7 @@ class SaeVisRunner:
                         tickmode="5 ticks",
                         titles=activation_histogram_titles,
                         compute_device=packaging_device,
+                        **self._packaging_row_chunk_kwargs(),
                     )
                 )
                 activation_histogram_table = self._replace_index_column(
@@ -1104,18 +1114,23 @@ class SaeVisRunner:
                     batch=feature_batch_index,
                     feature_count=len(features),
                 ):
-                    precomputed_selections = (
-                        sequence_data_generator.get_indices_dicts_columnar_gpu_batched(
-                            sequence_data_generator.buffer,
-                            all_feat_acts,
-                            selection_mask=ignore_tokens_mask,
-                            selection_device=packaging_device,
-                            staged_flat_acts=(
-                                staged_flat_acts
-                                if staged_flat_acts.device.type != "cpu"
-                                else None
-                            ),
-                        )
+                    precomputed_selections = sequence_data_generator.get_indices_dicts_columnar_gpu_batched(
+                        sequence_data_generator.buffer,
+                        all_feat_acts,
+                        selection_mask=ignore_tokens_mask,
+                        selection_device=packaging_device,
+                        **(
+                            {}
+                            if self.cfg.columnar_row_chunk_size is None
+                            else {
+                                "feature_chunk_size": self.cfg.columnar_row_chunk_size
+                            }
+                        ),
+                        staged_flat_acts=(
+                            staged_flat_acts
+                            if staged_flat_acts.device.type != "cpu"
+                            else None
+                        ),
                     )
             sequence_coordinate_tables.update(
                 self._build_sequence_coordinate_tables(

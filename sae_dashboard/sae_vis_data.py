@@ -125,6 +125,16 @@ class SaeVisConfig:
     # Optional regex over token strings (e.g. r"^<(0x[0-9A-Fa-f]{2}|unused\d+)>$"); matching vocab
     # rows are excluded from logits tables on the columnar path. None preserves unmasked logits.
     logits_table_mask_token_pattern: str | None = None
+    # Opt-in columnar peak-GPU-memory controls (§ prompt-dimension scaling). None preserves the
+    # historical fixed 4 GiB device budgets / packaging chunk shapes; outputs are bit-identical at
+    # any setting (row/token chunking and host staging are exact), only peak memory and speed move.
+    # columnar_max_device_staged_acts_bytes caps BOTH the generation-side device retention of the
+    # (prompts, seq, feats) activation tensor AND the packaging-side full-matrix staging (0 forces
+    # host staging); columnar_row_chunk_size overrides the feature-row chunk the arrow packaging
+    # loops (defaults 256 stats / 128 histograms) AND the batched sequence selector (default 64)
+    # iterate with, bounding the density/token-count-scaled per-chunk transients on dense layers.
+    columnar_max_device_staged_acts_bytes: int | None = None
+    columnar_row_chunk_size: int | None = None
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"

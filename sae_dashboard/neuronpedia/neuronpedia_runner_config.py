@@ -158,6 +158,13 @@ class NeuronpediaRunnerConfig:
     sequence_top_acts_positive_only: bool = False
     sequence_dedup_across_groups: bool = False
     sequence_skip_dead_features: bool = False
+    # Opt-in columnar peak-GPU-memory controls (bit-identical outputs at any setting;
+    # None keeps the historical fixed 4 GiB device budgets / chunk shapes). The byte
+    # budget caps device retention/staging of the activation matrix (0 forces host
+    # staging); the row chunk bounds the per-chunk packaging AND batched-selection
+    # transients on dense layers.
+    columnar_max_device_staged_acts_bytes: int | None = None
+    columnar_row_chunk_size: int | None = None
     # Numpy-histogram-style interval membership ([lower, upper), highest interval closed) for the
     # in-tree legacy and columnar selectors; the preserved pre-PR lane is untouched.
     sequence_half_open_interval_bins: bool = False

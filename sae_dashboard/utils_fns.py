@@ -1856,6 +1856,11 @@ class HistogramData:
             )
             if tensor_table is not None:
                 return tensor_table
+            # The dense lane computes in float32; keep the rare constant-row fallback
+            # on the same dtype when the caller staged reduced-precision data (callers
+            # historically pre-cast to float32 themselves).
+            if data.dtype in (torch.bfloat16, torch.float16):
+                data = data.to(torch.float32)
 
         histogram_rows = cls._from_data_batch_rows(
             data=data,
@@ -1997,9 +2002,14 @@ class HistogramData:
         if titles is not None and len(titles) != data.shape[0]:
             raise ValueError("titles must match the number of data rows")
 
-        data = data.to(torch.float32)
-        max_values = data.max(dim=-1).values
-        min_values = data.min(dim=-1).values
+        # Cast per row batch instead of materializing a full float32 copy of the
+        # input (a (feats, d_vocab) logits matrix costs gigabytes at large vocabs).
+        # float32 embeds bf16/f16 exactly, so per-batch casting is bit-identical to
+        # the previous whole-tensor cast; max/min are element selections, so casting
+        # the reduced vectors matches reducing the cast tensor.
+        compute_dtype = torch.float32
+        max_values = data.max(dim=-1).values.to(compute_dtype)
+        min_values = data.min(dim=-1).values.to(compute_dtype)
         if not bool((max_values != min_values).all().item()):
             return None
 
@@ -2007,11 +2017,13 @@ class HistogramData:
         bar_heights_chunks = []
         bar_values_chunks = []
 
-        bin_offsets = torch.arange(n_bins, dtype=data.dtype, device=data.device) + 0.5
+        bin_offsets = (
+            torch.arange(n_bins, dtype=compute_dtype, device=data.device) + 0.5
+        )
         scatter_source = torch.ones((), dtype=torch.int32, device=data.device)
         for row_start in range(0, data.shape[0], row_batch_size):
             row_end = min(row_start + row_batch_size, data.shape[0])
-            batch = data[row_start:row_end]
+            batch = data[row_start:row_end].to(compute_dtype)
             row_max = max_values[row_start:row_end]
             row_min = min_values[row_start:row_end]
             row_range = row_max - row_min

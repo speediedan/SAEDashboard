@@ -2105,6 +2105,10 @@ class NeuronpediaRunner:
                         sequence_dedup_across_groups=self.cfg.sequence_dedup_across_groups,
                         sequence_skip_dead_features=self.cfg.sequence_skip_dead_features,
                         sequence_half_open_interval_bins=self.cfg.sequence_half_open_interval_bins,
+                        columnar_max_device_staged_acts_bytes=(
+                            self.cfg.columnar_max_device_staged_acts_bytes
+                        ),
+                        columnar_row_chunk_size=(self.cfg.columnar_row_chunk_size),
                         logits_table_mask_token_pattern=self.cfg.logits_table_mask_token_pattern,
                         dashboard_output_format=self.cfg.dashboard_output_format,
                         columnar_defer_batch_write=(
@@ -2675,6 +2679,27 @@ def main():
         ),
     )
     parser.add_argument(
+        "--columnar-max-device-staged-acts-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Opt-in (columnar path only): byte budget capping device retention/staging of the "
+            "(prompts, seq, feats) activation matrix (default: the historical fixed 4 GiB; 0 "
+            "forces host staging). Outputs are bit-identical; only peak GPU memory and speed move."
+        ),
+    )
+    parser.add_argument(
+        "--columnar-row-chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Opt-in (columnar path only): feature-row chunk size for the arrow statistics/"
+            "histogram packaging loops (defaults 256/128) and the batched sequence selector "
+            "(default 64), bounding density/token-count-scaled per-chunk GPU transients on "
+            "dense layers. Outputs are bit-identical."
+        ),
+    )
+    parser.add_argument(
         "--sequence-half-open-interval-bins",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -3060,6 +3085,8 @@ def main():
         sequence_dedup_across_groups=args.sequence_dedup_across_groups,
         sequence_skip_dead_features=args.sequence_skip_dead_features,
         sequence_half_open_interval_bins=args.sequence_half_open_interval_bins,
+        columnar_max_device_staged_acts_bytes=args.columnar_max_device_staged_acts_bytes,
+        columnar_row_chunk_size=args.columnar_row_chunk_size,
         logits_table_mask_token_pattern=args.logits_table_mask_token_pattern,
         dashboard_output_format=args.dashboard_output_format,
         columnar_artifact_format=args.columnar_artifact_format,
