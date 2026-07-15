@@ -103,6 +103,7 @@ class FeatureDataGenerator:
         self.encoder = encoder
         self.full_sequence_length = int(tokens.shape[1])
         self._feature_acts_output_device: str = "cpu"
+        self._feature_acts_buffer: Tensor | None = None
         self.token_minibatches = self.batch_tokens(tokens)
         if self.cfg.cache_dir is not None:
             self._prepare_activation_cache_dir(tokens)
@@ -120,6 +121,45 @@ class FeatureDataGenerator:
             self.dfa_calculator = DFACalculator(model.model, encoder)  # type: ignore
         else:
             self.dfa_calculator = None
+
+    def _acquire_feature_acts_buffer(
+        self,
+        total_prompt_count: int,
+        seq_len: int,
+        feature_count: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> Tensor:
+        """Return the run-persistent accumulation buffer for the padded per-batch
+        feature activations, reusing it across feature batches when the shape matches.
+
+        Every feature batch fully overwrites the buffer (each token minibatch scatters
+        its full padded rows for all features), so reuse is output-identical. Without
+        reuse, host-staged runs at large total prompt counts free a multi-GiB buffer and
+        immediately allocate an identical one at every feature-batch transition; the
+        allocator (glibc/jemalloc arenas) retains the freed pages, transiently
+        double-buffering the largest allocation of the run — enough to trigger the
+        kernel OOM killer at 24,576 prompts x 4096 features (24 GiB bf16) on a 62 GiB
+        host. On shape/dtype/device mismatch (e.g. the final partial feature batch) the
+        old buffer is RELEASED BEFORE the new one is allocated for the same reason.
+        """
+        shape = (total_prompt_count, seq_len, feature_count)
+        buffer = self._feature_acts_buffer
+        if (
+            buffer is not None
+            and tuple(buffer.shape) == shape
+            and buffer.dtype == dtype
+            and buffer.device == torch.device(device)
+        ):
+            return buffer
+        # Drop every reference to the old buffer before allocating its replacement so
+        # the two never coexist.
+        self._feature_acts_buffer = None
+        del buffer
+        new_buffer = torch.empty(shape, dtype=dtype, device=device)
+        self._feature_acts_buffer = new_buffer
+        return new_buffer
 
     def _transfer_feature_acts_for_output(
         self,
@@ -640,12 +680,10 @@ class FeatureDataGenerator:
                     prompt_count=len(minibatch.prompt_indices),
                 ):
                     if all_feat_acts_tensor is None:
-                        all_feat_acts_tensor = torch.empty(
-                            (
-                                total_prompt_count,
-                                self.full_sequence_length,
-                                feature_acts_cpu.shape[-1],
-                            ),
+                        all_feat_acts_tensor = self._acquire_feature_acts_buffer(
+                            total_prompt_count,
+                            self.full_sequence_length,
+                            feature_acts_cpu.shape[-1],
                             dtype=feature_acts_cpu.dtype,
                             device=feature_acts_cpu.device,
                         )
