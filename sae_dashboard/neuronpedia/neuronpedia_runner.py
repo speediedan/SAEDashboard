@@ -2,6 +2,7 @@ import argparse
 import ctypes
 import gc
 import importlib
+import inspect
 import json
 import os
 import shutil
@@ -19,6 +20,19 @@ import wandb.sdk
 from datasets import Dataset, IterableDataset
 from matplotlib import colors
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
+
+# `move_to_model_device` is an opt-in seam added in SAELens (see the coordinated Scalable Dashboards
+# PR set). It lets this runner stage prompt batches once, on the activations-store device, instead of
+# paying a transfer to the model device that `generate_tokens` immediately undoes. It is a pure
+# optimization: `generate_tokens` returns `.cpu()` tensors either way.
+#
+# Released SAELens does not have the kwarg, so passing it unconditionally raises TypeError on every
+# batch and makes this runner unusable against a released SAELens. Detect it once here rather than
+# requiring an unreleased SAELens just to run the suite.
+_ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM = (
+    "move_to_model_device"
+    in inspect.signature(ActivationsStore.get_batch_tokens).parameters
+)
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -1692,7 +1706,11 @@ class NeuronpediaRunner:
 
         for batch_idx in pbar:
             batch_tokens = activations_store.get_batch_tokens(
-                move_to_model_device=False
+                **(
+                    {"move_to_model_device": False}
+                    if _ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM
+                    else {}
+                )
             )
             if batch_idx == 0:
                 self._log_token_snapshot("after_get_batch_tokens_0", batch_tokens)

@@ -67,6 +67,36 @@ def test_generate_tokens_no_duplicates(neuronpedia_runner: NeuronpediaRunner) ->
     assert len(torch.unique(tokens_cpu, dim=0)) == 256
 
 
+def test_generate_tokens_works_without_the_activations_store_device_seam(
+    neuronpedia_runner: NeuronpediaRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`generate_tokens` must run against a RELEASED sae-lens, which lacks `move_to_model_device`.
+
+    The kwarg is an opt-in optimization added by the coordinated SAELens PR. Passing it
+    unconditionally raised ``TypeError`` on every batch against released sae-lens, which the
+    ``sae-lens = "^6.43.0"`` pin happily allows -- so the runner was unusable and nothing warned.
+    """
+    store = neuronpedia_runner.activations_store
+    real_get_batch_tokens = store.get_batch_tokens
+
+    def released_signature_get_batch_tokens() -> torch.Tensor:
+        # No `move_to_model_device` parameter, exactly like released sae-lens.
+        return real_get_batch_tokens()
+
+    monkeypatch.setattr(
+        store, "get_batch_tokens", released_signature_get_batch_tokens
+    )
+    monkeypatch.setattr(
+        neuronpedia_runner_module,
+        "_ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM",
+        False,
+    )
+
+    tokens = neuronpedia_runner.generate_tokens(store, n_prompts=256)
+
+    assert tokens.shape == (256, neuronpedia_runner.cfg.n_tokens_in_prompt)
+
+
 def test_get_tokens_no_duplicates(
     neuronpedia_runner: NeuronpediaRunner, tmp_path: Path
 ) -> None:
