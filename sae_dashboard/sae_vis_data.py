@@ -44,6 +44,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     dashboard_output_format="Output mode for dashboard generation: legacy JSON or importer-compatible columnar bundles.",
     columnar_artifact_dir="Root directory for columnar bundle output when dashboard_output_format is columnar.",
     columnar_artifact_format="On-disk format for columnar tables: Arrow IPC or Parquet.",
+    columnar_write_page_index="Write a Parquet page index. Enables page-granular range reads for HTTP-streamed artifacts; cannot be added later without regenerating.",
     columnar_emit_activation_rows="Whether to emit semantic activation_rows tables alongside sequence_rows in columnar mode.",
     columnar_emit_activation_copy_rows="Whether to emit Neuronpedia Activation COPY-shaped activation_copy_rows in columnar mode.",
     columnar_activation_copy_model_id="Optional modelId override for activation_copy_rows payloads.",
@@ -138,6 +139,7 @@ class SaeVisConfig:
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
+    columnar_write_page_index: bool = True
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = False
     columnar_emit_activation_copy_rows: bool = False

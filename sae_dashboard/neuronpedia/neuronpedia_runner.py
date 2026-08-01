@@ -2135,6 +2135,7 @@ class NeuronpediaRunner:
                         ),
                         columnar_artifact_dir=output_root,
                         columnar_artifact_format=self.cfg.columnar_artifact_format,
+                        columnar_write_page_index=self.cfg.columnar_write_page_index,
                         columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
                         columnar_emit_activation_rows=self.cfg.columnar_emit_activation_rows,
                         columnar_emit_activation_copy_rows=self.cfg.columnar_emit_activation_copy_rows,
@@ -2749,6 +2750,16 @@ def main():
         help="On-disk format for columnar dashboard tables.",
     )
     parser.add_argument(
+        "--columnar-write-page-index",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write a Parquet page index (default: on). Required for page-granular range reads when "
+            "artifacts are streamed over HTTP. It cannot be added to existing files, so disabling "
+            "it means a later fix requires regenerating the whole corpus."
+        ),
+    )
+    parser.add_argument(
         "--columnar-emit-sequence-rows",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -3108,6 +3119,7 @@ def main():
         logits_table_mask_token_pattern=args.logits_table_mask_token_pattern,
         dashboard_output_format=args.dashboard_output_format,
         columnar_artifact_format=args.columnar_artifact_format,
+        columnar_write_page_index=args.columnar_write_page_index,
         columnar_emit_sequence_rows=args.columnar_emit_sequence_rows,
         columnar_emit_activation_rows=args.columnar_emit_activation_rows,
         overlap_batch_packaging=args.overlap_batch_packaging,

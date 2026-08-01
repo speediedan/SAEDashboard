@@ -262,6 +262,16 @@ class SaeVisRunner:
         row_chunk = self.cfg.columnar_row_chunk_size
         return {} if row_chunk is None else {"row_chunk_size": row_chunk}
 
+    def _parquet_writer_kwargs(self) -> dict[str, Any]:
+        """Writer options shared by every parquet artifact this runner emits.
+
+        ``write_page_index`` must be decided here, at write time: a page index cannot be added to an
+        existing file without rewriting it, so a corpus generated without one can only be fixed by
+        regenerating it. It costs ~0.01% in file size and is what lets a reader range-read
+        individual pages over HTTP instead of fetching whole row groups.
+        """
+        return {"write_page_index": self.cfg.columnar_write_page_index}
+
     @property
     def _preserved_legacy_enabled(self) -> bool:
         return is_preserved_legacy_path(self.cfg)
@@ -304,7 +314,9 @@ class SaeVisRunner:
                 with pyarrow_ipc.new_file(sink, table.schema) as writer:
                     writer.write_table(table)
         else:
-            pyarrow_parquet.write_table(table, str(path))
+            pyarrow_parquet.write_table(
+                table, str(path), **self._parquet_writer_kwargs()
+            )
         return int(table.num_rows)
 
     def _write_columnar_record_batches(
@@ -326,7 +338,9 @@ class SaeVisRunner:
                         writer.write_batch(batch)
                         row_count += int(batch.num_rows)
         else:
-            with pyarrow_parquet.ParquetWriter(str(path), schema) as writer:
+            with pyarrow_parquet.ParquetWriter(
+                str(path), schema, **self._parquet_writer_kwargs()
+            ) as writer:
                 for batch in batches:
                     writer.write_batch(batch)
                     row_count += int(batch.num_rows)

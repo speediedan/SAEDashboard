@@ -173,6 +173,7 @@ class NeuronpediaRunnerConfig:
     logits_table_mask_token_pattern: Optional[str] = None
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
+    columnar_write_page_index: bool = True
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = True
     columnar_emit_activation_copy_rows: bool = False

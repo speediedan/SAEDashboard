@@ -14,6 +14,7 @@ from torch import Tensor
 import sae_dashboard.perf_logging as perf_logging
 import sae_dashboard.sae_vis_runner as sae_vis_runner_module
 from sae_dashboard.components import FeatureTablesData, LogitsTableData
+from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
 from sae_dashboard.sae_vis_data import SaeVisColumnarData, SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.sequence_data_generator import (
@@ -512,3 +513,107 @@ def test_SaeVisRunner_deferred_columnar_write_matches_immediate(
         )
     )
     assert finalized_batch_manifest == immediate_batch_manifest
+
+
+@pytest.mark.parametrize("write_page_index", [True, False])
+def test_SaeVisRunner_columnar_parquet_honors_write_page_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_page_index: bool,
+) -> None:
+    """The page index must reach the parquet footer, for every table the runner emits.
+
+    Asserted on the real writer path rather than on the config, because a page index cannot be added
+    to an existing file: if the flag fails to reach `pq.write_table`, the only remedy is to
+    regenerate the corpus. This also covers both writer functions -- `_write_columnar_table` for the
+    single-table artifacts and `ParquetWriter` for the streamed `sequence_rows`.
+    """
+    _capture_perf_events(monkeypatch)
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.FeatureDataGeneratorFactory.create",
+        lambda cfg, model, encoder, tokens: _FakeFeatureDataGenerator(),
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.SequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_logits_table_data",
+        lambda **kwargs: LogitsTableData(),
+    )
+
+    cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        minibatch_size_features=1,
+        minibatch_size_tokens=1,
+        quantile_feature_batch_size=1,
+        device="cpu",
+        dtype="float32",
+        ignore_tokens={0},
+        dashboard_output_format="columnar",
+        columnar_artifact_dir=tmp_path / "batch-0.columnar",
+        columnar_artifact_format="parquet",
+        columnar_write_page_index=write_page_index,
+        columnar_emit_sequence_rows=True,
+        columnar_emit_activation_rows=True,
+        columnar_emit_activation_copy_rows=True,
+        columnar_activation_copy_model_id="model-a",
+        columnar_activation_copy_layer="9-source-a",
+        columnar_activation_copy_creator_id="creator-a",
+        columnar_activation_copy_created_at="2026-01-02T03:04:05",
+        columnar_activation_copy_id_prefix="act",
+        feature_statistics_backend="arrow",
+        logits_histogram_backend="arrow",
+        activation_histogram_backend="torch",
+    )
+    assert cfg.columnar_artifact_dir is not None
+
+    SaeVisRunner(cfg).run(
+        encoder=cast(SAE[Any], _FakeEncoder()),
+        model=cast(
+            HookedSAETransformer,
+            SimpleNamespace(
+                W_U=torch.tensor([[1.0]], dtype=torch.float32),
+                tokenizer=SimpleNamespace(
+                    convert_ids_to_tokens=lambda token_ids: [
+                        f"tok_{token_id}" for token_id in token_ids
+                    ],
+                    pad_token_id=0,
+                ),
+            ),
+        ),
+        tokens=torch.tensor([[7, 0]], dtype=torch.long),
+    )
+
+    pyarrow_parquet = importlib.import_module("pyarrow.parquet")
+    written = sorted(cfg.columnar_artifact_dir.rglob("*.parquet"))
+    assert written, "expected the columnar run to emit parquet artifacts"
+
+    for table_path in written:
+        column = pyarrow_parquet.ParquetFile(table_path).metadata.row_group(0).column(0)
+        assert (
+            column.has_offset_index is write_page_index
+        ), f"{table_path.name} offset index = {column.has_offset_index}, expected {write_page_index}"
+
+
+def test_SaeVisRunner_write_page_index_defaults_on() -> None:
+    """Default-on is the point: a corpus generated without it can only be fixed by regenerating."""
+    assert (
+        SaeVisConfig(
+            hook_point="blocks.0.hook_resid_pre", features=[0]
+        ).columnar_write_page_index
+        is True
+    )
+    assert (
+        NeuronpediaRunnerConfig(
+            sae_set="s", sae_path="p", outputs_dir="o"
+        ).columnar_write_page_index
+        is True
+    )
