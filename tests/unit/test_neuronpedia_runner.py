@@ -83,9 +83,7 @@ def test_generate_tokens_works_without_the_activations_store_device_seam(
         # No `move_to_model_device` parameter, exactly like released sae-lens.
         return real_get_batch_tokens()
 
-    monkeypatch.setattr(
-        store, "get_batch_tokens", released_signature_get_batch_tokens
-    )
+    monkeypatch.setattr(store, "get_batch_tokens", released_signature_get_batch_tokens)
     monkeypatch.setattr(
         neuronpedia_runner_module,
         "_ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM",
@@ -1286,9 +1284,13 @@ def test_generate_tokens_requests_cpu_batches() -> None:
     # SAELens#721 the kwarg is correctly omitted and the fake records its own default, so asserting
     # [False] unconditionally would fail for anyone not using the coordinated fork. Either way the
     # tokens must come back on CPU, which is what this test actually guards.
-    from sae_dashboard.neuronpedia.neuronpedia_runner import _ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM
+    from sae_dashboard.neuronpedia.neuronpedia_runner import (
+        _ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM,
+    )
 
-    expected_device_args = [False] if _ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM else [True]
+    expected_device_args = (
+        [False] if _ACTIVATIONS_STORE_SUPPORTS_DEVICE_SEAM else [True]
+    )
     assert fake_store.move_to_model_device_args == expected_device_args
     assert tokens.device.type == "cpu"
     assert tokens.tolist() == [[1, 2, 3], [4, 5, 6]]
