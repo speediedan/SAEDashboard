@@ -31,7 +31,13 @@ eindex-callum = "^0.1.0"
 rich = "^13.7.1"
 matplotlib = "^3.8.4"
 safetensors = ">=0.4.3,<0.9.0"
-typer = "^0.12.3"
+# `^0.12.3` capped typer below 0.13, which is incompatible with click >= 8.2 ("Secondary flag is not
+# valid for non-boolean flag" at import time). Because typer is a hard dependency, that cap broke the
+# `hf` CLI -- entirely, not just its buckets subcommand -- in any environment installing this package.
+# typer is not imported anywhere in sae_dashboard (the pin is its only occurrence in the repo), so the
+# ceiling bought nothing. Kept as a declared dependency rather than dropped, in case downstreams rely
+# on it being pulled in, but widened to a range that works with current click.
+typer = ">=0.12.3,<1.0.0"
 sae-lens = "^6.43.0"
 decode-clt = "^0.0.1"
 hf-transfer = "^0.1.9"
