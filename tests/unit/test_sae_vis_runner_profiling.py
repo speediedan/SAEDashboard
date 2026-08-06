@@ -14,7 +14,10 @@ from torch import Tensor
 import sae_dashboard.perf_logging as perf_logging
 import sae_dashboard.sae_vis_runner as sae_vis_runner_module
 from sae_dashboard.components import FeatureTablesData, LogitsTableData
-from sae_dashboard.neuronpedia.neuronpedia_runner_config import NeuronpediaRunnerConfig
+from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
+    DEFAULT_PARQUET_ROW_GROUP_SIZE,
+    NeuronpediaRunnerConfig,
+)
 from sae_dashboard.sae_vis_data import SaeVisColumnarData, SaeVisConfig
 from sae_dashboard.sae_vis_runner import SaeVisRunner
 from sae_dashboard.sequence_data_generator import (
@@ -617,3 +620,152 @@ def test_SaeVisRunner_write_page_index_defaults_on() -> None:
         ).columnar_write_page_index
         is True
     )
+
+
+@pytest.mark.parametrize("row_group_size", [None, 2, 4096])
+def test_SaeVisRunner_columnar_parquet_honors_row_group_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    row_group_size: int | None,
+) -> None:
+    """Row group size must reach the parquet footer, on both writer paths.
+
+    Asserted on the written file rather than on the config for the same reason as the page index:
+    it is fixed at write time. It matters more, though -- readers prune at ROW GROUP granularity, so
+    a single-row-group file costs a reader the whole file to fetch one feature and no page index
+    changes that.
+
+    `row_group_size=2` against the fixture's small tables is what makes the difference observable:
+    it forces multiple row groups where the pyarrow default would write exactly one.
+    """
+    _capture_perf_events(monkeypatch)
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.FeatureDataGeneratorFactory.create",
+        lambda cfg, model, encoder, tokens: _FakeFeatureDataGenerator(),
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.SequenceDataGenerator",
+        _FakeSequenceDataGenerator,
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_features_table_data",
+        lambda **kwargs: {
+            name: [value] for name, value in FeatureTablesData().__dict__.items()
+        },
+    )
+    monkeypatch.setattr(
+        "sae_dashboard.sae_vis_runner.get_logits_table_data",
+        lambda **kwargs: LogitsTableData(),
+    )
+
+    cfg = SaeVisConfig(
+        hook_point="blocks.0.hook_resid_pre",
+        features=[0],
+        minibatch_size_features=1,
+        minibatch_size_tokens=1,
+        quantile_feature_batch_size=1,
+        device="cpu",
+        dtype="float32",
+        ignore_tokens={0},
+        dashboard_output_format="columnar",
+        columnar_artifact_dir=tmp_path / "batch-0.columnar",
+        columnar_artifact_format="parquet",
+        columnar_parquet_row_group_size=row_group_size,
+        columnar_emit_sequence_rows=True,
+        columnar_emit_activation_rows=True,
+        columnar_emit_activation_copy_rows=True,
+        columnar_activation_copy_model_id="model-a",
+        columnar_activation_copy_layer="9-source-a",
+        columnar_activation_copy_creator_id="creator-a",
+        columnar_activation_copy_created_at="2026-01-02T03:04:05",
+        columnar_activation_copy_id_prefix="act",
+        feature_statistics_backend="arrow",
+        logits_histogram_backend="arrow",
+        activation_histogram_backend="torch",
+    )
+    assert cfg.columnar_artifact_dir is not None
+
+    SaeVisRunner(cfg).run(
+        encoder=cast(SAE[Any], _FakeEncoder()),
+        model=cast(
+            HookedSAETransformer,
+            SimpleNamespace(
+                W_U=torch.tensor([[1.0]], dtype=torch.float32),
+                tokenizer=SimpleNamespace(
+                    convert_ids_to_tokens=lambda token_ids: [
+                        f"tok_{token_id}" for token_id in token_ids
+                    ],
+                    pad_token_id=0,
+                ),
+            ),
+        ),
+        tokens=torch.tensor([[7, 0]], dtype=torch.long),
+    )
+
+    pyarrow_parquet = importlib.import_module("pyarrow.parquet")
+    written = sorted(cfg.columnar_artifact_dir.rglob("*.parquet"))
+    assert written, "expected the columnar run to emit parquet artifacts"
+
+    for table_path in written:
+        metadata = pyarrow_parquet.ParquetFile(table_path).metadata
+        if row_group_size is None:
+            assert (
+                metadata.num_row_groups == 1
+            ), f"{table_path.name} should keep the pyarrow default of one row group"
+            continue
+        largest = max(
+            metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)
+        )
+        assert largest <= row_group_size, (
+            f"{table_path.name} has a {largest}-row group, above the requested {row_group_size}"
+        )
+
+
+def test_SaeVisRunner_row_group_size_defaults_to_a_streamable_value() -> None:
+    """Default-on for the same reason as the page index: unfixable without regenerating."""
+    assert DEFAULT_PARQUET_ROW_GROUP_SIZE == 4096
+    assert (
+        SaeVisConfig(
+            hook_point="blocks.0.hook_resid_pre", features=[0]
+        ).columnar_parquet_row_group_size
+        == DEFAULT_PARQUET_ROW_GROUP_SIZE
+    )
+    assert (
+        NeuronpediaRunnerConfig(
+            sae_set="s", sae_path="p", outputs_dir="o"
+        ).columnar_parquet_row_group_size
+        == DEFAULT_PARQUET_ROW_GROUP_SIZE
+    )
+
+
+def test_row_group_size_is_split_out_of_the_ParquetWriter_constructor_kwargs() -> None:
+    """`row_group_size` is a per-write argument; passing it to ParquetWriter(...) raises.
+
+    Regression guard: the streamed-batch writer path constructs the writer once and writes many
+    batches, so the two kwarg sets genuinely differ and cannot share one dict.
+    """
+    runner = SaeVisRunner(
+        SaeVisConfig(
+            hook_point="blocks.0.hook_resid_pre",
+            features=[0],
+            columnar_artifact_format="parquet",
+            columnar_parquet_row_group_size=4096,
+        )
+    )
+    assert runner._parquet_writer_kwargs() == {
+        "write_page_index": True,
+        "row_group_size": 4096,
+    }
+    assert runner._parquet_open_kwargs() == {"write_page_index": True}
+    assert runner._parquet_write_kwargs() == {"row_group_size": 4096}
+
+    disabled = SaeVisRunner(
+        SaeVisConfig(
+            hook_point="blocks.0.hook_resid_pre",
+            features=[0],
+            columnar_artifact_format="parquet",
+            columnar_parquet_row_group_size=None,
+        )
+    )
+    assert "row_group_size" not in disabled._parquet_writer_kwargs()
+    assert disabled._parquet_write_kwargs() == {}

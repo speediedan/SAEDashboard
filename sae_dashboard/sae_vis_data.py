@@ -11,6 +11,7 @@ from transformer_lens import HookedTransformer
 
 from sae_dashboard.feature_data import FeatureData
 from sae_dashboard.layout import SaeVisLayoutConfig
+from sae_dashboard.neuronpedia.neuronpedia_runner_config import DEFAULT_PARQUET_ROW_GROUP_SIZE
 from sae_dashboard.utils_fns import FeatureStatistics
 
 SAE_CONFIG_DICT = dict(
@@ -45,6 +46,7 @@ reduce peak model-forward memory without changing the dashboard minibatch shape.
     columnar_artifact_dir="Root directory for columnar bundle output when dashboard_output_format is columnar.",
     columnar_artifact_format="On-disk format for columnar tables: Arrow IPC or Parquet.",
     columnar_write_page_index="Write a Parquet page index. Enables page-granular range reads for HTTP-streamed artifacts; cannot be added later without regenerating.",
+    columnar_parquet_row_group_size="Rows per Parquet row group. Readers prune at ROW GROUP granularity, so one row group per file makes a single-feature read cost the whole file; like the page index this is fixed at write time. None keeps the pyarrow default (one row group per written table).",
     columnar_emit_activation_rows="Whether to emit semantic activation_rows tables alongside sequence_rows in columnar mode.",
     columnar_emit_activation_copy_rows="Whether to emit Neuronpedia Activation COPY-shaped activation_copy_rows in columnar mode.",
     columnar_activation_copy_model_id="Optional modelId override for activation_copy_rows payloads.",
@@ -140,6 +142,7 @@ class SaeVisConfig:
     columnar_artifact_dir: Path | None = None
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
     columnar_write_page_index: bool = True
+    columnar_parquet_row_group_size: int | None = DEFAULT_PARQUET_ROW_GROUP_SIZE
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = False
     columnar_emit_activation_copy_rows: bool = False

@@ -2,6 +2,27 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
+#: Rows per Parquet row group for columnar artifacts.
+#:
+#: Parquet readers prune at ROW GROUP granularity, not page granularity, so a file written as a
+#: single row group costs a reader the whole file to fetch one feature -- a page index does not
+#: change that. Measured on a published 4,096-feature dashboard artifact (35.6 MiB, ~34 rows per
+#: feature), fetching every column one feature needs:
+#:
+#:   row_group_size   file size vs 1 row group   bytes read for one feature
+#:   1 (previous)     --                         35.6 MiB  (100%)
+#:   1024             +20.3%                      0.82 MiB   (1.9%)
+#:   4096             +6.0%                       1.30 MiB   (3.4%)
+#:   8192             -9.8%                       2.30 MiB   (7.2%)
+#:
+#: 4096 sits in the flat part of that curve for both 4,096- and 16,384-feature artifacts (the
+#: optimum moves only as sqrt(features per file), so it is insensitive to batch size). Larger row
+#: groups actually SHRINK the file, because a single 139k-row group defeats dictionary encoding.
+#:
+#: Like ``write_page_index``, this is fixed at write time: it cannot be changed without rewriting
+#: the file.
+DEFAULT_PARQUET_ROW_GROUP_SIZE = 4096
+
 DEFAULT_SPARSITY_THRESHOLD = -6
 DEFAULT_PROMPT_BUCKET_SCALE_LIMIT = 4.0
 DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT = 4.0
@@ -174,6 +195,7 @@ class NeuronpediaRunnerConfig:
     dashboard_output_format: Literal["legacy_json", "columnar"] = "legacy_json"
     columnar_artifact_format: Literal["arrow", "parquet"] = "arrow"
     columnar_write_page_index: bool = True
+    columnar_parquet_row_group_size: Optional[int] = DEFAULT_PARQUET_ROW_GROUP_SIZE
     columnar_emit_sequence_rows: bool = False
     columnar_emit_activation_rows: bool = True
     columnar_emit_activation_copy_rows: bool = False

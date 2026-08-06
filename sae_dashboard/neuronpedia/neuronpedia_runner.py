@@ -57,6 +57,7 @@ from sae_dashboard.neuronpedia.neuronpedia_export import (
     resolve_creator_id,
 )
 from sae_dashboard.neuronpedia.neuronpedia_runner_config import (
+    DEFAULT_PARQUET_ROW_GROUP_SIZE,
     DEFAULT_PROMPT_BATCH_SIZE_ROUND_TO,
     DEFAULT_PROMPT_BUCKET_SCALE_LIMIT,
     DEFAULT_PROMPT_PRIMARY_ACTS_SCALE_LIMIT,
@@ -2136,6 +2137,7 @@ class NeuronpediaRunner:
                         columnar_artifact_dir=output_root,
                         columnar_artifact_format=self.cfg.columnar_artifact_format,
                         columnar_write_page_index=self.cfg.columnar_write_page_index,
+                        columnar_parquet_row_group_size=self.cfg.columnar_parquet_row_group_size,
                         columnar_emit_sequence_rows=self.cfg.columnar_emit_sequence_rows,
                         columnar_emit_activation_rows=self.cfg.columnar_emit_activation_rows,
                         columnar_emit_activation_copy_rows=self.cfg.columnar_emit_activation_copy_rows,
@@ -2760,6 +2762,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--columnar-parquet-row-group-size",
+        type=int,
+        default=DEFAULT_PARQUET_ROW_GROUP_SIZE,
+        help=(
+            f"Rows per Parquet row group (default: {DEFAULT_PARQUET_ROW_GROUP_SIZE}). Readers prune "
+            "at ROW GROUP granularity, so one row group per file makes fetching a single feature "
+            "cost the whole file -- a page index does not change that. Like the page index it is "
+            "fixed at write time. Pass 0 for the pyarrow default (a single row group)."
+        ),
+    )
+    parser.add_argument(
         "--columnar-emit-sequence-rows",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -3120,6 +3133,7 @@ def main():
         dashboard_output_format=args.dashboard_output_format,
         columnar_artifact_format=args.columnar_artifact_format,
         columnar_write_page_index=args.columnar_write_page_index,
+        columnar_parquet_row_group_size=args.columnar_parquet_row_group_size or None,
         columnar_emit_sequence_rows=args.columnar_emit_sequence_rows,
         columnar_emit_activation_rows=args.columnar_emit_activation_rows,
         overlap_batch_packaging=args.overlap_batch_packaging,

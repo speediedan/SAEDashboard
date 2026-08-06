@@ -269,8 +269,35 @@ class SaeVisRunner:
         existing file without rewriting it, so a corpus generated without one can only be fixed by
         regenerating it. It costs ~0.01% in file size and is what lets a reader range-read
         individual pages over HTTP instead of fetching whole row groups.
+
+        ``row_group_size`` is the same kind of decision and matters MORE. Readers prune at row-group
+        granularity, so a file written as one row group costs a reader the whole file to fetch a
+        single feature -- the page index does not rescue that. See
+        ``DEFAULT_PARQUET_ROW_GROUP_SIZE`` for the measurements.
         """
-        return {"write_page_index": self.cfg.columnar_write_page_index}
+        kwargs: dict[str, Any] = {"write_page_index": self.cfg.columnar_write_page_index}
+        row_group_size = getattr(self.cfg, "columnar_parquet_row_group_size", None)
+        if row_group_size:
+            kwargs["row_group_size"] = int(row_group_size)
+        return kwargs
+
+    def _parquet_open_kwargs(self) -> dict[str, Any]:
+        """The subset valid on ``ParquetWriter(...)`` construction.
+
+        ``row_group_size`` is NOT accepted there -- it is a per-write argument -- so passing the
+        full kwarg set to the constructor raises. Split rather than special-cased at each call site
+        so a future writer option lands in one place.
+        """
+        return {
+            key: value
+            for key, value in self._parquet_writer_kwargs().items()
+            if key != "row_group_size"
+        }
+
+    def _parquet_write_kwargs(self) -> dict[str, Any]:
+        """The subset valid on ``ParquetWriter.write_table`` / ``write_batch``."""
+        kwargs = self._parquet_writer_kwargs()
+        return {"row_group_size": kwargs["row_group_size"]} if "row_group_size" in kwargs else {}
 
     @property
     def _preserved_legacy_enabled(self) -> bool:
@@ -338,11 +365,12 @@ class SaeVisRunner:
                         writer.write_batch(batch)
                         row_count += int(batch.num_rows)
         else:
+            write_kwargs = self._parquet_write_kwargs()
             with pyarrow_parquet.ParquetWriter(
-                str(path), schema, **self._parquet_writer_kwargs()
+                str(path), schema, **self._parquet_open_kwargs()
             ) as writer:
                 for batch in batches:
-                    writer.write_batch(batch)
+                    writer.write_batch(batch, **write_kwargs)
                     row_count += int(batch.num_rows)
         return row_count
 
