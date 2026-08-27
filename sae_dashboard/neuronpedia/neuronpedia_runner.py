@@ -149,6 +149,40 @@ def get_sae_loader(loader_name: str):
     )
 
 
+def resolve_capture_hook_name(metadata: Any, use_huggingface: bool) -> str:
+    """The hook the runner should capture at, preferring the SAE's own module path on the HF path.
+
+    ``hook_name`` is a TransformerLens *convention*, and for some releases it names a different tensor
+    from the one the SAE was trained on: a Gemma Scope 2 transcoder declares
+    ``pre_feedforward_layernorm.output``, the norm's output, while TransformerLens fires
+    ``hook_mlp_in`` on the residual *before* that norm. ``hf_hook_name`` is carried through from the
+    artifact's own config, so where it exists it is authoritative and needs no name translation.
+
+    Additive by construction: only consulted on the HuggingFace path, and only when the loader
+    published the field, so releases that publish nothing keep the TransformerLens name.
+    """
+
+    def _get(key: str) -> Any:
+        if hasattr(metadata, key):
+            return getattr(metadata, key)
+        if isinstance(metadata, dict):
+            return metadata.get(key)
+        return None
+
+    hook_name = _get("hook_name")
+    if not use_huggingface:
+        return hook_name
+    hf_hook_name = _get("hf_hook_name")
+    if not hf_hook_name:
+        return hook_name
+    if hf_hook_name != hook_name:
+        print(
+            f"Capturing at the SAE's declared module path {hf_hook_name!r} rather than its "
+            f"TransformerLens hook name {hook_name!r} (--huggingface)."
+        )
+    return hf_hook_name
+
+
 class NeuronpediaRunner:
     def __init__(
         self,
@@ -771,10 +805,10 @@ class NeuronpediaRunner:
     def _initialize_model(self):
         """Initialize the transformer model."""
         self._log_resource_snapshot("pre_model_init")
-        if hasattr(self.sae.cfg.metadata, "hook_name"):
-            self.hook_name = self.sae.cfg.metadata.hook_name  # type: ignore
-        else:
-            self.hook_name = self.sae.cfg.metadata["hook_name"]  # type: ignore
+        self.hook_name = resolve_capture_hook_name(
+            self.sae.cfg.metadata,  # type: ignore[arg-type]
+            use_huggingface=self.cfg.use_huggingface,
+        )
 
         if self.cfg.model_wrapper == "bridge":
             from sae_lens.analysis.compat import has_transformer_bridge
