@@ -153,6 +153,11 @@ class NeuronpediaRunnerConfig:
     free_unused_model_layers: bool = False
 
     hf_model_path: Optional[str] = None
+    # Name the capture location explicitly, overriding the hook name the SAE declares. Needed where
+    # an SAE's declared TransformerLens name denotes a different tensor from the one it was trained
+    # on; see `resolve_capture_hook_name`. Unset means "trust the SAE's metadata", which is correct
+    # for every release whose declared name is accurate.
+    capture_hook_name: Optional[str] = None
     model_wrapper: str = "hooked"
     bridge_enable_compatibility_mode: bool = True
     bridge_compatibility_mode_kwargs: dict[str, Any] = field(

@@ -61,3 +61,47 @@ def test_no_announcement_when_the_names_agree(metadata_factory, capsys):
     meta = metadata_factory(hook_name=HF_NAME, hf_hook_name=HF_NAME)
     resolve_capture_hook_name(meta, use_huggingface=True)
     assert capsys.readouterr().out == ""
+
+
+class TestExplicitCaptureOverride:
+    """`capture_hook_name` names the capture location outright.
+
+    It exists because some SAEs declare a TransformerLens name for a tensor other than the one they
+    were trained on, and on the TransformerBridge the correct name (`blocks.{i}.ln2.hook_out`) is one
+    no SAE metadata field carries.
+    """
+
+    BRIDGE_NAME = "blocks.0.ln2.hook_out"
+
+    def test_override_wins_over_the_declared_name(self, metadata_factory):
+        meta = metadata_factory(hook_name=TL_NAME, hf_hook_name=HF_NAME)
+        assert (
+            resolve_capture_hook_name(meta, use_huggingface=False, capture_hook_name=self.BRIDGE_NAME)
+            == self.BRIDGE_NAME
+        )
+
+    def test_override_wins_on_the_huggingface_path_too(self, metadata_factory):
+        """Otherwise the two mechanisms would disagree depending on an unrelated flag."""
+        meta = metadata_factory(hook_name=TL_NAME, hf_hook_name=HF_NAME)
+        assert (
+            resolve_capture_hook_name(meta, use_huggingface=True, capture_hook_name=self.BRIDGE_NAME)
+            == self.BRIDGE_NAME
+        )
+
+    def test_unset_override_changes_nothing(self, metadata_factory):
+        meta = metadata_factory(hook_name=TL_NAME, hf_hook_name=HF_NAME)
+        assert resolve_capture_hook_name(meta, use_huggingface=False, capture_hook_name=None) == TL_NAME
+
+    def test_override_is_announced_with_both_names(self, metadata_factory, capsys):
+        meta = metadata_factory(hook_name=TL_NAME, hf_hook_name=HF_NAME)
+        resolve_capture_hook_name(meta, use_huggingface=False, capture_hook_name=self.BRIDGE_NAME)
+        out = capsys.readouterr().out
+        assert self.BRIDGE_NAME in out and TL_NAME in out
+        # The label vocabulary cannot express every capture location, so the run log has to say that
+        # the source record's `hook_point` and the capture location may read differently.
+        assert "label" in out
+
+    def test_no_announcement_when_the_override_matches(self, metadata_factory, capsys):
+        meta = metadata_factory(hook_name=TL_NAME, hf_hook_name=HF_NAME)
+        resolve_capture_hook_name(meta, use_huggingface=False, capture_hook_name=TL_NAME)
+        assert capsys.readouterr().out == ""

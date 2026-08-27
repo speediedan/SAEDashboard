@@ -149,8 +149,22 @@ def get_sae_loader(loader_name: str):
     )
 
 
-def resolve_capture_hook_name(metadata: Any, use_huggingface: bool) -> str:
-    """The hook the runner should capture at, preferring the SAE's own module path on the HF path.
+def resolve_capture_hook_name(
+    metadata: Any, use_huggingface: bool, capture_hook_name: str | None = None
+) -> str:
+    """The hook the runner should capture at.
+
+    ``capture_hook_name`` wins over everything when set: it is how an operator names the capture
+    location explicitly, which is the only way to reach a tensor whose TransformerLens name the SAE
+    does not declare. Gemma Scope 2 transcoders are the motivating case: they are trained on the
+    block norm's output, which a TransformerBridge names ``blocks.{i}.ln2.hook_out`` (equivalently
+    ``blocks.{i}.mlp.hook_in``), while their metadata declares ``blocks.{i}.hook_mlp_in``, the
+    residual *before* that norm.
+
+    Deliberately an explicit setting rather than a translation from ``hf_hook_name``: deriving a
+    TransformerLens name from a module path would mean carrying yet another architecture-keyed
+    mapping table, and divergence between such tables is the defect this setting exists to work
+    around.
 
     ``hook_name`` is a TransformerLens *convention*, and for some releases it names a different tensor
     from the one the SAE was trained on: a Gemma Scope 2 transcoder declares
@@ -170,6 +184,15 @@ def resolve_capture_hook_name(metadata: Any, use_huggingface: bool) -> str:
         return None
 
     hook_name = _get("hook_name")
+    if capture_hook_name:
+        if capture_hook_name != hook_name:
+            print(
+                f"Capturing at {capture_hook_name!r} (explicitly configured) rather than the SAE's "
+                f"declared hook name {hook_name!r}. The Neuronpedia source record still labels this "
+                f"source with its configured `hook_point`, whose vocabulary cannot express every "
+                f"capture location, so the label and the capture location may read differently."
+            )
+        return capture_hook_name
     if not use_huggingface:
         return hook_name
     hf_hook_name = _get("hf_hook_name")
@@ -808,6 +831,7 @@ class NeuronpediaRunner:
         self.hook_name = resolve_capture_hook_name(
             self.sae.cfg.metadata,  # type: ignore[arg-type]
             use_huggingface=self.cfg.use_huggingface,
+            capture_hook_name=self.cfg.capture_hook_name,
         )
 
         if self.cfg.model_wrapper == "bridge":
@@ -2951,6 +2975,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--capture-hook-name",
+        type=str,
+        default=None,
+        help="Capture activations at this hook instead of the one the SAE's metadata declares. Use "
+        "where the declared TransformerLens name denotes a different tensor from the one the SAE was "
+        "trained on (e.g. 'blocks.5.ln2.hook_out' for a Gemma Scope 2 transcoder on a TransformerBridge, "
+        "whose metadata declares the pre-norm 'blocks.5.hook_mlp_in'). Leave unset to trust the SAE.",
+    )
+    parser.add_argument(
         "--huggingface",
         action="store_true",
         help="Use HuggingFace Transformers directly instead of TransformerLens. "
@@ -3184,6 +3217,7 @@ def main():
         clt_weights_filename=args.clt_weights_filename,
         sae_converter_name=args.sae_converter_name,
         use_huggingface=args.huggingface,
+        capture_hook_name=args.capture_hook_name,
         layer=args.layer_num,
         ignore_high_activation_norm_multiple=args.ignore_high_activation_norm_multiple,
         free_unused_model_layers=args.free_unused_model_layers,
