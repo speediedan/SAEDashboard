@@ -9,7 +9,7 @@
   "comparison_tolerances": {
     "detached_baseline_vs_current_legacy": {
       "activation_rows_max_abs_delta": 0,
-      "generation_throughput_relative_tolerance": 0.10,
+      "generation_throughput_relative_tolerance": 0.1,
       "import_wall_relative_tolerance": 0.15
     }
   },
@@ -24,7 +24,10 @@
         "mode": "legacy_jsonl",
         "split": "train",
         "context_size": 319,
-        "required_files": ["train.jsonl", "sae_lens.json"]
+        "required_files": [
+          "train.jsonl",
+          "sae_lens.json"
+        ]
       },
       "legacy_contract": {
         "runner_implementation": "legacy",
@@ -49,7 +52,10 @@
         "mode": "legacy_jsonl",
         "split": "train",
         "context_size": 128,
-        "required_files": ["train.jsonl", "sae_lens.json"]
+        "required_files": [
+          "train.jsonl",
+          "sae_lens.json"
+        ]
       },
       "legacy_contract": {
         "runner_implementation": "legacy",
@@ -64,5 +70,15 @@
         "imported_activation_rows": 137331
       }
     }
+  },
+  "interpretation": {
+    "what_this_contract_is": "A REPRODUCIBILITY contract, not a correctness one. It asserts that current code reproduces the preserved legacy behaviour exactly. As of 2026-08-27 that behaviour is known to include a capture defect, so a passing run asserts we reproduce the defect faithfully. Do not cite a green result as evidence that the captured tensor is correct.",
+    "activation_rows_max_abs_delta": "KEEP at 0. Still correct: no scenario here sets `capture_hook_name`, so the legacy path resolves the declared hook as before. Exact equality remains the right assertion because nothing about this path changed.",
+    "imported_activation_rows": "KEEP as regression anchors; QUARANTINE the reading. These counts were produced at `blocks.{N}.hook_mlp_in`, which is not the tensor these transcoders were trained on. Valid for detecting drift in the legacy path, invalid as any statement about correct data.",
+    "generation_throughput_relative_tolerance": "KEEP as a performance-regression guard. STRUCTURALLY BLIND to capture location: wall time is dominated by forward passes, which the hook does not change. Measured 2026-08-27, two layers whose stored output differed by 27% finished within 7 ms of each other. `throughput was within tolerance` is therefore never evidence about which tensor was captured.",
+    "import_wall_relative_tolerance": "KEEP for the legacy path. INSUFFICIENT for a corrected-hook corpus: import wall tracks row count, and a corrected layer 0 carries about 37% more rows. A corrected path needs its own baseline rather than this tolerance stretched over it.",
+    "preserved_baseline_lineage": "DEFECT-BEARING ON PURPOSE. `saelens 3eea6552` predates the capture fix. Do not advance these pins to make a failing test pass: the pins are what make the baseline reproducible, and moving them silently redefines what is being compared.",
+    "trip_hazard_capture_hook_name": "`resolve_capture_hook_name` is called in NeuronpediaRunner.__init__, ABOVE the legacy/columnar split, so it governs the legacy path too. This contract is safe today only because no scenario sets `capture_hook_name`, i.e. by absence rather than by design. If one ever does, every stored value here invalidates at once, and the failure will present as a row-count regression rather than as a changed capture location. Look here first.",
+    "acceptance_check_lives_elsewhere": "Implied L0 is the absolute check for capture location, and it deliberately does NOT belong in this file: the preserved baseline is defective by design and would fail its own gate on every run. It belongs at the generation acceptance gate. See interpretune docs/verifying_dashboard_generation.md."
   }
 }
